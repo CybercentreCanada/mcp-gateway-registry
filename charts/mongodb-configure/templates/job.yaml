@@ -9,7 +9,7 @@ spec:
     spec:
       initContainers:
         - name: wait-for-mongodb
-          image: public.ecr.aws/docker/library/python:3.13-slim
+          image: {{ .Values.pythonImage | default "public.ecr.aws/docker/library/python:3.13-slim" }}
           command: ['sh', '-c']
           envFrom:
             - secretRef:
@@ -27,7 +27,7 @@ spec:
               subPath: wait.py
       containers:
         - name: job
-          image: public.ecr.aws/docker/library/python:3.13-slim
+          image: {{ .Values.pythonImage | default "public.ecr.aws/docker/library/python:3.13-slim" }}
           command: ["/bin/sh", "-c"]
           args: [
             "pip install --no-cache-dir pyyaml motor && python /app/script.py"
