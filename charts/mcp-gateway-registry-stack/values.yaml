@@ -66,6 +66,9 @@ global:
     scheme: internet-facing
     className: alb
     tls: true
+    # Name of the TLS secret for nginx ingress. When set, emits a spec.tls
+    # stanza referencing this secret. Has no effect with className: alb.
+    tlsSecretName: ""
     # Routing mode: "subdomain" or "path"
     # - subdomain: mcpregistry.domain.com
     # - path:      domain.com/registry
@@ -175,8 +178,13 @@ mongodb-kubernetes:
       installClusterRole: false
     nodeSelector: {}
 # MongoDB configuration
+# operator.enabled controls whether the MongoDBCommunity CR (mongodb-cluster.yaml)
+# is rendered. Set true when using the mongodb-kubernetes Community Operator subchart;
+# set false when using the Bitnami mongodb subchart (standalone Deployment).
 mongodb:
   enabled: true
+  operator:
+    enabled: true # Set to false when using the Bitnami mongodb subchart
   user: &mongoUser my-user # username for MongoDB
   password: &mongoPassword "" # Set the password for the MongoDB user or a random one is generated
   database: &mongoDatabase mcp_registry
@@ -509,7 +517,10 @@ registry:
     passwordExistingSecretKey: "PF_ADMIN_PASS"
   ingress:
     enabled: true
-    ingressClassName: alb
+    # Use `className` (not `ingressClassName`) — the registry subchart template
+    # reads .Values.ingress.className; `ingressClassName` is silently ignored.
+    # Leave empty to inherit global.ingress.className (set per-environment).
+    className: ""
   nodeSelector: {}
   # Extra env vars / envFrom sources appended to the registry container.
   # See charts/registry/values.yaml for validation rules, reserved names,

@@ -487,7 +487,9 @@ resources:
 # Ingress configuration
 ingress:
   enabled: false
-  className: alb
+  # Leave className empty to inherit global.ingress.className (set per-environment).
+  # Explicit override only when this chart is deployed standalone without the stack.
+  className: ""
   # ALB scheme for this specific ingress. Leave empty to fall back to
   # global.ingress.scheme (chart-level default, or stack-level override
   # when deployed via mcp-gateway-registry-stack), and finally to
@@ -496,6 +498,9 @@ ingress:
   hostname: ""
   annotations: {}
   tls: false
+  # Name of the TLS secret for nginx ingress. When set, emits a spec.tls
+  # stanza referencing this secret. Has no effect with className: alb.
+  tlsSecretName: ""
   # Routing mode: "subdomain" or "path"
   # - subdomain: mcpregistry.domain.com
   # - path: domain.com/registry (configurable via path setting)
