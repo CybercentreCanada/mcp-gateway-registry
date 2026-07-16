@@ -6,10 +6,14 @@ global:
   # Per-subchart overrides live under `<subchart>.image` (see auth-server.image,
   # registry.image, mcpgw.image below) and take precedence when set.
   image:
-    # Container registry (host + optional namespace), e.g. "public.ecr.aws/p3v1o3c6"
-    registry: public.ecr.aws/p3v1o3c6
-    tag: 1.26.0
-    pullPolicy: IfNotPresent
+    # Container registry (host + optional namespace).
+    # Default points to the internal ACR mirror maintained by the pb-dev team.
+    # Override per-environment in your values file if using a different registry.
+    registry: uchimera.azurecr.io/mcpgateway
+    # Using "latest" so deployments always use the most recently synced image.
+    # Pin to a specific tag in your environment values for production stability.
+    tag: latest
+    pullPolicy: Always
   # When installing chart from repository, add --set global.chartVersion=$(git rev-parse HEAD) to add the git hash to a configmap for debugging
   chartVersion:
   # Domain configuration - update this to your actual domain
@@ -209,10 +213,10 @@ keycloak:
       allowInsecureImages: true
   auth:
     adminUser: *keycloakAdmin
-    existingSecret: '{{ .Release.Name }}-keycloak'
+    existingSecret: "{{ .Release.Name }}-keycloak"
   postgresql:
     auth:
-      existingSecret: '{{ .Release.Name }}-keycloak-postgresql'
+      existingSecret: "{{ .Release.Name }}-keycloak-postgresql"
     image:
       registry: docker.io
       repository: bitnamilegacy/postgresql

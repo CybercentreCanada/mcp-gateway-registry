@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: setup-mongodb
-  namespace: {{ .Release.Namespace | quote }}
+  namespace: { { .Release.Namespace | quote } }
 data:
   registry-admins.json: |
     {
@@ -41,6 +41,9 @@ data:
         "toggle_service": ["all"],
         "modify_service": ["all"],
         "delete_service": ["all"]
+        {{- if .Values.publishSkillEnabled }},
+        "publish_skill": ["all"]
+        {{- end }}
       }
     }
 
@@ -69,7 +72,8 @@ data:
         else:
             uri = f"mongodb://{USERNAME}:{PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/?authMechanism=SCRAM-SHA-256&authSource=admin"
             display_host = f"{MONGO_HOST}:{MONGO_PORT}"
-            skip_replset_check = False
+            # Empty replica set means standalone MongoDB; skip replSetGetStatus.
+            skip_replset_check = not REPLICA_SET
 
         client = None
         while True:
@@ -143,6 +147,9 @@ data:
         "toggle_service": ["all"],
         "modify_service": ["all"],
         "delete_service": ["all"]
+        {{- if .Values.publishSkillEnabled }},
+        "publish_skill": ["all"]
+        {{- end }}
       }
     }
 
@@ -487,6 +494,11 @@ data:
 
             # Connect with motor for async operations
             connection_string = f"mongodb://{config['username']}:{config['password']}@{config['host']}:{config['port']}/{config['database']}?replicaSet={config['replicaset']}&authMechanism=SCRAM-SHA-256&authSource=admin"
+        elif not config["replicaset"]:
+            # Standalone MongoDB (no replica set configured). Skip replSetInitiate
+            # and connect without a replicaSet parameter.
+            logger.info("Skipping replica-set initialization (standalone MongoDB, no replica set configured)")
+            connection_string = f"mongodb://{config['username']}:{config['password']}@{config['host']}:{config['port']}/{config['database']}?authMechanism=SCRAM-SHA-256&authSource=admin"
         try:
             client = AsyncIOMotorClient(
                 connection_string,
