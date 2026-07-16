@@ -488,17 +488,17 @@ data:
             # already configured by the provider.
             logger.info("Skipping replica-set initialization (connection string override in use)")
             connection_string = override
+        elif not config["replicaset"]:
+            # Standalone MongoDB (no replica set configured). Skip replSetInitiate
+            # and connect without a replicaSet parameter.
+            logger.info("Skipping replica-set initialization (standalone MongoDB, no replica set configured)")
+            connection_string = f"mongodb://{config['username']}:{config['password']}@{config['host']}:{config['port']}/{config['database']}?authMechanism=SCRAM-SHA-256&authSource=admin"
         else:
             # Initialize replica set (synchronous)
             _initialize_replica_set(config["host"], config["port"], config["username"], config["password"])
 
             # Connect with motor for async operations
             connection_string = f"mongodb://{config['username']}:{config['password']}@{config['host']}:{config['port']}/{config['database']}?replicaSet={config['replicaset']}&authMechanism=SCRAM-SHA-256&authSource=admin"
-        elif not config["replicaset"]:
-            # Standalone MongoDB (no replica set configured). Skip replSetInitiate
-            # and connect without a replicaSet parameter.
-            logger.info("Skipping replica-set initialization (standalone MongoDB, no replica set configured)")
-            connection_string = f"mongodb://{config['username']}:{config['password']}@{config['host']}:{config['port']}/{config['database']}?authMechanism=SCRAM-SHA-256&authSource=admin"
         try:
             client = AsyncIOMotorClient(
                 connection_string,

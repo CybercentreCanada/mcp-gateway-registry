@@ -14,10 +14,19 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ $existingSecret | default "mongo-credentials" }}
+          env:
+            - name: HOME
+              value: /tmp
+            - name: PIP_NO_CACHE_DIR
+              value: "1"
+            {{- if .Values.pipIndexUrl }}
+            - name: PIP_INDEX_URL
+              value: {{ .Values.pipIndexUrl | quote }}
+            {{- end }}
           args:
             - |
               echo "Installing pymongo..."
-              pip install --no-cache-dir pymongo
+              pip install pymongo
 
               echo "Waiting for MongoDB replica set to be ready..."
               python3 /app/wait.py
@@ -35,6 +44,15 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ $existingSecret | default "mongo-credentials" }}
+          env:
+            - name: HOME
+              value: /tmp
+            - name: PIP_NO_CACHE_DIR
+              value: "1"
+            {{- if .Values.pipIndexUrl }}
+            - name: PIP_INDEX_URL
+              value: {{ .Values.pipIndexUrl | quote }}
+            {{- end }}
           volumeMounts:
             - mountPath: /app/script.py
               name: script
