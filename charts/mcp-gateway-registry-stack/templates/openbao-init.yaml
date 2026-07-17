@@ -193,9 +193,11 @@ spec:
                       f"{BAO_ADDR}/v1/{path}", data=data, headers=headers, method=method)
                   try:
                       resp = urllib.request.urlopen(req, timeout=10)
-                      return json.loads(resp.read())
+                      raw = resp.read()
+                      return json.loads(raw) if raw else {}  # 204 No Content → empty body
                   except urllib.error.HTTPError as e:
-                      return json.loads(e.read() or b"{}")
+                      raw = e.read()
+                      return json.loads(raw) if raw else {}
 
               def k8s(method, path, body=None):
                   ctx = ssl.create_default_context(cafile=SA_CA_FILE)
@@ -208,10 +210,11 @@ spec:
                       f"{K8S_HOST}{path}", data=data, headers=headers, method=method)
                   try:
                       resp = urllib.request.urlopen(req, context=ctx, timeout=10)
-                      return json.loads(resp.read())
+                      raw = resp.read()
+                      return json.loads(raw) if raw else {}
                   except urllib.error.HTTPError as e:
-                      txt = e.read() or b"{}"
-                      return {"_status": e.code, **json.loads(txt)}
+                      raw = e.read()
+                      return {"_status": e.code, **(json.loads(raw) if raw else {})}
 
               def k8s_apply(path, body):
                   """Create or update a K8s resource."""
