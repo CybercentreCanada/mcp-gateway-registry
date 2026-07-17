@@ -24,7 +24,16 @@ being deployed by this stack.
 {{- if .Values.openbao }}
   {{- $openbaoEnabled = .Values.openbao.enabled | default false }}
 {{- end }}
-{{- if and $egressEnabled $openbaoEnabled }}
+{{- /*
+  global.openbaoInitEnabled (default true) provides an escape hatch for
+  air-gapped clusters where the init job image cannot apt-install curl/jq/kubectl.
+  Set to false to skip only the init job; the OpenBao StatefulSet still deploys.
+*/ -}}
+{{- $initEnabled := true }}
+{{- if hasKey .Values.global "openbaoInitEnabled" }}
+  {{- $initEnabled = .Values.global.openbaoInitEnabled }}
+{{- end }}
+{{- if and $egressEnabled $openbaoEnabled $initEnabled }}
 {{- $ns := .Release.Namespace }}
 {{- $kvMount := "secret" }}
 {{- $egressPrefix := "mcp/egress" }}
