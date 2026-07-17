@@ -127,7 +127,7 @@ spec:
           # parses the init JSON robustly; kubectl writes the keys Secret with
           # proper k8s TLS (busybox wget in the openbao image cannot verify the
           # API cert -- the original failure mode).
-          image: public.ecr.aws/docker/library/python:3.14-slim
+          image: {{ .Values.global.openbaoInitImage | default "public.ecr.aws/docker/library/python:3.14-slim" }}
           env:
             - name: BAO_ADDR
               value: "http://{{ include "mcp-gateway-registry-stack.openbaoServiceHost" . }}:8200"

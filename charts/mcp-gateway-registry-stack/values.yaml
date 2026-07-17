@@ -205,6 +205,9 @@ mongodb:
 # Keycloak configuration
 # Set create: true to deploy Keycloak as part of this stack
 # Set create: false to use an external Keycloak instance
+# Image used by the openbao-init Job. Override when public.ecr.aws is not reachable.
+# openbaoInitImage: "public.ecr.aws/docker/library/python:3.14-slim"
+
 # NOTE: When using Entra (global.authProvider.type: entra), set create: false
 keycloak:
   create: true # Deploy Keycloak in this stack (set to false for external Keycloak or Entra)
