@@ -42,9 +42,6 @@ data:
         "toggle_service": ["all"],
         "modify_service": ["all"],
         "delete_service": ["all"]
-        {{- if .Values.publishSkillEnabled }},
-        "publish_skill": ["all"]
-        {{- end }}
       }
     }
 
@@ -149,9 +146,6 @@ data:
         "toggle_service": ["all"],
         "modify_service": ["all"],
         "delete_service": ["all"]
-        {{- if .Values.publishSkillEnabled }},
-        "publish_skill": ["all"]
-        {{- end }}
       }
     }
 
