@@ -12,8 +12,12 @@ from abc import (
     abstractmethod,
 )
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +260,7 @@ class LiteLLMClient(EmbeddingsClient):
 
         try:
             # LiteLLM expects 'input' parameter
-            kwargs = {"model": self.model_name, "input": texts}
+            kwargs: dict[str, Any] = {"model": self.model_name, "input": texts}
 
             if self.api_base:
                 kwargs["api_base"] = self.api_base

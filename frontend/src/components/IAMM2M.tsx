@@ -27,6 +27,12 @@ import {
 import DeleteConfirmation from './DeleteConfirmation';
 import ProviderBadge from './iam/ProviderBadge';
 import ListStateBoundary from './iam/ListStateBoundary';
+import RateLimitGroupsEditor from './iam/RateLimitGroupsEditor';
+import {
+  useRateLimitDefinitions,
+  useRateLimitMemberships,
+  CALLER_ENTITY_TYPE,
+} from '../hooks/useRateLimits';
 import { extractErrorDetail as extractDetail } from '../utils/apiError';
 
 interface IAMM2MProps {
@@ -52,6 +58,17 @@ const CLIENT_ID_REGEX = /^[A-Za-z0-9_\-.:]{1,256}$/;
 const IAMM2M: React.FC<IAMM2MProps> = ({ onShowToast }) => {
   const { clients, isLoading, error, refetch } = useM2MClients();
   const { groups } = useIAMGroups();
+  // Rate-limit definitions + memberships fetched ONCE here and passed to each
+  // row's editor (avoids N x 2 GETs on a large client list).
+  const { definitions: rlDefinitions } = useRateLimitDefinitions();
+  const { memberships: rlMemberships, refetch: refetchRlMemberships } = useRateLimitMemberships();
+  const rlGroupOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const d of rlDefinitions) {
+      if (d.axis === 'caller' && d.entity_type === CALLER_ENTITY_TYPE) names.add(d.name);
+    }
+    return Array.from(names).sort().map((n) => ({ value: n, label: n }));
+  }, [rlDefinitions]);
   const [searchQuery, setSearchQuery] = useState('');
   const [view, setView] = useState<View>('list');
   const [showCreateHelp, setShowCreateHelp] = useState(false);
@@ -636,6 +653,7 @@ const IAMM2M: React.FC<IAMM2MProps> = ({ onShowToast }) => {
                 <th className="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Name</th>
                 <th className="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Provider</th>
                 <th className="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Groups</th>
+                <th className="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Rate-limit Groups</th>
                 <th className="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Registered by</th>
                 <th className="text-right py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Action</th>
               </tr>
@@ -662,6 +680,16 @@ const IAMM2M: React.FC<IAMM2MProps> = ({ onShowToast }) => {
                           ))}
                           {(!c.groups || c.groups.length === 0) && <span className="text-gray-400 text-xs">{'—'}</span>}
                         </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        <RateLimitGroupsEditor
+                          subjectType="client"
+                          subject={c.client_id}
+                          groupOptions={rlGroupOptions}
+                          memberships={rlMemberships}
+                          onSaved={refetchRlMemberships}
+                          onShowToast={onShowToast}
+                        />
                       </td>
                       <td
                         className="py-3 px-4 text-sm text-gray-600 dark:text-gray-400"
@@ -694,7 +722,7 @@ const IAMM2M: React.FC<IAMM2MProps> = ({ onShowToast }) => {
                     </tr>
                     {deleteTarget === c.client_id && (
                       <tr>
-                        <td colSpan={5} className="p-2">
+                        <td colSpan={6} className="p-2">
                           <DeleteConfirmation
                             entityType="m2m"
                             entityName={c.name}

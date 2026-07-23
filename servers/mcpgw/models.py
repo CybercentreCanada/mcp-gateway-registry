@@ -44,7 +44,6 @@ class SkillInfo(BaseModel):
     created_at: str | None = Field(None, description="Creation timestamp")
 
 
-
 class ToolSearchResult(BaseModel):
     """Search result for semantic tool search."""
 

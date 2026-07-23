@@ -146,12 +146,12 @@ migration = Migration(
     up_sql="""
         -- Migration {next_version:04d}: {name}
         -- Add your schema changes here
-        
+
     """,
     down_sql="""
         -- Rollback for migration {next_version:04d}: {name}
         -- Add rollback statements here
-        
+
     """
 )
 '''

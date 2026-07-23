@@ -551,6 +551,29 @@ class TestToolCatalog:
         assert data["total_count"] == 1
         assert data["server_count"] == 1
 
+    def test_catalog_route_forwards_user_context(
+        self, client, mock_auth_admin, mock_catalog_service
+    ):
+        """The route must hand the full user_context to the service.
+
+        Scope-based server-access filtering lives in the service and is keyed
+        off user_context (is_admin / accessible_servers), not the raw token
+        scopes. Passing anything else would reopen the disclosure gap.
+        """
+        with patch(
+            "registry.api.virtual_server_routes.get_tool_catalog_service",
+            return_value=mock_catalog_service,
+        ):
+            response = client.get("/api/tool-catalog")
+
+        assert response.status_code == 200
+        mock_catalog_service.get_tool_catalog.assert_awaited()
+        _, kwargs = mock_catalog_service.get_tool_catalog.call_args
+        assert "user_context" in kwargs
+        assert isinstance(kwargs["user_context"], dict)
+        # The old, vulnerable signature is gone.
+        assert "user_scopes" not in kwargs
+
 
 class TestNormalizeVirtualPath:
     """Tests for _normalize_virtual_path edge cases."""

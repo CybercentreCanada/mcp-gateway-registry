@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 DEFAULT_REGISTRY_URL = "http://localhost"
-DEFAULT_TOKEN_FILE = ".token"
+DEFAULT_TOKEN_FILE = ".token"  # nosec B105 - default filename, not a secret value
 DEFAULT_REGION = "us-east-1"
 DEFAULT_TIMEOUT = 30
 DEFAULT_MANIFEST_PATH = "token_refresh_manifest.json"

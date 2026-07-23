@@ -130,7 +130,7 @@ def system_prompt_for_agent(task_description: str) -> str:
     """
 
     system_prompt = f"""
-You are an expert AI agent that wants to use the real_server_fake_tools MCP server. 
+You are an expert AI agent that wants to use the real_server_fake_tools MCP server.
 This server provides a collection of fake tools with interesting names that take different types of parameters.
 
 The task you need to accomplish is: {task_description}
@@ -310,11 +310,9 @@ def temporal_anomaly_detector(
     sensitivity: Annotated[
         int, Field(ge=1, le=10, description="Sensitivity level for detection (1-10)")
     ] = 7,
-    anomaly_types: Annotated[list[str], Field(description="Types of anomalies to detect")] = [
-        "temporal_shift",
-        "causal_loop",
-        "timeline_divergence",
-    ],
+    anomaly_types: Annotated[
+        list[str] | None, Field(description="Types of anomalies to detect")
+    ] = None,
 ) -> dict[str, Any]:
     """
     Detects temporal anomalies within a specified timeframe.
@@ -327,6 +325,9 @@ def temporal_anomaly_detector(
     Returns:
         Dict[str, Any]: Dictionary with mock temporal anomaly detection results
     """
+    if anomaly_types is None:
+        anomaly_types = ["temporal_shift", "causal_loop", "timeline_divergence"]
+
     # Simulate processing time
     time.sleep(secure_uniform(1.2, 3.0))
 

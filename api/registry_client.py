@@ -1707,6 +1707,7 @@ class RegistryClient:
             or endpoint.startswith("/api/custom-types")
             or endpoint.startswith("/api/custom")
             or endpoint.startswith("/api/admin")
+            or endpoint.startswith("/api/rate-limit")
             or endpoint.startswith("/api/v1/registry")
             or endpoint.startswith("/api/v1/health")
             or endpoint == "/api/servers/groups/import"
@@ -2106,6 +2107,191 @@ class RegistryClient:
             f"registry_mode={result.get('registry_mode')}"
         )
         return result
+
+    def list_rate_limits(self) -> dict[str, Any]:
+        """List all rate-limit definitions (admin only).
+
+        Returns:
+            Dict with a "definitions" list.
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        logger.info("Listing rate-limit definitions")
+        response = self._make_request(method="GET", endpoint="/api/rate-limits")
+        return response.json()
+
+    def set_rate_limit(
+        self,
+        axis: str,
+        entity_type: str,
+        name: str,
+        max_requests: int | None = None,
+        user_max_requests: int | None = None,
+        agent_max_requests: int | None = None,
+        window_seconds: int = 60,
+        fail_closed: bool = False,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Create or update a rate-limit definition (admin only).
+
+        Caller (group) axis: pass ``user_max_requests`` and/or ``agent_max_requests``.
+        Target axis: pass ``max_requests``. The ``_id`` is derived server-side; this
+        client builds the matching URL id.
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 400 invalid definition).
+        """
+        definition_id = f"{axis}:{entity_type}:{name}:{window_seconds}"
+        body: dict[str, Any] = {
+            "axis": axis,
+            "entity_type": entity_type,
+            "name": name,
+            "window_seconds": window_seconds,
+            "fail_closed": fail_closed,
+            "enabled": enabled,
+        }
+        # Only include limit fields that were provided (schema requires the right
+        # one per axis and rejects the others).
+        if max_requests is not None:
+            body["max_requests"] = max_requests
+        if user_max_requests is not None:
+            body["user_max_requests"] = user_max_requests
+        if agent_max_requests is not None:
+            body["agent_max_requests"] = agent_max_requests
+        logger.info(f"Setting rate-limit definition {definition_id}")
+        response = self._make_request(
+            method="PUT",
+            endpoint=f"/api/rate-limits/{definition_id}",
+            data=body,
+        )
+        return response.json()
+
+    def delete_rate_limit(
+        self,
+        definition_id: str,
+    ) -> dict[str, Any]:
+        """Delete a rate-limit definition by its id (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 404 not found).
+        """
+        logger.info(f"Deleting rate-limit definition {definition_id}")
+        response = self._make_request(
+            method="DELETE",
+            endpoint=f"/api/rate-limits/{definition_id}",
+        )
+        return response.json()
+
+    def get_rate_limit(
+        self,
+        definition_id: str,
+    ) -> dict[str, Any]:
+        """Read a single rate-limit definition by id (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 404 not found).
+        """
+        logger.info(f"Getting rate-limit definition {definition_id}")
+        response = self._make_request(
+            method="GET",
+            endpoint=f"/api/rate-limits/{definition_id}",
+        )
+        return response.json()
+
+    def set_rate_limit_enabled(
+        self,
+        definition_id: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        """Enable or disable a rate-limit definition in place (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 404 not found).
+        """
+        logger.info(f"Setting rate-limit definition {definition_id} enabled={enabled}")
+        response = self._make_request(
+            method="POST",
+            endpoint=f"/api/rate-limits-enabled/{definition_id}",
+            params={"enabled": str(enabled).lower()},
+        )
+        return response.json()
+
+    def rate_limit_status(
+        self,
+        identity: str | None = None,
+        entity_type: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """Introspect rate-limit definitions for a caller and/or target (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        params: dict[str, Any] = {}
+        if identity:
+            params["identity"] = identity
+        if entity_type:
+            params["entity_type"] = entity_type
+        if name:
+            params["name"] = name
+        logger.info("Fetching rate-limit status")
+        response = self._make_request(
+            method="GET",
+            endpoint="/api/rate-limits-status",
+            params=params,
+        )
+        return response.json()
+
+    def list_rate_limit_memberships(self) -> dict[str, Any]:
+        """List all rate-limit memberships (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        logger.info("Listing rate-limit memberships")
+        response = self._make_request(method="GET", endpoint="/api/rate-limit-memberships")
+        return response.json()
+
+    def set_rate_limit_membership(
+        self,
+        subject_type: str,
+        subject: str,
+        groups: list[str],
+    ) -> dict[str, Any]:
+        """Create or update a rate-limit membership (admin only).
+
+        Maps a user (subject_type='user', subject=username) or an agent
+        (subject_type='client', subject=client_id) to rate-limit group name(s).
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 400 invalid membership).
+        """
+        membership_id = f"{subject_type}:{subject}"
+        body = {"subject_type": subject_type, "subject": subject, "groups": groups}
+        logger.info(f"Setting rate-limit membership {membership_id} -> {groups}")
+        response = self._make_request(
+            method="PUT",
+            endpoint=f"/api/rate-limit-memberships/{membership_id}",
+            data=body,
+        )
+        return response.json()
+
+    def delete_rate_limit_membership(
+        self,
+        membership_id: str,
+    ) -> dict[str, Any]:
+        """Delete a rate-limit membership by id (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 404 not found).
+        """
+        logger.info(f"Deleting rate-limit membership {membership_id}")
+        response = self._make_request(
+            method="DELETE",
+            endpoint=f"/api/rate-limit-memberships/{membership_id}",
+        )
+        return response.json()
 
     def get_well_known_registry_card(self) -> RegistryCardResponse:
         """
@@ -3109,9 +3295,7 @@ class RegistryClient:
             requests.HTTPError on 400/403/404/502.
         """
         normalized = path if path.startswith("/") else f"/{path}"
-        logger.info(
-            f"Pulling agent card for '{normalized}' (dry_run={dry_run})"
-        )
+        logger.info(f"Pulling agent card for '{normalized}' (dry_run={dry_run})")
 
         response = self._make_request(
             method="POST",
@@ -5134,9 +5318,7 @@ class RegistryClient:
         Raises:
             requests.HTTPError: 401 if unauthenticated.
         """
-        logger.info(
-            f"Listing user-groups (skip={skip}, limit={limit}, provider={provider}, q={q})"
-        )
+        logger.info(f"Listing user-groups (skip={skip}, limit={limit}, provider={provider}, q={q})")
 
         params: dict[str, Any] = {"skip": skip, "limit": limit}
         if provider is not None:
@@ -5352,9 +5534,7 @@ class RegistryClient:
                 limit is reached; 422 on schema validation errors.
         """
         logger.info(f"Creating custom type: {descriptor.get('name')}")
-        response = self._make_request(
-            method="POST", endpoint="/api/custom-types", data=descriptor
-        )
+        response = self._make_request(method="POST", endpoint="/api/custom-types", data=descriptor)
         logger.info(f"Custom type created: {descriptor.get('name')}")
         return response.json()
 
@@ -5405,9 +5585,7 @@ class RegistryClient:
         Returns:
             Dict with records list and total_count.
         """
-        response = self._make_request(
-            method="GET", endpoint=f"/api/custom/{type_name}"
-        )
+        response = self._make_request(method="GET", endpoint=f"/api/custom/{type_name}")
         return response.json()
 
 

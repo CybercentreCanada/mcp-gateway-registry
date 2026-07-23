@@ -137,7 +137,7 @@ class Settings:
     OTEL_SERVICE_NAME: str = os.getenv("OTEL_SERVICE_NAME", "mcp-metrics-service")
     OTEL_PROMETHEUS_ENABLED: bool = os.getenv("OTEL_PROMETHEUS_ENABLED", "true").lower() == "true"
     OTEL_PROMETHEUS_PORT: int = int(os.getenv("OTEL_PROMETHEUS_PORT", "9465"))
-    OTEL_OTLP_ENDPOINT: Optional[str] = os.getenv("OTEL_OTLP_ENDPOINT")
+    OTEL_OTLP_ENDPOINT: str | None = os.getenv("OTEL_OTLP_ENDPOINT")
     OTEL_OTLP_EXPORT_INTERVAL_MS: int = int(os.getenv("OTEL_OTLP_EXPORT_INTERVAL_MS", "30000"))
 
     # API Security

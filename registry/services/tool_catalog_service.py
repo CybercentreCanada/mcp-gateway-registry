@@ -11,9 +11,11 @@ from typing import (
     Optional,
 )
 
+from ..auth.tool_filter import filter_tools_for_user
 from ..repositories.factory import get_server_repository
 from ..repositories.interfaces import ServerRepositoryBase
 from ..schemas.virtual_server_models import ToolCatalogEntry
+from .visibility import user_can_access_server_from_doc
 
 # Configure logging
 logging.basicConfig(
@@ -36,31 +38,57 @@ class ToolCatalogService:
     async def get_tool_catalog(
         self,
         server_path_filter: str | None = None,
-        user_scopes: list[str] | None = None,
+        user_context: dict[str, Any] | None = None,
     ) -> list[ToolCatalogEntry]:
         """Get all tools available across enabled servers.
 
         Reads tool_list from each server's MongoDB document and returns
-        structured catalog entries, filtered by the user's scopes.
+        structured catalog entries, filtered by the user's server access.
+
+        Access is enforced in two layers, matching the canonical server and
+        semantic-search paths:
+
+        1. Server access — the same scope-based check used by the server
+           listing (:func:`registry.services.visibility.user_can_access_server_from_doc`);
+           a server's tools are only considered when the caller can access
+           that server.
+        2. Tool access — the shared per-tool allowlist filter
+           (:func:`registry.auth.tool_filter.filter_tools_for_user`); a caller
+           with server access but a restricted tool set only sees the tools in
+           that set.
+
+        Both layers fail closed, so the catalog cannot disclose tools on
+        servers (or individual tools) the caller has no scope to reach.
+
+        The ``accessible_services`` UI-visibility dimension is intentionally
+        NOT applied here, consistent with the other API-surface endpoints
+        (``/v0.1/servers``): MCP-level server/tool scope is the authoritative
+        gate for the catalog, and it is the stricter of the two.
 
         Args:
             server_path_filter: Optional filter to only return tools from
                 a specific server path
-            user_scopes: User's scopes for access filtering. If None,
-                no scope filtering is applied (backwards-compatible).
+            user_context: Authenticated caller's context (``is_admin``,
+                ``accessible_servers``, ``username``, ``groups``). When
+                ``None`` the caller is treated as unauthenticated and NO
+                tools are returned (fail closed). Admins and callers with a
+                wildcard server grant see all servers' tools.
 
         Returns:
-            List of ToolCatalogEntry objects the user has access to
+            List of ToolCatalogEntry objects the caller may access
         """
         catalog: list[ToolCatalogEntry] = []
 
+        # Fail closed: an unauthenticated / context-less caller sees nothing.
+        # Every real request goes through nginx_proxied_auth, which always
+        # supplies a user_context; None here means the access dimension is
+        # unknown, so we must not disclose any server's tools.
+        if user_context is None:
+            logger.warning("Tool catalog requested without a user context; returning empty catalog")
+            return catalog
+
         # Get all servers
         all_servers = await self._server_repo.list_all()
-
-        # Pre-compute user scope set for efficient lookup
-        user_scope_set: set[str] | None = None
-        if user_scopes is not None:
-            user_scope_set = set(user_scopes)
 
         for path, server_info in all_servers.items():
             # Skip version documents (contain ":" in path)
@@ -79,17 +107,30 @@ class ToolCatalogService:
             if not is_enabled:
                 continue
 
-            # Filter by user's accessible servers if scopes are provided
-            if user_scope_set is not None:
-                server_required_scopes = server_info.get("required_scopes", [])
-                if server_required_scopes and not all(
-                    s in user_scope_set for s in server_required_scopes
-                ):
-                    logger.debug(f"Filtering out server {path}: user lacks required scopes")
-                    continue
-
             server_name = server_info.get("server_name", path)
-            tool_list = server_info.get("tool_list", [])
+
+            # Enforce the canonical scope-based server-access check. This is the
+            # SAME helper the server-listing / server-tool paths use, so the
+            # catalog cannot expose tools from a server the caller lacks scope
+            # for. Fails closed (omits the server) on any access uncertainty.
+            if not user_can_access_server_from_doc(path, server_name, user_context):
+                logger.debug("Filtering out server %s: caller lacks server access", path)
+                continue
+
+            # Apply the canonical per-tool allowlist filter on top of the
+            # server-access check, matching the semantic-search path. A caller
+            # granted server access but a restricted tool set must not see tool
+            # names outside that set. filter_tools_for_user fails closed
+            # (returns [] on a missing/empty allowlist) and passes through for
+            # admin / wildcard callers.
+            raw_tools = server_info.get("tool_list", [])
+            tool_list = filter_tools_for_user(
+                server_name=server_name,
+                tools=raw_tools,
+                user_context=user_context,
+                endpoint="tool_catalog",
+                server_path=path,
+            )
 
             # Get available versions from other_version_ids
             available_versions = self._get_available_versions(server_info)

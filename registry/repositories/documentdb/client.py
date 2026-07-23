@@ -5,7 +5,11 @@ import logging
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 from ...core.config import settings
-from ...utils.mongodb_connection import build_client_options, build_connection_string, build_tls_kwargs
+from ...utils.mongodb_connection import (
+    build_client_options,
+    build_connection_string,
+    build_tls_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +28,7 @@ async def get_documentdb_client() -> AsyncIOMotorDatabase:
     if settings.mongodb_connection_string:
         logger.info(f"Connecting to {settings.storage_backend} via connection string override")
     else:
-        logger.info(
-            f"Connecting to {settings.storage_backend} "
-            f"(host: {settings.documentdb_host})"
-        )
+        logger.info(f"Connecting to {settings.storage_backend} (host: {settings.documentdb_host})")
 
     _client = AsyncIOMotorClient(
         connection_string,

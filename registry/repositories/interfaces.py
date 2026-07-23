@@ -15,18 +15,18 @@ from ..schemas.registry_card import RegistryCard
 try:
     from ..schemas.skill_models import SkillCard
 except ImportError:
-    SkillCard = None
+    SkillCard = None  # type: ignore[assignment,misc]  # fallback when module unavailable
 
 try:
     from ..schemas.virtual_server_models import VirtualServerConfig
 except ImportError:
-    VirtualServerConfig = None
+    VirtualServerConfig = None  # type: ignore[assignment,misc]  # fallback when module unavailable
 
 try:
     from ..schemas.custom_entity_models import CustomEntityRecord, CustomTypeDescriptor
 except ImportError:
-    CustomEntityRecord = None
-    CustomTypeDescriptor = None
+    CustomEntityRecord = None  # type: ignore[assignment,misc]  # fallback when module unavailable
+    CustomTypeDescriptor = None  # type: ignore[assignment,misc]  # fallback when module unavailable
 
 
 class ServerRepositoryBase(ABC):
@@ -199,6 +199,15 @@ class ServerRepositoryBase(ABC):
 
         Returns:
             Total number of servers in the repository.
+        """
+        pass
+
+    @abstractmethod
+    async def count_tools(self) -> int:
+        """Get the total number of tools exposed across all servers.
+
+        Returns:
+            Total number of tools across all current (non-version) servers.
         """
         pass
 
@@ -928,6 +937,37 @@ class ScopeRepositoryBase(ABC):
         Note:
             This is used during server deletion to clean up all
             scope references to the server.
+        """
+        pass
+
+    @abstractmethod
+    async def import_group(
+        self,
+        group_name: str,
+        description: str = "",
+        server_access: list | None = None,
+        group_mappings: list | None = None,
+        ui_permissions: dict | None = None,
+        agent_access: list | None = None,
+        is_idp_managed: bool = True,
+        allow_privileged: bool = False,
+    ) -> bool:
+        """
+        Import a complete group definition.
+
+        Args:
+            group_name: Name of the group
+            description: Description of the group
+            server_access: List of server access definitions
+            group_mappings: List of group names this group maps to
+            ui_permissions: Dictionary of UI permissions
+            agent_access: List of agent paths this group can access
+            is_idp_managed: Whether PATCH/DELETE should call the upstream IdP.
+            allow_privileged: Whether to permit writing admin-conferring
+                ui_permissions.
+
+        Returns:
+            True if imported successfully.
         """
         pass
 
@@ -1850,6 +1890,40 @@ class VirtualServerRepositoryBase(ABC):
         """
         pass
 
+    @abstractmethod
+    async def update_rating(
+        self,
+        path: str,
+        num_stars: float,
+        rating_details: list[dict[str, Any]],
+    ) -> bool:
+        """Update virtual server rating.
+
+        Args:
+            path: Virtual server path
+            num_stars: Calculated average star rating
+            rating_details: List of rating entries with user and rating
+
+        Returns:
+            True if update succeeded, False if server not found
+        """
+        pass
+
+    @abstractmethod
+    async def get_rating(
+        self,
+        path: str,
+    ) -> dict[str, Any] | None:
+        """Get virtual server rating info.
+
+        Args:
+            path: Virtual server path
+
+        Returns:
+            Dict with rating info, or None if not found
+        """
+        pass
+
 
 class RegistryCardRepositoryBase(ABC):
     """Interface for Registry Card persistence."""
@@ -1926,6 +2000,11 @@ class CustomTypeRepositoryBase(ABC):
         ``name``/``fields`` are never touched. Returns the updated descriptor,
         or None if no type with this name exists.
         """
+        pass
+
+    @abstractmethod
+    async def count_types(self) -> int:
+        """Count defined custom types (used by the metrics scrape gauge)."""
         pass
 
 
@@ -2005,4 +2084,13 @@ class CustomEntityRepositoryBase(ABC):
         visibility_filter: dict[str, Any] | None = None,
     ) -> int:
         """Count records of a type, applying the SAME optional filter as list."""
+        pass
+
+    @abstractmethod
+    async def count_all(self) -> int:
+        """Count custom entity records across every type in one query.
+
+        Returns:
+            Total number of custom entity records, all types combined.
+        """
         pass

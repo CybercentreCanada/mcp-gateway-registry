@@ -116,10 +116,11 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys
+
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import seaborn as sns
-import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -161,6 +162,7 @@ def _daily_rate_for_platform(
     """Return the daily USD rate for a given compute platform string."""
     key = (platform or "").strip().lower()
     return COMPUTE_PLATFORM_DAILY_RATE_USD.get(key, COMPUTE_PLATFORM_DAILY_RATE_USD[""])
+
 
 FIGURE_WIDTH: int = 14
 FIGURE_HEIGHT: int = 9
@@ -497,21 +499,24 @@ def _compute_daily_spend(
                 "ecs_instances": platform_counts.get("ecs", 0),
                 "kubernetes_instances": platform_counts.get("kubernetes", 0),
                 "other_platform_instances": sum(
-                    v for k, v in platform_counts.items()
+                    v
+                    for k, v in platform_counts.items()
                     if k not in ("docker", "ecs", "kubernetes")
                 ),
                 "docker_instances_persistent": platform_counts_p.get("docker", 0),
                 "ecs_instances_persistent": platform_counts_p.get("ecs", 0),
                 "kubernetes_instances_persistent": platform_counts_p.get("kubernetes", 0),
                 "other_platform_instances_persistent": sum(
-                    v for k, v in platform_counts_p.items()
+                    v
+                    for k, v in platform_counts_p.items()
                     if k not in ("docker", "ecs", "kubernetes")
                 ),
                 "docker_instances_persisted": platform_counts_d.get("docker", 0),
                 "ecs_instances_persisted": platform_counts_d.get("ecs", 0),
                 "kubernetes_instances_persisted": platform_counts_d.get("kubernetes", 0),
                 "other_platform_instances_persisted": sum(
-                    v for k, v in platform_counts_d.items()
+                    v
+                    for k, v in platform_counts_d.items()
                     if k not in ("docker", "ecs", "kubernetes")
                 ),
                 "bedrock_queries": queries,
@@ -792,8 +797,16 @@ def _generate_chart(
 
     # Daily compute: show all-days as the faint bar height, overlay the persisted
     # subset (the headline rule: >= 2 distinct reporting days) as the solid bar.
-    ax_compute.bar(dates, compute, color=colors[0], alpha=0.4, label="all-days (incl. install-and-vanish)")
-    ax_compute.bar(dates, compute_d, color=colors[0], alpha=0.95, label="persisted (>= 2 distinct reporting days)")
+    ax_compute.bar(
+        dates, compute, color=colors[0], alpha=0.4, label="all-days (incl. install-and-vanish)"
+    )
+    ax_compute.bar(
+        dates,
+        compute_d,
+        color=colors[0],
+        alpha=0.95,
+        label="persisted (>= 2 distinct reporting days)",
+    )
     ax_compute.set_title(
         "Daily EC2 compute cost -- per-platform rate * active AWS customer instances",
         fontsize=10,
@@ -811,19 +824,37 @@ def _generate_chart(
     ax_bedrock.yaxis.set_major_locator(plt.MaxNLocator(nbins=6))
 
     ax_cum.plot(
-        dates, cum, linewidth=2.5, color=colors[2], marker="o", markersize=3,
+        dates,
+        cum,
+        linewidth=2.5,
+        color=colors[2],
+        marker="o",
+        markersize=3,
         label="all-days (upper bound)",
     )
     ax_cum.plot(
-        dates, cum_d, linewidth=2.5, color=colors[4], marker="D", markersize=3,
+        dates,
+        cum_d,
+        linewidth=2.5,
+        color=colors[4],
+        marker="D",
+        markersize=3,
         label="persisted (headline: >= 2 distinct days)",
     )
     ax_cum.plot(
-        dates, cum_p, linewidth=1.8, color=colors[3], marker="s", markersize=3,
-        linestyle="--", label="proven (first day free, lower bound)",
+        dates,
+        cum_p,
+        linewidth=1.8,
+        color=colors[3],
+        marker="s",
+        markersize=3,
+        linestyle="--",
+        label="proven (first day free, lower bound)",
     )
     ax_cum.fill_between(dates, cum_p, cum, color=colors[2], alpha=0.12)
-    ax_cum.set_title("Cumulative LTV spend (compute + Bedrock) -- range across counting rules", fontsize=10)
+    ax_cum.set_title(
+        "Cumulative LTV spend (compute + Bedrock) -- range across counting rules", fontsize=10
+    )
     ax_cum.set_ylabel("USD total")
     ax_cum.legend(loc="upper left", fontsize=8)
     ax_cum.yaxis.set_major_locator(plt.MaxNLocator(nbins=6))

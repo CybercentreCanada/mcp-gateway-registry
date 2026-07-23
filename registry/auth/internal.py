@@ -18,6 +18,8 @@ from fastapi import Header, HTTPException, Request, status
 
 from registry.auth.internal_replay_store import consume_jti
 
+from ..common.instance import resolve_instance_id
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -72,9 +74,15 @@ def generate_internal_token(
 
     Uses the shared SECRET_KEY that both services have access to.
 
+    The ``sub`` claim is made attributable to a specific replica by appending a
+    per-instance identifier (``<subject>@<instance_id>``) and a separate
+    ``instance_id`` claim is included. This lets the audit trail attribute an
+    internal action to the exact caller/replica rather than a shared service
+    identity. The ``purpose`` claim already differentiates the action.
+
     Args:
-        subject: Identity of the calling service
-        purpose: Purpose of the request (for audit logging)
+        subject: Identity of the calling service (e.g. ``registry-service``).
+        purpose: Purpose of the request (for audit logging).
 
     Returns:
         Encoded JWT string
@@ -86,11 +94,18 @@ def generate_internal_token(
     if not secret_key:
         raise ValueError("SECRET_KEY environment variable not set")
 
+    instance_id = resolve_instance_id()
     now = int(time.time())
     claims = {
         "iss": _INTERNAL_JWT_ISSUER,
         "aud": _INTERNAL_JWT_AUDIENCE,
-        "sub": subject,
+        # Attributable subject: service identity qualified by the running
+        # instance/replica so a specific caller can be identified in the audit
+        # trail. The bare service identity is preserved as ``service`` for
+        # code that wants to group by role.
+        "sub": f"{subject}@{instance_id}",
+        "service": subject,
+        "instance_id": instance_id,
         "purpose": purpose,
         "token_kind": _INTERNAL_TOKEN_KIND,
         "token_use": "access",  # nosec B105 - OAuth2 token type validation per RFC 6749, not a password
@@ -286,6 +301,9 @@ def _validate_bearer_token(auth_header: str) -> tuple[str, dict]:
         if token_kind != _INTERNAL_TOKEN_KIND:
             raise ValueError(f"Not an internal service token: token_kind={token_kind}")
 
+        # ``sub`` is the attributable subject (``<service>@<instance_id>``) so
+        # the caller returned here — and captured in the audit trail's
+        # ``internal_caller`` field — identifies the specific replica.
         caller = claims.get("sub", "service")
         logger.debug(f"Internal auth via JWT for: {caller}")
         return caller, claims

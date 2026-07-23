@@ -129,6 +129,79 @@ class TestExchangeAndRefresh:
 
 
 @pytest.mark.unit
+class TestResourceIndicator:
+    """RFC 8707 resource indicator threads through authorize + exchange + refresh.
+
+    A resource server that mints per-resource tokens (e.g. Atlassian's Rovo MCP)
+    requires the ``resource`` param on the authorize request AND both token
+    grants, or it rejects the flow ('Invalid context provided'). A provider
+    without a resource (every built-in) must never emit the param.
+    """
+
+    _RES = "https://mcp.atlassian.com/v1/mcp/authv2"
+
+    def _custom_cfg_with_resource(self):
+        return resolve_provider(
+            {
+                "provider": "custom",
+                "custom_authorize_url": "https://auth.atlassian.com/authorize",
+                "custom_token_url": "https://auth.atlassian.com/oauth/token",
+                "custom_resource": self._RES,
+            }
+        )
+
+    def test_authorize_url_includes_resource(self):
+        cfg = self._custom_cfg_with_resource()
+        url = oauth_engine.build_authorize_url(
+            cfg, "cid", "https://gw/cb", ["read:jira-work"], "S", "CHAL"
+        )
+        assert parse_qs(urlparse(url).query)["resource"] == [self._RES]
+
+    def test_authorize_url_omits_resource_when_unset(self):
+        url = oauth_engine.build_authorize_url(
+            PROVIDER_REGISTRY["github"], "cid", "https://gw/cb", ["repo"], "S", "CHAL"
+        )
+        assert "resource" not in parse_qs(urlparse(url).query)
+
+    async def test_exchange_sends_resource(self, monkeypatch):
+        captured: dict = {}
+
+        async def fake_post(cfg, data, headers):
+            captured.update(data)
+            return {"access_token": "at", "expires_in": 3600}
+
+        monkeypatch.setattr(oauth_engine, "_post_token", fake_post)
+        await oauth_engine.exchange_code(
+            self._custom_cfg_with_resource(), "cid", "sec", "code", "https://gw/cb", "verif"
+        )
+        assert captured["resource"] == self._RES
+
+    async def test_refresh_sends_resource(self, monkeypatch):
+        captured: dict = {}
+
+        async def fake_post(cfg, data, headers):
+            captured.update(data)
+            return {"access_token": "at2", "expires_in": 3600}
+
+        monkeypatch.setattr(oauth_engine, "_post_token", fake_post)
+        await oauth_engine.refresh_token(self._custom_cfg_with_resource(), "cid", "sec", "rt")
+        assert captured["resource"] == self._RES
+
+    async def test_exchange_omits_resource_when_unset(self, monkeypatch):
+        captured: dict = {}
+
+        async def fake_post(cfg, data, headers):
+            captured.update(data)
+            return {"access_token": "at", "expires_in": 3600}
+
+        monkeypatch.setattr(oauth_engine, "_post_token", fake_post)
+        await oauth_engine.exchange_code(
+            PROVIDER_REGISTRY["github"], "cid", "sec", "code", "https://gw/cb", "verif"
+        )
+        assert "resource" not in captured
+
+
+@pytest.mark.unit
 class TestQuirkParsers:
     def test_slack_nested_lifts_user_token(self):
         cfg = PROVIDER_REGISTRY["slack"]

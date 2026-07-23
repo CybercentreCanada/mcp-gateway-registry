@@ -51,7 +51,7 @@ def _substitute_env_vars_in_headers(headers: list[dict[str, str]]) -> list[dict[
         substituted_header = {}
         for header_name, header_value in header_dict.items():
             # Match ${VAR_NAME} or $VAR_NAME pattern
-            def replace_env_var(match):
+            def replace_env_var(match, header_name=header_name):
                 var_name = match.group(1)
                 env_value = os.getenv(var_name)
                 if env_value:

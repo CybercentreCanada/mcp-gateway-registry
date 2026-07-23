@@ -12,7 +12,6 @@ import argparse
 import re
 from pathlib import Path
 
-
 REPO = "agentic-community/mcp-gateway-registry"
 GH_BLOB = f"https://github.com/{REPO}/blob/main/"
 GH_RAW = f"https://raw.githubusercontent.com/{REPO}/main/"
@@ -71,9 +70,7 @@ def _build_sidebar(
 ) -> str:
     """Build sidebar anchor links from the rendered h2 headings."""
     heads = re.findall(r'<h2 id="([^"]+)">(.*?)</h2>', html_body)
-    return "\n".join(
-        f'    <a href="#{hid}">{re.sub("<.*?>", "", txt)}</a>' for hid, txt in heads
-    )
+    return "\n".join(f'    <a href="#{hid}">{re.sub("<.*?>", "", txt)}</a>' for hid, txt in heads)
 
 
 def _render(

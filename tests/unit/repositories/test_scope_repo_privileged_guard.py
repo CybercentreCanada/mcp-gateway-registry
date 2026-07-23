@@ -140,9 +140,7 @@ class TestIsPrivilegedWrite:
         assert _is_privileged_write("eng", ["eng"], {"register_service": ["all"]}) is True
 
     def test_benign_write_not_flagged(self):
-        assert (
-            _is_privileged_write("eng", ["eng"], {"list_service": ["currenttime"]}) is False
-        )
+        assert _is_privileged_write("eng", ["eng"], {"list_service": ["currenttime"]}) is False
 
 
 class TestImportGroupMappingGuard:

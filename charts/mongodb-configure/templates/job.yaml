@@ -32,7 +32,7 @@ spec:
           args:
             - |
               echo "Installing pymongo..."
-              pip install pymongo
+              pip install --no-cache-dir pymongo
 
               echo "Waiting for MongoDB replica set to be ready..."
               python3 /app/wait.py

@@ -129,8 +129,18 @@ class TestReindexEmbeddings:
             "failed": 0,
             "total": 2,
             "details": [
-                {"path": "/server-1", "entity_type": "mcp_server", "status": "success", "error": None},
-                {"path": "/agent-1", "entity_type": "a2a_agent", "status": "success", "error": None},
+                {
+                    "path": "/server-1",
+                    "entity_type": "mcp_server",
+                    "status": "success",
+                    "error": None,
+                },
+                {
+                    "path": "/agent-1",
+                    "entity_type": "a2a_agent",
+                    "status": "success",
+                    "error": None,
+                },
             ],
         }
 
@@ -153,7 +163,12 @@ class TestReindexEmbeddings:
             "total": 2,
             "details": [
                 {"path": "/good", "entity_type": "mcp_server", "status": "success", "error": None},
-                {"path": "/bad", "entity_type": "unknown", "status": "failed", "error": "Not found"},
+                {
+                    "path": "/bad",
+                    "entity_type": "unknown",
+                    "status": "failed",
+                    "error": "Not found",
+                },
             ],
         }
 
@@ -309,4 +324,3 @@ class TestCleanupStaleEmbeddings:
         data = response.json()
         assert data["removed"] == 0
         assert data["not_found"] == 1
-

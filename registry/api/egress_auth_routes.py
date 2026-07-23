@@ -344,6 +344,7 @@ class EgressConfigRequest(BaseModel):
     custom_token_url: str | None = None
     custom_scope_separator: str | None = None
     custom_token_auth_style: str | None = None
+    custom_resource: str | None = None  # RFC 8707 resource indicator (custom only)
     # obo_exchange only: the internal MCP server's audience (IdP-shaped).
     target_audience: str | None = None
 
@@ -360,6 +361,7 @@ def _egress_config_view(server: dict) -> dict:
         "callback_url": _callback_url(),
         "custom_authorize_url": eo.get("custom_authorize_url"),
         "custom_token_url": eo.get("custom_token_url"),
+        "custom_resource": eo.get("custom_resource"),
     }
 
 
@@ -408,6 +410,7 @@ async def configure_egress_auth(
             "custom_token_url": body.custom_token_url,
             "custom_scope_separator": body.custom_scope_separator,
             "custom_token_auth_style": body.custom_token_auth_style,
+            "custom_resource": body.custom_resource,
         }
         # For a 'custom' provider the authorize/token URLs are registrant-supplied
         # and become an outbound token POST (carrying the client_secret) and a
@@ -434,6 +437,21 @@ async def configure_egress_auth(
                         status.HTTP_400_BAD_REQUEST,
                         detail=f"{field} rejected: {exc}",
                     ) from exc
+            # RFC 8707 resource indicator: an absolute https URI identifying the
+            # protected resource. Unlike the URLs above it is NOT a request target
+            # -- it is reflected verbatim into the authorize 302 and the token POST
+            # body -- so it needs a structural https/absolute/no-fragment check
+            # (RFC 8707 requires an absolute URI without a fragment), not the SSRF
+            # guard. Fail closed at registration so a malformed value cannot break
+            # every consent silently later.
+            if body.custom_resource:
+                pr = urlparse(body.custom_resource)
+                if pr.scheme != "https" or not pr.netloc or pr.fragment:
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        detail="custom_resource rejected: must be an absolute https "
+                        "URI without a fragment",
+                    )
         # Validate provider resolution (custom requires URLs) before persisting.
         try:
             resolve_provider(eo)
@@ -668,7 +686,7 @@ async def egress_callback(
             # account-swap guard matches the id the consent state was built with.
             current_user = ctx.get("egress_user") or ctx.get("username")
             current_method = ctx.get("auth_method")
-        except Exception:
+        except Exception:  # nosec B110 - best-effort auth context for account-swap guard
             pass
 
     try:

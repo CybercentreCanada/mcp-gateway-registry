@@ -1,0 +1,28 @@
+name: pre-commit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          # Match .pre-commit-config.yaml's default_language_version (python3.14)
+          # and the project's requires-python; without this the runner's default
+          # Python is used and pre-commit can't find a 3.14 interpreter.
+          python-version: "3.14"
+      - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        env:
+          # The pytest-fast hook shells out to `uv run` and needs MongoDB, neither
+          # of which exists in this lint-only runner. Test coverage is provided by
+          # the dedicated registry-test.yml workflow (which provisions MongoDB);
+          # this hook stays for local pre-commit use.
+          SKIP: pytest-fast

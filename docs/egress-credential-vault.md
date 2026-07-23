@@ -44,7 +44,7 @@ the gateway to call a third party **as** the user.
 | **Vend** | The internal call that hands a valid third-party access token to the proxy hop at request time. |
 | **AS facade** | The gateway's own session-verified "connect" front door (`/oauth2/egress/connect`) that brokers consent — the MCP client itself performs no OAuth. |
 | **Marker secret** | A shared secret nginx force-injects on the `/validate` subrequest so a direct `:8888` caller cannot mint an egress-capable token. |
-| **Elicitation** | The MCP `elicitation/create` mechanism the gateway uses to ask the client to open the consent URL in a browser. |
+| **Elicitation** | The MCP URL-mode elicitation mechanism (`2025-11-25` `URLElicitationRequiredError`, JSON-RPC error `-32042`) the gateway uses to ask the client to open the consent URL in a browser. |
 
 ---
 
@@ -92,7 +92,7 @@ graph TB
     SVC --> OB
     SVC --> SM
     SVC -.->|"on miss: consent_required<br/>+ connect_url"| PROXY
-    PROXY -->|"3. 401 + elicitation/create (url)"| IDE
+    PROXY -->|"3. JSON-RPC -32042 URLElicitationRequiredError (url)"| IDE
     IDE -->|"4. open connect_url in browser"| FACADE
     FACADE -->|"5. 302 authorize"| PROV
     PROV -->|"6. callback?code=..&state=.."| CB
@@ -134,8 +134,8 @@ sequenceDiagram
     autonumber
     participant C as MCP Client / IDE
     participant N as nginx
-    participant A as auth-server
-    participant P as mcp_proxy (registry)
+    participant A as auth-server /validate
+    participant P as mcp_proxy (auth-server)
     participant V as vend endpoint (registry)
     participant S as EgressAuthService
     participant K as Secret Store
@@ -147,14 +147,15 @@ sequenceDiagram
     C->>N: MCP request to /[server]
     N->>A: auth_request /validate (+ X-Validate-Source-Secret marker)
     A-->>N: mints mcp-proxy token (upstream_url, canonical auth_method)
-    N->>P: forward with X-Internal-Token
-    P->>V: POST /api/internal/egress-token (server_path)
+    N->>P: forward to /mcp-proxy/[server] with X-Internal-Token
+    P->>V: POST /_egress_internal/egress-token (server_path)
     V->>S: get_valid_token(auth_method, user, provider, server)
     S->>K: read vault entry
     K-->>S: miss
     S-->>V: consent_required + authorize_url + connect_url + request_state
     V-->>P: EgressTokenResponse(consent_required=true)
-    P-->>C: 401 + elicitation/create(mode=url, url=connect_url)
+    Note over P,C: -32042 elicitation fires only on token-requiring methods<br/>(tools/call, prompts/get, resources/read). Other methods get a plain JSON-RPC error.
+    P-->>C: JSON-RPC -32042 URLElicitationRequiredError (mode=url, url=connect_url)
 
     Note over C,TP: User consents (browser)
     C->>B: open connect_url
@@ -208,8 +209,9 @@ Key points:
 The vend response actually carries **two** URLs: `authorize_url` (the
 provider-direct OAuth URL) and `connect_url` (the gateway's own
 `/oauth2/egress/connect` front door). The mcp_proxy hop deliberately puts
-**`connect_url`** — not `authorize_url` — in the `elicitation/create` `url`
-field. A natural question is: since the callback returns to the gateway anyway,
+**`connect_url`** (not `authorize_url`) in the `-32042`
+URLElicitationRequiredError `url` field. A natural question is: since the
+callback returns to the gateway anyway,
 why not just hand the client the provider's authorize URL directly? Three
 reasons make the gateway hop mandatory rather than incidental:
 
@@ -328,7 +330,7 @@ prefix; the AS facade is mounted at root and registered only when
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
-| `POST` | `/api/servers/{server_path}/egress-auth` | proxied auth + admin | Configure egress OAuth on a server (provider, client_id, write-only encrypted client_secret, scopes, custom URLs). |
+| `POST` | `/api/servers/{server_path}/egress-auth` | proxied auth + admin | Configure egress OAuth on a server (provider, client_id, write-only encrypted client_secret, scopes, custom URLs, optional RFC 8707 `custom_resource`). |
 | `GET` | `/api/servers/{server_path}/egress-auth` | proxied auth + admin | Read the non-secret egress config (secret stripped). |
 
 ### End-user
@@ -511,22 +513,56 @@ For a custom OIDC provider:
 }
 ```
 
+> For a fully worked, verified custom-OIDC example against an Amazon Bedrock
+> AgentCore Gateway (Cognito + Claude Code), including the separate 3LO app
+> client and the common scope-formatting pitfall, see the
+> [FAQ: How do I use a 3LO (per-user OAuth) AgentCore Gateway with the registry?](faq/agentcore-3lo-per-user-oauth.md).
+
+- `custom_scope_separator` (default `" "`) and `custom_token_auth_style`
+  (`post_body` default, or `basic_header`) tune the wire format for providers
+  that deviate from the common case.
+- `custom_resource` (optional) is an [RFC 8707](https://www.rfc-editor.org/rfc/rfc8707)
+  **resource indicator** — an absolute `https` URI (no fragment). When set, the
+  gateway sends it as the `resource` parameter on the authorize request **and**
+  both token grants (code exchange + refresh), binding the minted token to that
+  one protected resource. This is required by resource servers that issue
+  per-resource tokens: for example **Atlassian's Rovo MCP**
+  (`https://mcp.atlassian.com/v1/mcp/authv2`) rejects the authorize flow with
+  *"Invalid context provided"* if the indicator is absent, and rejects a token
+  whose audience is the generic `api.atlassian.com` REST API rather than the MCP
+  resource. Built-in providers never emit `resource`, so their flows are
+  unchanged. Example (Atlassian Rovo MCP via `custom`):
+
+```jsonc
+{
+  "egress_auth_mode": "oauth_user",
+  "egress_provider": "custom",
+  "client_id": "<atlassian-app-client-id>",
+  "client_secret": "<atlassian-app-secret>",
+  "scopes": ["read:jira-work", "read:jira-user", "write:jira-work", "offline_access"],
+  "custom_authorize_url": "https://auth.atlassian.com/authorize",
+  "custom_token_url": "https://auth.atlassian.com/oauth/token",
+  "custom_resource": "https://mcp.atlassian.com/v1/mcp/authv2"
+}
+```
+
 ---
 
 <a id="setup-ide"></a>
 ## Setup: the IDE / MCP client experience
 
 No special client configuration is required beyond connecting the MCP server
-through the gateway as usual. The client must support MCP **elicitation**
-(`elicitation/create` with `mode: "url"`), which is how the gateway asks the user
-to open the consent page.
+through the gateway as usual. The client must support MCP **URL-mode elicitation**
+(the `2025-11-25` `URLElicitationRequiredError`, JSON-RPC error code `-32042`),
+which is how the gateway asks the user to open the consent page.
 
 End-user flow:
 
 1. The user invokes a tool on an egress-configured server through their IDE
    (Cursor, Claude Code, VS Code, etc.).
-2. On the first call the gateway returns a `401` carrying an `elicitation/create`
-   with the gateway-issued **connect URL**. The client opens it in a browser.
+2. On the first token-requiring call (`tools/call`, `prompts/get`,
+   `resources/read`) the gateway returns a `-32042` `URLElicitationRequiredError`
+   carrying the gateway-issued **connect URL**. The client opens it in a browser.
 3. If the user has no live gateway session, the connect page bounces them to the
    gateway login (e.g. Keycloak) first, then continues.
 4. The user approves at the provider's consent screen. The browser shows
@@ -575,7 +611,7 @@ Users can review and revoke their connections in the UI at **Connected Accounts*
 |---------|--------------------|
 | Startup fails: "requires a Mongo-family STORAGE_BACKEND" | `EGRESS_AUTH_ENABLED=true` with `STORAGE_BACKEND=file`. Switch to a Mongo-family backend. |
 | Startup fails: "requires EGRESS_OAUTH_CALLBACK_BASE_URL" | Set the public callback base URL. |
-| Client never gets a consent prompt | The MCP client must support `elicitation/create` (url mode). Check the server's `egress_auth_mode` is `oauth_user`. |
+| Client never gets a consent prompt | The MCP client must support URL-mode elicitation (`-32042` `URLElicitationRequiredError`), and the elicitation only fires on token-requiring methods (`tools/call`, `prompts/get`, `resources/read`). Check the server's `egress_auth_mode` is `oauth_user`. |
 | Consent loops (re-asked every call) | Usually an `auth_method` mismatch between consent-write and vend-read — confirm the IdP method canonicalizes to `oauth2`. Or the stored refresh token is dead (provider revoked it) → re-consent. |
 | Connected once, but tools still show empty / vend logs "has no token" | The consent-write and vend paths keyed the vault on different `user_id`s. Since keying moved to the OIDC `sub` (see [Vault key scheme](#vault-key-scheme)), an existing connection created under the old display-name key is invisible to the new `sub`-keyed lookup. Fix: **disconnect and reconnect once** (from Connected Accounts), which re-writes the entry under the `sub`. On Entra this reconnect must follow a fresh gateway login so the session carries the persisted `subject`. |
 | "Connection failed" on the consent callback; registry logs `state user mismatch` | The account-swap guard saw the consent-initiate principal differ from the callback's live-session principal. Almost always the session predates the `sub`-persisting login — **log out and back in**, then reconnect, so the cookie session carries the `subject` the initiate leg bound the state to. |

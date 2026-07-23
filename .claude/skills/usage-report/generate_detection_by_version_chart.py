@@ -33,9 +33,9 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt
-import seaborn as sns
 import sys as _sys
+
+import matplotlib.pyplot as plt
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -46,9 +46,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-CHART_TITLE: str = (
-    "AI Registry -- Cloud Detection Outcomes by Registry Version"
-)
+CHART_TITLE: str = "AI Registry -- Cloud Detection Outcomes by Registry Version"
 FIGURE_WIDTH: int = 14
 FIGURE_HEIGHT: int = 8
 
@@ -197,11 +195,11 @@ def _plot_chart(
             edgecolor="white",
             linewidth=0.5,
         )
-        left = [a + b for a, b in zip(left, widths)]
+        left = [a + b for a, b in zip(left, widths, strict=False)]
 
     # Annotate each row with total instance count at the right edge.
     max_total = max(plot_totals) if plot_totals else 1
-    for label, total in zip(plot_labels, plot_totals):
+    for label, total in zip(plot_labels, plot_totals, strict=False):
         ax.text(
             total + max_total * 0.01,
             label,

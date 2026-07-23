@@ -22,10 +22,11 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys
+
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import seaborn as sns
-import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -49,12 +50,12 @@ BOX_Y_TICK_STEP_DAYS: int = 5
 # long-tail ("unknown", "podman", anything else) falls back to grey shades.
 PLATFORM_ORDER: list[str] = ["docker", "kubernetes", "ecs", "ec2", "podman", "unknown"]
 PLATFORM_COLORS: dict[str, str] = {
-    "docker": "#1f77b4",      # blue
+    "docker": "#1f77b4",  # blue
     "kubernetes": "#2ca02c",  # green
-    "ecs": "#ff7f0e",         # orange
-    "ec2": "#9467bd",         # purple
-    "podman": "#8c564b",      # brown
-    "unknown": "#9e9e9e",     # grey
+    "ecs": "#ff7f0e",  # orange
+    "ec2": "#9467bd",  # purple
+    "podman": "#8c564b",  # brown
+    "unknown": "#9e9e9e",  # grey
 }
 FALLBACK_COLOR: str = "#cccccc"
 
@@ -198,8 +199,8 @@ def _plot_stacked_buckets(
 
     # bucket_counts[bucket_label] = {platform: count}
     bucket_labels = [b[0] for b in AGE_BUCKETS]
-    per_bucket: dict[str, dict[str, int]] = {b: {p: 0 for p in platforms} for b in bucket_labels}
-    bucket_totals: dict[str, int] = {b: 0 for b in bucket_labels}
+    per_bucket: dict[str, dict[str, int]] = {b: dict.fromkeys(platforms, 0) for b in bucket_labels}
+    bucket_totals: dict[str, int] = dict.fromkeys(bucket_labels, 0)
 
     for platform, ages in grouped.items():
         for age in ages:
@@ -212,7 +213,7 @@ def _plot_stacked_buckets(
     # Drop empty buckets, then reverse so the first bucket sits at the top.
     visible = [b for b in bucket_labels if bucket_totals[b] > 0][::-1]
 
-    left = {b: 0 for b in visible}
+    left = dict.fromkeys(visible, 0)
     for platform in platforms:
         widths = [per_bucket[b][platform] for b in visible]
         ax.barh(
@@ -224,7 +225,7 @@ def _plot_stacked_buckets(
             linewidth=0.3,
             label=platform,
         )
-        for b, w in zip(visible, widths):
+        for b, w in zip(visible, widths, strict=False):
             left[b] += w
 
     ax.set_title("Age Buckets (stacked by platform)", fontsize=12, fontweight="bold")

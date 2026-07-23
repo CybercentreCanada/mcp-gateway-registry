@@ -130,7 +130,11 @@ class TestAuditIdentityDisplay:
     def test_prefers_email_from_data(self):
         vr = {
             "username": "00000000-sub-alice",
-            "data": {"email": "alice@example.com", "preferred_username": "alice", "sub": "00000000-sub-alice"},
+            "data": {
+                "email": "alice@example.com",
+                "preferred_username": "alice",
+                "sub": "00000000-sub-alice",
+            },
         }
         assert server._audit_identity_display(vr) == "alice@example.com"
 

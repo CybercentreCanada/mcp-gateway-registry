@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 for collector in [PROCESS_COLLECTOR, PLATFORM_COLLECTOR, GC_COLLECTOR]:
     try:
         PROM_REGISTRY.unregister(collector)
-    except Exception:
+    except Exception:  # nosec B110 - collector may already be unregistered
         pass
 
 

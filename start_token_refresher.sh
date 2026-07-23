@@ -26,7 +26,7 @@ if pgrep -f "token_refresher.py" > /dev/null; then
     echo "WARNING: Token refresher service appears to be already running"
     echo "Existing processes:"
     pgrep -fl "token_refresher.py"
-    
+
     read -p "Kill existing processes and restart? (y/N): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then

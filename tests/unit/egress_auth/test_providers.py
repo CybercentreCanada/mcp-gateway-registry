@@ -79,3 +79,29 @@ class TestResolveProvider:
         assert cfg.scope_separator == ","
         assert cfg.token_endpoint_auth_style == TokenEndpointAuthStyle.BASIC_HEADER
         assert cfg.use_pkce is True
+
+    def test_custom_resource_threaded(self):
+        # RFC 8707 resource indicator is carried onto the resolved config.
+        cfg = resolve_provider(
+            {
+                "provider": "custom",
+                "custom_authorize_url": "https://auth.atlassian.com/authorize",
+                "custom_token_url": "https://auth.atlassian.com/oauth/token",
+                "custom_resource": "https://mcp.atlassian.com/v1/mcp/authv2",
+            }
+        )
+        assert cfg.resource == "https://mcp.atlassian.com/v1/mcp/authv2"
+
+    def test_custom_resource_absent_is_none(self):
+        cfg = resolve_provider(
+            {
+                "provider": "custom",
+                "custom_authorize_url": "https://idp/auth",
+                "custom_token_url": "https://idp/token",
+            }
+        )
+        assert cfg.resource is None
+
+    def test_builtin_has_no_resource(self):
+        # Built-ins never carry a resource indicator (keeps their flow unchanged).
+        assert PROVIDER_REGISTRY["atlassian"].resource is None

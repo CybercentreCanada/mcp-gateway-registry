@@ -16,7 +16,6 @@ import { RegistryDataStack } from '../lib/registry/registry-data-stack';
 import { RegistryAuthStack } from '../lib/registry/registry-auth-stack';
 import { RegistryServiceStack } from '../lib/registry/registry-service-stack';
 import { RegistryOpsStack } from '../lib/registry/registry-ops-stack';
-import { RegistryCdnStack } from '../lib/registry/registry-cdn-stack';
 import { RegistryBuildStack } from '../lib/registry/registry-build-stack';
 
 // ---------------------------------------------------------------------------
@@ -91,16 +90,6 @@ if (config.enabled) {
   serviceStack.addDependency(networkStack);
   serviceStack.addDependency(dataStack);
   serviceStack.addDependency(authStack);
-
-  const cdnStack = new RegistryCdnStack(app, 'Registry-Cdn', {
-    config,
-    serviceStack,
-    authStack,
-    env,
-    description: 'MCP Gateway Registry - CloudFront distributions + WAFv2 Web ACLs',
-  });
-  cdnStack.addDependency(serviceStack);
-  cdnStack.addDependency(authStack);
 
   const buildStack = new RegistryBuildStack(app, 'Registry-Build', {
     config,

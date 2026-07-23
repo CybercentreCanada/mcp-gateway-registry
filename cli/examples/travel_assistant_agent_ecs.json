@@ -1,9 +1,11 @@
 {
   "protocolVersion": "0.3.0",
+  "supportedProtocol": "a2a",
   "name": "Travel Assistant Agent",
   "description": "Intelligent travel planning and assistance agent",
-  "url": "http://travel-assistant-agent.mcp-gateway-v2.local:9000",
+  "url": "http://mcpgateway.ddns.net:9001/",
   "version": "0.0.1",
+  "status": "active",
   "capabilities": {
     "streaming": true
   },

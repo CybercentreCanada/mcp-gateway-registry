@@ -123,25 +123,44 @@ module "mcp_gateway" {
   cors_allowed_origins   = var.cors_allowed_origins
   trusted_proxy_hops     = var.trusted_proxy_hops
   trusted_external_hosts = var.trusted_external_hosts
-  trusted_real_ip_cidrs  = var.trusted_real_ip_cidrs
-  bind_host              = var.bind_host
+  # ECS is always behind an ALB, so default the nginx realip trust to the VPC CIDR
+  # when the operator has not set it explicitly. This makes the inbound rate-limit
+  # zones (which key on the connection peer) throttle per real client IP instead of
+  # collapsing to a single global bucket at the ALB's ENI IP, and makes the audited
+  # client_ip the real end user. Falls back to empty (direct-peer behaviour) only if
+  # the VPC CIDR cannot be resolved (e.g. an existing-VPC lookup that returned none).
+  trusted_real_ip_cidrs = var.trusted_real_ip_cidrs != "" ? var.trusted_real_ip_cidrs : local.selected_vpc_cidr_block
+  bind_host             = var.bind_host
 
   # DocumentDB configuration
   storage_backend = var.storage_backend
   # Cluster endpoint + credentials secret are gated on is_aws_documentdb so
   # that external-MongoDB (Atlas / self-managed) deployments do not require
   # the AWS DocumentDB resources to exist (issue #955).
-  documentdb_endpoint               = local.is_aws_documentdb ? aws_docdb_cluster.registry[0].endpoint : ""
-  documentdb_database               = var.documentdb_database
-  documentdb_namespace              = var.documentdb_namespace
-  documentdb_use_tls                = var.documentdb_use_tls
-  documentdb_use_iam                = var.documentdb_use_iam
-  documentdb_credentials_secret_arn = local.is_aws_documentdb ? aws_secretsmanager_secret.documentdb_credentials[0].arn : ""
+  documentdb_endpoint                      = local.is_aws_documentdb ? aws_docdb_cluster.registry[0].endpoint : ""
+  documentdb_database                      = var.documentdb_database
+  documentdb_namespace                     = var.documentdb_namespace
+  rate_limiting_enabled                    = var.rate_limiting_enabled
+  rate_limit_backend                       = var.rate_limit_backend
+  rate_limit_fail_open                     = var.rate_limit_fail_open
+  rate_limit_definitions_cache_ttl_seconds = var.rate_limit_definitions_cache_ttl_seconds
+  rate_limit_backend_timeout_ms            = var.rate_limit_backend_timeout_ms
+  rate_limit_user_floor_per_min            = var.rate_limit_user_floor_per_min
+  rate_limit_agent_floor_per_min           = var.rate_limit_agent_floor_per_min
+  documentdb_use_tls                       = var.documentdb_use_tls
+  documentdb_use_iam                       = var.documentdb_use_iam
+  documentdb_credentials_secret_arn        = local.is_aws_documentdb ? aws_secretsmanager_secret.documentdb_credentials[0].arn : ""
 
   # Optional full MongoDB connection string override (PR #947). See variable
   # docs in variables.tf. Leave both empty to use the DOCUMENTDB_* block above.
   mongodb_connection_string            = var.mongodb_connection_string
   mongodb_connection_string_secret_arn = var.mongodb_connection_string_secret_arn
+
+  # Optional base64-encoded RUM snippet served as /rum.js (feature #1471). Plain
+  # text or Secrets Manager ARN; see variable docs in variables.tf.
+  registry_rum_snippet_b64        = var.registry_rum_snippet_b64
+  registry_rum_snippet_secret_arn = var.registry_rum_snippet_secret_arn
+  registry_rum_allowed_hosts      = var.registry_rum_allowed_hosts
 
   # Security scanning configuration
   security_scan_enabled         = var.security_scan_enabled
@@ -163,11 +182,12 @@ module "mcp_gateway" {
   idp_user_group_fallback_enabled_providers = var.idp_user_group_fallback_enabled_providers
 
   # Amazon Cognito configuration
-  cognito_enabled       = var.cognito_enabled
-  cognito_user_pool_id  = var.cognito_user_pool_id
-  cognito_client_id     = var.cognito_client_id
-  cognito_client_secret = var.cognito_client_secret
-  cognito_domain        = var.cognito_domain
+  cognito_enabled        = var.cognito_enabled
+  cognito_user_pool_id   = var.cognito_user_pool_id
+  cognito_client_id      = var.cognito_client_id
+  cognito_client_secret  = var.cognito_client_secret
+  cognito_domain         = var.cognito_domain
+  cognito_m2m_client_ids = var.cognito_m2m_client_ids
 
   # Okta configuration
   okta_enabled               = var.okta_enabled
@@ -257,7 +277,8 @@ module "mcp_gateway" {
   federation_encryption_key            = var.federation_encryption_key
 
   # AWS Agent Registry federation configuration
-  aws_registry_federation_enabled = var.aws_registry_federation_enabled
+  aws_registry_federation_enabled          = var.aws_registry_federation_enabled
+  aws_registry_federation_assume_role_arns = var.aws_registry_federation_assume_role_arns
 
   # ANS (Agent Name Service) configuration
   ans_integration_enabled            = var.ans_integration_enabled
@@ -276,8 +297,9 @@ module "mcp_gateway" {
   registry_contact_url       = var.registry_contact_url
 
   # Audit logging configuration
-  audit_log_enabled  = var.audit_log_enabled
-  audit_log_ttl_days = var.audit_log_ttl_days
+  audit_log_enabled         = var.audit_log_enabled
+  audit_log_ttl_days        = var.audit_log_ttl_days
+  audit_log_require_durable = var.audit_log_require_durable
 
   # Application log configuration
   app_log_centralized_enabled  = var.app_log_centralized_enabled
@@ -310,6 +332,11 @@ module "mcp_gateway" {
   # Deployment mode configuration
   deployment_mode = var.deployment_mode
   registry_mode   = var.registry_mode
+
+  # A2A reverse-proxy gateway (opt-in) + SSRF guard bypass for internal upstreams
+  a2a_reverse_proxy_enabled = var.a2a_reverse_proxy_enabled
+  ssrf_allowed_hosts        = var.ssrf_allowed_hosts
+  ssrf_allowed_cidrs        = var.ssrf_allowed_cidrs
 
   # Internal/workshop deployment classification (telemetry labels; issue #1216)
   internal_only_deployment = var.internal_only_deployment
@@ -358,6 +385,7 @@ module "mcp_gateway" {
   mcp_advertised_scopes   = var.mcp_advertised_scopes
   ide_oauth_client_id     = var.ide_oauth_client_id
   ide_oauth_callback_port = var.ide_oauth_callback_port
+  ide_connect_scope       = var.ide_connect_scope
 
   # Extra environment variables for custom configuration (Issue #1000)
   registry_extra_env    = var.registry_extra_env

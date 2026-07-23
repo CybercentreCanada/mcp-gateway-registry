@@ -16,7 +16,7 @@ from registry.api.config_routes import (
     CONFIG_GROUPS,
     _export_as_env,
 )
-from registry.core.config import settings
+from registry.core.config import Settings, settings
 from registry.core.schemas import ServerInfo
 
 
@@ -183,3 +183,59 @@ class TestConnectConfigResolution:
         # Must be exactly False, not None - the endpoint must preserve the
         # stored boolean so the frontend can strip /mcp for root-endpoint servers.
         assert result["append_mcp_path"] is False
+
+
+class TestIdeConnectScope:
+    """Claude Code Connect-snippet scope (IDE_CONNECT_SCOPE)."""
+
+    def test_setting_exists_with_empty_default(self):
+        assert hasattr(settings, "ide_connect_scope")
+
+    def test_field_present_in_auth_config_group(self):
+        auth_fields = {f[0] for f in CONFIG_GROUPS["auth"]["fields"]}
+        assert "ide_connect_scope" in auth_fields
+
+    def test_valid_scopes_are_accepted_lowercased(self):
+        for raw, expected in [
+            ("user", "user"),
+            ("USER", "user"),
+            (" project ", "project"),
+            ("local", "local"),
+        ]:
+            assert Settings(ide_connect_scope=raw).ide_connect_scope == expected
+
+    def test_invalid_or_empty_scope_drops_to_empty(self):
+        # Anything outside local|project|user (or empty/None) -> "" so the flag is
+        # omitted; this is what prevents arbitrary injection into the snippet.
+        for raw in ["", None, "global", "user; rm -rf /", "--foo"]:
+            assert Settings(ide_connect_scope=raw).ide_connect_scope == ""
+
+    async def _call_with_scope(self, scope_value: str):
+        with (
+            patch.object(
+                server_routes.server_service,
+                "get_server_info",
+                AsyncMock(
+                    return_value={
+                        "server_name": "AWS Knowledge",
+                        "custom_headers_encrypted": [],
+                    }
+                ),
+            ),
+            patch.object(server_routes, "set_audit_action", MagicMock()),
+            patch.object(settings, "ide_connect_scope", scope_value),
+        ):
+            return await server_routes.get_server_connect_config(
+                request=MagicMock(),
+                service_path="aws-knowledge",
+                user_context={"is_admin": True},
+                _csrf=None,
+            )
+
+    async def test_connect_config_surfaces_scope_when_set(self):
+        result = await self._call_with_scope("user")
+        assert result["connect_scope"] == "user"
+
+    async def test_connect_config_scope_none_when_unset(self):
+        result = await self._call_with_scope("")
+        assert result["connect_scope"] is None

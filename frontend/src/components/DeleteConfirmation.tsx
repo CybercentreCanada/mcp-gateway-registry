@@ -5,7 +5,7 @@ import { ArrowPathIcon } from '@heroicons/react/24/outline';
  * Props for the DeleteConfirmation component.
  */
 export interface DeleteConfirmationProps {
-  entityType: 'server' | 'agent' | 'group' | 'user' | 'm2m';
+  entityType: 'server' | 'agent' | 'group' | 'user' | 'm2m' | 'rate-limit';
   entityName: string;
   entityPath: string;
   onConfirm: (path: string) => Promise<void>;
@@ -14,11 +14,11 @@ export interface DeleteConfirmationProps {
 
 /**
  * DeleteConfirmation component provides an inline confirmation UI for delete operations.
- * 
+ *
  * Displays a red-tinted container with warning text, requiring users to type the entity
  * name exactly before the delete button becomes enabled. Shows loading state during
  * API calls and displays error messages on failure.
- * 
+ *
  * Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8
  */
 const DeleteConfirmation: React.FC<DeleteConfirmationProps> = ({
@@ -60,6 +60,7 @@ const DeleteConfirmation: React.FC<DeleteConfirmationProps> = ({
     group: 'Group',
     user: 'User',
     m2m: 'M2M Account',
+    'rate-limit': 'Rate Limit',
   };
   const entityTypeLabel = entityTypeLabels[entityType] || entityType;
 
@@ -79,7 +80,7 @@ const DeleteConfirmation: React.FC<DeleteConfirmationProps> = ({
         type="text"
         value={typedName}
         onChange={(e) => setTypedName(e.target.value)}
-        className="w-full px-3 py-2 border border-red-300 dark:border-red-700 rounded mb-3 
+        className="w-full px-3 py-2 border border-red-300 dark:border-red-700 rounded mb-3
                    bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
         placeholder={entityName}
         disabled={isDeleting}
@@ -91,7 +92,7 @@ const DeleteConfirmation: React.FC<DeleteConfirmationProps> = ({
         <button
           onClick={onCancel}
           disabled={isDeleting}
-          className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 
+          className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200
                      rounded hover:bg-gray-300 dark:hover:bg-gray-800 disabled:opacity-50"
         >
           Cancel
@@ -99,7 +100,7 @@ const DeleteConfirmation: React.FC<DeleteConfirmationProps> = ({
         <button
           onClick={handleDelete}
           disabled={!isConfirmed || isDeleting}
-          className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 
+          className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700
                      disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
         >
           {isDeleting && <ArrowPathIcon className="h-4 w-4 animate-spin" />}

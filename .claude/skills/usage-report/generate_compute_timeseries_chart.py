@@ -21,10 +21,11 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys
+
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import seaborn as sns
-import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -223,9 +224,7 @@ def _write_snapshot_table(
         total = sum(counts.values())
         if idx == 0:
             values = [f"**{counts.get(c, 0)}**" for c in columns]
-            lines.append(
-                f"| **{date_str}** | " + " | ".join(values) + f" | **{total}** |"
-            )
+            lines.append(f"| **{date_str}** | " + " | ".join(values) + f" | **{total}** |")
         else:
             values = [str(counts.get(c, 0)) for c in columns]
             lines.append(f"| {date_str} | " + " | ".join(values) + f" | {total} |")
@@ -361,7 +360,9 @@ def main() -> None:
     unique_rows = _deduplicate_events(all_rows)
     chart_rows = unique_rows
     if args.exclude_incomplete_day:
-        chart_rows = [r for r in unique_rows if (r.get("ts") or "")[:10] != args.exclude_incomplete_day]
+        chart_rows = [
+            r for r in unique_rows if (r.get("ts") or "")[:10] != args.exclude_incomplete_day
+        ]
         logger.info(
             f"Excluded incomplete day {args.exclude_incomplete_day}: "
             f"{len(unique_rows)} -> {len(chart_rows)} events (chart only)"
@@ -379,9 +380,7 @@ def main() -> None:
     if args.snapshots_table:
         columns, rows = _compute_snapshot_table(csv_files)
         if not rows:
-            logger.warning(
-                "No dated-subfolder CSVs found; skipping snapshot table output"
-            )
+            logger.warning("No dated-subfolder CSVs found; skipping snapshot table output")
         else:
             _write_snapshot_table(columns, rows, args.snapshots_table)
 

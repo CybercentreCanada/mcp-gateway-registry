@@ -282,7 +282,7 @@ class RetentionManager:
                 for policy in self.policies.values():
                     await db.execute(
                         """
-                        INSERT OR REPLACE INTO retention_policies 
+                        INSERT OR REPLACE INTO retention_policies
                         (table_name, retention_days, is_active, updated_at)
                         VALUES (?, ?, ?, datetime('now'))
                     """,
@@ -616,7 +616,7 @@ class RetentionManager:
 
             db_path = self.storage.db_path
 
-            size_info = {}
+            size_info: dict[str, Any] = {}
 
             if os.path.exists(db_path):
                 # Main database file

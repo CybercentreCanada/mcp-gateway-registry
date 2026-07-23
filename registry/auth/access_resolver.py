@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 ToolAllowlist = dict[str, set[str]]
 
 
+# Cross-server wildcard sentinels on the READ side. MUST stay in sync with the
+# WRITE-side reject set registry.utils.url_guard._RESERVED_SERVER_PATH_NAMES,
+# which blocks a registration path from normalizing into one of these values.
 _WILDCARD_VALUES: frozenset[str] = frozenset(("all", "*"))
 
 

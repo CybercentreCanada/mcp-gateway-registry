@@ -110,13 +110,13 @@ const fetchAdminTokens = async () => {
       description: 'Generated via sidebar',
       expires_in_hours: 8,
     };
-    
+
     const response = await axios.post('/api/tokens/generate', requestData, {
       headers: {
         'Content-Type': 'application/json',
       },
     });
-    
+
     if (response.data.success) {
       setTokenData(response.data);
       setShowTokenModal(true);
@@ -174,7 +174,7 @@ const fetchAdminTokens = async () => {
               <ArrowLeftIcon className="h-4 w-4" />
               <span>Back to Dashboard</span>
             </Link>
-            
+
             <Link
               to="/generate-token"
               className="flex items-center space-x-3 px-3 py-2 rounded-lg text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-purple-500 bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300"
@@ -216,7 +216,7 @@ const fetchAdminTokens = async () => {
                     <span className="ml-1">({user.provider})</span>
                   )}
                 </div>
-                
+
                 {/* Scopes toggle */}
                 {!user.is_admin && user.scopes && user.scopes.length > 0 && (
                   <div>
@@ -231,7 +231,7 @@ const fetchAdminTokens = async () => {
                         <ChevronDownIcon className="h-3 w-3" />
                       )}
                     </button>
-                    
+
                     {showScopes && (
                       <div className="mt-2 space-y-2 max-h-32 overflow-y-auto">
                         {user.scopes.map((scope) => (
@@ -357,7 +357,7 @@ const fetchAdminTokens = async () => {
               <FunnelIcon className="h-4 w-4 text-gray-600 dark:text-gray-400" />
               <h3 className="text-sm font-medium text-gray-900 dark:text-white">Filter Services</h3>
             </div>
-            
+
             <div className="space-y-2">
               {filters.map((filter) => (
                 <button
@@ -518,7 +518,7 @@ const fetchAdminTokens = async () => {
               <ChartBarIcon className="h-5 w-5 text-gray-500" />
               <h3 className="text-sm font-medium text-gray-900 dark:text-white">Statistics</h3>
             </div>
-            
+
             <div className="grid grid-cols-2 gap-3">
               <div className="text-center p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
                 <div className="text-xl font-semibold text-gray-900 dark:text-white">{stats.total}</div>
@@ -592,7 +592,7 @@ const fetchAdminTokens = async () => {
                       </button>
                     </div>
                   </Transition.Child>
-                  
+
                   <div className="flex grow flex-col gap-y-5 overflow-y-auto bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700">
                     {sidebarContent}
                   </div>
@@ -713,4 +713,4 @@ const fetchAdminTokens = async () => {
   );
 };
 
-export default Sidebar; 
+export default Sidebar;

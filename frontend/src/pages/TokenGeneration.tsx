@@ -27,7 +27,7 @@ const TokenGeneration: React.FC = () => {
     e.preventDefault();
     setLoading(true);
     setError('');
-    
+
     try {
       const requestData: any = {
         description: formData.description,
@@ -51,13 +51,13 @@ const TokenGeneration: React.FC = () => {
         }
       }
       // If using current scopes, we don't need to set requested_scopes - it will default to user's current scopes
-      
+
       const response = await axios.post('/api/tokens/generate', requestData, {
         headers: {
           'Content-Type': 'application/json',
         },
       });
-      
+
       if (response.data.success) {
         setGeneratedToken(response.data.token_data.access_token);
         setTokenDetails(response.data);
@@ -87,7 +87,7 @@ const TokenGeneration: React.FC = () => {
       document.body.appendChild(textArea);
       textArea.focus();
       textArea.select();
-      
+
       try {
         document.execCommand('copy');
         setCopied(true);
@@ -95,7 +95,7 @@ const TokenGeneration: React.FC = () => {
       } catch (err) {
         console.error('Failed to copy token:', err);
       }
-      
+
       document.body.removeChild(textArea);
     }
   };
@@ -161,7 +161,7 @@ const TokenGeneration: React.FC = () => {
           <div className="card p-4">
             <form onSubmit={handleGenerateToken} className="space-y-4">
               <h3 className="text-base font-semibold text-gray-900 dark:text-white">Token Configuration</h3>
-              
+
               {/* Form Fields - Responsive Grid */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {/* Left Column */}
@@ -206,7 +206,7 @@ const TokenGeneration: React.FC = () => {
                   {/* Scope Configuration */}
                   <div>
                     <h4 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">Scope Configuration</h4>
-                    
+
                     <div className="space-y-2">
                       <label className="flex items-center space-x-2">
                         <input
@@ -226,7 +226,7 @@ const TokenGeneration: React.FC = () => {
                           </div>
                         </div>
                       </label>
-                      
+
                       <label className="flex items-center space-x-2">
                         <input
                           type="radio"
@@ -314,7 +314,7 @@ const TokenGeneration: React.FC = () => {
                   Token Generated Successfully
                 </h3>
               </div>
-              
+
               {/* Token Display */}
               <div className="relative mb-4">
                 <div className="bg-white dark:bg-gray-800 p-4 rounded-lg border border-green-200 dark:border-green-700">
@@ -322,7 +322,7 @@ const TokenGeneration: React.FC = () => {
                     {generatedToken}
                   </code>
                 </div>
-                
+
                 <button
                   onClick={handleCopyToken}
                   className="absolute top-2 right-2 p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
@@ -354,7 +354,7 @@ const TokenGeneration: React.FC = () => {
                 </code>
                 <p className="text-xs text-blue-600 dark:text-blue-300 mt-2">Replace YOUR_TOKEN_HERE with the token above.</p>
               </div>
-              
+
               {/* Security Warning */}
               <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
                 <p className="text-sm text-yellow-800 dark:text-yellow-200">
@@ -369,4 +369,4 @@ const TokenGeneration: React.FC = () => {
   );
 };
 
-export default TokenGeneration; 
+export default TokenGeneration;

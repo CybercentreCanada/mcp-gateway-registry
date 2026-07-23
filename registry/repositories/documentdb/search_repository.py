@@ -2296,9 +2296,13 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
         if not settings.custom_entity_types_enabled:
             return scope
         try:
-            from ..factory import get_custom_type_repository
+            from typing import cast
 
-            descriptors = await get_custom_type_repository().cache.list_descriptors()
+            from ..factory import get_custom_type_repository
+            from .custom_type_repository import DocumentDBCustomTypeRepository
+
+            type_repo = cast(DocumentDBCustomTypeRepository, get_custom_type_repository())
+            descriptors = await type_repo.cache.list_descriptors()
             scope.extend(d.name for d in descriptors)
         except Exception as e:
             logger.warning(f"Could not append custom types to search scope: {e}")

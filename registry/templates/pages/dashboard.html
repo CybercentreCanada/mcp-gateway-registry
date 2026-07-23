@@ -20,9 +20,9 @@
     <div class="header-actions">
         <div class="search-container">
             <form class="search-form" onsubmit="searchServers(event)">
-                <input type="search" 
+                <input type="search"
                        id="searchInput"
-                       placeholder="Search by name or description..." 
+                       placeholder="Search by name or description..."
                        class="search-input"
                        oninput="debounceSearch(this.value)">
                 <button type="submit" class="search-button">
@@ -30,7 +30,7 @@
                 </button>
             </form>
         </div>
-        
+
         <button class="primary-button" onclick="registerNewServer()">
             <span class="button-icon">➕</span>
             Register Server
@@ -62,7 +62,7 @@
 {% block extra_js %}
 <script>
     let searchTimeout;
-    
+
     // Debounced search
     function debounceSearch(query) {
         clearTimeout(searchTimeout);
@@ -80,10 +80,10 @@
         cards.forEach(card => {
             const title = card.querySelector('.server-title').textContent.toLowerCase();
             const description = card.querySelector('.server-description')?.textContent.toLowerCase() || '';
-            
-            const matches = title.includes(query.toLowerCase()) || 
+
+            const matches = title.includes(query.toLowerCase()) ||
                           description.includes(query.toLowerCase());
-            
+
             if (matches) {
                 card.style.display = 'block';
                 visibleCount++;
@@ -103,7 +103,7 @@
             document.querySelectorAll('.filter-item').forEach(f => f.classList.remove('active'));
             // Add active class to clicked filter
             this.classList.add('active');
-            
+
             const filter = this.dataset.filter;
             applyFilter(filter);
         });
@@ -111,13 +111,13 @@
 
     function applyFilter(filter) {
         const cards = document.querySelectorAll('.service-card');
-        
+
         cards.forEach(card => {
             const isEnabled = card.querySelector('input[type="checkbox"]').checked;
             const hasIssues = card.classList.contains('has-issues'); // You'd set this based on server status
-            
+
             let show = true;
-            
+
             switch(filter) {
                 case 'enabled':
                     show = isEnabled;
@@ -132,7 +132,7 @@
                 default:
                     show = true;
             }
-            
+
             card.style.display = show ? 'block' : 'none';
         });
     }
@@ -142,12 +142,12 @@
         const card = document.querySelector(`[data-server-path="${serverPath}"]`);
         const statusBadge = card.querySelector('.status-badge');
         const toggleLabel = card.querySelector('.toggle-label');
-        
+
         // Update UI optimistically
         statusBadge.textContent = enabled ? 'Enabled' : 'Disabled';
         statusBadge.className = `badge status-badge ${enabled ? 'enabled' : 'disabled'}`;
         toggleLabel.textContent = enabled ? 'Enabled' : 'Disabled';
-        
+
         // Make API call
         fetch(`/api/servers/${serverPath}/toggle`, {
             method: 'POST',
@@ -186,4 +186,4 @@
         filterServers(query);
     }
 </script>
-{% endblock %} 
+{% endblock %}

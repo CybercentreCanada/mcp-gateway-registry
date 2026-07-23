@@ -41,8 +41,12 @@ def _make_app(user_context: dict | None = None, auth_raises: bool = False) -> Fa
 
 def _result(ident: str, score: int) -> ArdSearchResult:
     return ArdSearchResult(
-        identifier=ident, display_name=ident.split(":")[-1],
-        type="application/mcp-server-card+json", url="http://x", score=score, source="http://s",
+        identifier=ident,
+        display_name=ident.split(":")[-1],
+        type="application/mcp-server-card+json",
+        url="http://x",
+        score=score,
+        source="http://s",
     )
 
 
@@ -56,7 +60,8 @@ class TestSearch:
     def test_happy_path(self):
         app = _make_app()
         with patch.object(
-            ard_routes.ard_search_service, "search_and_scope",
+            ard_routes.ard_search_service,
+            "search_and_scope",
             AsyncMock(return_value=([_result("urn:air:x:server:a", 90)], 2, [])),
         ):
             r = TestClient(app).post("/api/ard/search", json={"query": {"text": "hi"}})
@@ -71,10 +76,13 @@ class TestSearch:
         app = _make_app()
         results = [_result(f"urn:air:x:server:{i}", 100 - i) for i in range(5)]
         with patch.object(
-            ard_routes.ard_search_service, "search_and_scope",
+            ard_routes.ard_search_service,
+            "search_and_scope",
             AsyncMock(return_value=(results, 0, [])),
         ):
-            r = TestClient(app).post("/api/ard/search", json={"query": {"text": "q"}, "pageSize": 2})
+            r = TestClient(app).post(
+                "/api/ard/search", json={"query": {"text": "q"}, "pageSize": 2}
+            )
         body = r.json()
         assert len(body["results"]) == 2
         assert body["pageToken"] is not None  # more pages remain
@@ -83,7 +91,8 @@ class TestSearch:
     def test_federation_modes_accepted(self, federation):
         app = _make_app()
         with patch.object(
-            ard_routes.ard_search_service, "search_and_scope",
+            ard_routes.ard_search_service,
+            "search_and_scope",
             AsyncMock(return_value=([], 0, [])),
         ):
             r = TestClient(app).post(
@@ -133,12 +142,16 @@ class TestBrowse:
         app = _make_app()
         items = [
             ArdCatalogEntry(
-                identifier="urn:air:x:agent:a", display_name="A",
-                type="application/a2a-agent-card+json", url="http://x",
+                identifier="urn:air:x:agent:a",
+                display_name="A",
+                type="application/a2a-agent-card+json",
+                url="http://x",
             )
         ]
         with patch.object(
-            ard_routes.ard_search_service, "browse", AsyncMock(return_value=(items, 1)),
+            ard_routes.ard_search_service,
+            "browse",
+            AsyncMock(return_value=(items, 1)),
         ):
             r = TestClient(app).get("/api/ard/agents?pageSize=5")
         assert r.status_code == 200

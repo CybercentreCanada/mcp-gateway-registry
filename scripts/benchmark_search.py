@@ -105,33 +105,41 @@ def _extract_summary(
     summary = {"servers": [], "tools": [], "agents": [], "skills": []}
 
     for server in response.get("servers", []):
-        summary["servers"].append({
-            "name": server.get("server_name"),
-            "path": server.get("path"),
-            "score": server.get("relevance_score"),
-        })
+        summary["servers"].append(
+            {
+                "name": server.get("server_name"),
+                "path": server.get("path"),
+                "score": server.get("relevance_score"),
+            }
+        )
 
     for tool in response.get("tools", []):
-        summary["tools"].append({
-            "name": tool.get("tool_name"),
-            "server": tool.get("server_name"),
-            "score": tool.get("relevance_score"),
-        })
+        summary["tools"].append(
+            {
+                "name": tool.get("tool_name"),
+                "server": tool.get("server_name"),
+                "score": tool.get("relevance_score"),
+            }
+        )
 
     for agent in response.get("agents", []):
         agent_card = agent.get("agent_card", {})
-        summary["agents"].append({
-            "name": agent_card.get("name") or agent.get("agent_name"),
-            "path": agent.get("path"),
-            "score": agent.get("relevance_score"),
-        })
+        summary["agents"].append(
+            {
+                "name": agent_card.get("name") or agent.get("agent_name"),
+                "path": agent.get("path"),
+                "score": agent.get("relevance_score"),
+            }
+        )
 
     for skill in response.get("skills", []):
-        summary["skills"].append({
-            "name": skill.get("skill_name"),
-            "path": skill.get("path"),
-            "score": skill.get("relevance_score"),
-        })
+        summary["skills"].append(
+            {
+                "name": skill.get("skill_name"),
+                "path": skill.get("path"),
+                "score": skill.get("relevance_score"),
+            }
+        )
 
     return summary
 
@@ -190,12 +198,14 @@ def _generate_queries_from_assets(
         if not q_lower or q_lower in seen_queries or len(q_lower) < 3:
             return
         seen_queries.add(q_lower)
-        ground_truth.append({
-            "query": query,
-            "category": category,
-            "description": description,
-            "expected": expected,
-        })
+        ground_truth.append(
+            {
+                "query": query,
+                "category": category,
+                "description": description,
+                "expected": expected,
+            }
+        )
 
     # Strategy 1: Server names as queries
     for server in assets.get("servers", []):
@@ -250,7 +260,11 @@ def _generate_queries_from_assets(
 
     # Strategy 4: Tag-based queries (group assets by shared tags)
     tag_to_assets: dict[str, list[dict]] = {}
-    for asset_type, key in [("mcp_server", "servers"), ("a2a_agent", "agents"), ("skill", "skills")]:
+    for asset_type, key in [
+        ("mcp_server", "servers"),
+        ("a2a_agent", "agents"),
+        ("skill", "skills"),
+    ]:
         for asset in assets.get(key, []):
             path = asset.get("path", "")
             name = asset.get("server_name") or asset.get("name", "")
@@ -262,18 +276,19 @@ def _generate_queries_from_assets(
                     continue
                 if tag not in tag_to_assets:
                     tag_to_assets[tag] = []
-                tag_to_assets[tag].append({
-                    "path": path,
-                    "name": name,
-                    "entity_type": asset_type,
-                })
+                tag_to_assets[tag].append(
+                    {
+                        "path": path,
+                        "name": name,
+                        "entity_type": asset_type,
+                    }
+                )
 
     for tag, tag_assets in tag_to_assets.items():
         if len(tag) < 3 or len(tag_assets) > 20:
             continue
         expected = [
-            {"path": a["path"], "grade": 2, "reason": f"Has tag: {tag}"}
-            for a in tag_assets[:5]
+            {"path": a["path"], "grade": 2, "reason": f"Has tag: {tag}"} for a in tag_assets[:5]
         ]
         _add_query(
             tag,
@@ -283,7 +298,11 @@ def _generate_queries_from_assets(
         )
 
     # Strategy 5: Description keywords (first 3 meaningful words)
-    for asset_type, key in [("mcp_server", "servers"), ("a2a_agent", "agents"), ("skill", "skills")]:
+    for asset_type, key in [
+        ("mcp_server", "servers"),
+        ("a2a_agent", "agents"),
+        ("skill", "skills"),
+    ]:
         for asset in assets.get(key, []):
             path = asset.get("path", "")
             name = asset.get("server_name") or asset.get("name", "")
@@ -295,12 +314,33 @@ def _generate_queries_from_assets(
                 continue
 
             import re
+
             words = [
-                w.lower() for w in re.split(r"\W+", desc)
-                if len(w) > 3 and w.lower() not in (
-                    "this", "that", "with", "from", "your", "have", "will",
-                    "been", "they", "their", "about", "would", "could", "should",
-                    "into", "also", "tool", "server", "agent", "skill",
+                w.lower()
+                for w in re.split(r"\W+", desc)
+                if len(w) > 3
+                and w.lower()
+                not in (
+                    "this",
+                    "that",
+                    "with",
+                    "from",
+                    "your",
+                    "have",
+                    "will",
+                    "been",
+                    "they",
+                    "their",
+                    "about",
+                    "would",
+                    "could",
+                    "should",
+                    "into",
+                    "also",
+                    "tool",
+                    "server",
+                    "agent",
+                    "skill",
                 )
             ][:4]
             if len(words) >= 2:
@@ -309,12 +349,13 @@ def _generate_queries_from_assets(
                     query,
                     "description-derived",
                     f"Keywords from {name} description",
-                    [{"path": path, "grade": 3, "reason": f"Description contains these terms"}],
+                    [{"path": path, "grade": 3, "reason": "Description contains these terms"}],
                 )
 
     # Cap at 100 queries, balanced across categories
     if len(ground_truth) > 100:
         from collections import Counter
+
         cat_counts = Counter(q["category"] for q in ground_truth)
         max_per_cat = max(10, 100 // len(cat_counts))
         filtered = []
@@ -340,9 +381,7 @@ def _generate_ground_truth(
     server_count = len(assets.get("servers", []))
     agent_count = len(assets.get("agents", []))
     skill_count = len(assets.get("skills", []))
-    logger.info(
-        f"Found {server_count} servers, {agent_count} agents, {skill_count} skills"
-    )
+    logger.info(f"Found {server_count} servers, {agent_count} agents, {skill_count} skills")
 
     if server_count + agent_count + skill_count == 0:
         logger.error("No assets found. Check URL and token.")
@@ -358,6 +397,7 @@ def _generate_ground_truth(
         json.dump(ground_truth, f, indent=2)
 
     from collections import Counter
+
     cats = Counter(q["category"] for q in ground_truth)
     logger.info(f"Saved to {output_path}")
     logger.info(f"Categories: {dict(cats)}")
@@ -365,8 +405,10 @@ def _generate_ground_truth(
     print(f"  {len(ground_truth)} queries across {len(cats)} categories")
     for cat, count in cats.most_common():
         print(f"    {cat}: {count}")
-    print(f"\nTo run the benchmark with your generated ground truth:")
-    print(f"  uv run python scripts/benchmark_search.py --url {base_url} --token-file .token --queries {output_path}")
+    print("\nTo run the benchmark with your generated ground truth:")
+    print(
+        f"  uv run python scripts/benchmark_search.py --url {base_url} --token-file .token --queries {output_path}"
+    )
 
 
 def _fetch_registry_stats(
@@ -378,9 +420,7 @@ def _fetch_registry_stats(
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        response = requests.get(
-            f"{base_url}/api/stats", headers=headers, timeout=10
-        )
+        response = requests.get(f"{base_url}/api/stats", headers=headers, timeout=10)
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -419,27 +459,31 @@ def _run_benchmark(
             elapsed = time.time() - start
 
             summary = _extract_summary(response)
-            results["queries"].append({
-                "query": query_text,
-                "description": q.get("description", ""),
-                "elapsed_ms": round(elapsed * 1000, 1),
-                "total_results": sum(len(v) for v in summary.values()),
-                "results": summary,
-            })
+            results["queries"].append(
+                {
+                    "query": query_text,
+                    "description": q.get("description", ""),
+                    "elapsed_ms": round(elapsed * 1000, 1),
+                    "total_results": sum(len(v) for v in summary.values()),
+                    "results": summary,
+                }
+            )
             logger.info(
                 f"  -> {summary['servers'].__len__()} servers, "
                 f"{summary['tools'].__len__()} tools, "
                 f"{summary['agents'].__len__()} agents, "
                 f"{summary['skills'].__len__()} skills "
-                f"({elapsed*1000:.0f}ms)"
+                f"({elapsed * 1000:.0f}ms)"
             )
         except Exception as e:
             logger.error(f"  -> FAILED: {e}")
-            results["queries"].append({
-                "query": query_text,
-                "description": q.get("description", ""),
-                "error": str(e),
-            })
+            results["queries"].append(
+                {
+                    "query": query_text,
+                    "description": q.get("description", ""),
+                    "error": str(e),
+                }
+            )
 
     return results
 
@@ -454,9 +498,9 @@ def _compare_results(
     with open(file_b) as f:
         results_b = json.load(f)
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"COMPARISON: {file_a.name} vs {file_b.name}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"  A: {results_a['url']} ({results_a['timestamp']})")
     print(f"  B: {results_b['url']} ({results_b['timestamp']})")
     print()
@@ -495,16 +539,8 @@ def _compare_results(
                 a_item = items_a[i] if i < len(items_a) else None
                 b_item = items_b[i] if i < len(items_b) else None
 
-                a_str = (
-                    f"{a_item['name']} ({a_item['score']:.4f})"
-                    if a_item
-                    else "(none)"
-                )
-                b_str = (
-                    f"{b_item['name']} ({b_item['score']:.4f})"
-                    if b_item
-                    else "(none)"
-                )
+                a_str = f"{a_item['name']} ({a_item['score']:.4f})" if a_item else "(none)"
+                b_str = f"{b_item['name']} ({b_item['score']:.4f})" if b_item else "(none)"
 
                 changed = ""
                 if a_item and b_item:
@@ -513,7 +549,7 @@ def _compare_results(
                     elif abs(a_item["score"] - b_item["score"]) > 0.001:
                         changed = " [score changed]"
 
-                print(f"    #{i+1}: {a_str:40} | {b_str}{changed}")
+                print(f"    #{i + 1}: {a_str:40} | {b_str}{changed}")
 
         # Score saturation check
         all_scores_a = [
@@ -534,8 +570,10 @@ def _compare_results(
         unique_a = len(set(round(s, 4) for s in all_scores_a))
         unique_b = len(set(round(s, 4) for s in all_scores_b))
 
-        print(f"\n  Score health: A={unique_a} unique scores ({saturated_a} saturated at 1.0)"
-              f" | B={unique_b} unique scores ({saturated_b} saturated at 1.0)")
+        print(
+            f"\n  Score health: A={unique_a} unique scores ({saturated_a} saturated at 1.0)"
+            f" | B={unique_b} unique scores ({saturated_b} saturated at 1.0)"
+        )
 
 
 def _dcg_at_k(
@@ -581,8 +619,7 @@ def _evaluate_query_results(
     ndcg = _ndcg_at_k(relevance_grades, ideal_grades, 10)
 
     recall = (
-        sum(1 for path in result_paths[:10] if path in expected_map)
-        / len(expected_map)
+        sum(1 for path in result_paths[:10] if path in expected_map) / len(expected_map)
         if expected_map
         else 0.0
     )
@@ -632,9 +669,7 @@ def _generate_report(
     saturated = sum(1 for s in all_scores if s >= 0.999)
     unique_scores = len(set(round(s, 4) for s in all_scores))
     avg_latency = (
-        sum(q.get("elapsed_ms", 0) for q in successful) / len(successful)
-        if successful
-        else 0
+        sum(q.get("elapsed_ms", 0) for q in successful) / len(successful) if successful else 0
     )
 
     query_metrics = []
@@ -647,20 +682,12 @@ def _generate_report(
             query_metrics.append(metrics)
 
     avg_ndcg = (
-        sum(m["ndcg@10"] for m in query_metrics) / len(query_metrics)
-        if query_metrics
-        else 0.0
+        sum(m["ndcg@10"] for m in query_metrics) / len(query_metrics) if query_metrics else 0.0
     )
     avg_recall = (
-        sum(m["recall@10"] for m in query_metrics) / len(query_metrics)
-        if query_metrics
-        else 0.0
+        sum(m["recall@10"] for m in query_metrics) / len(query_metrics) if query_metrics else 0.0
     )
-    avg_mrr = (
-        sum(m["mrr"] for m in query_metrics) / len(query_metrics)
-        if query_metrics
-        else 0.0
-    )
+    avg_mrr = sum(m["mrr"] for m in query_metrics) / len(query_metrics) if query_metrics else 0.0
     perfect = sum(1 for m in query_metrics if m["ndcg@10"] == 1.0)
     zero_hit = sum(1 for m in query_metrics if m["ndcg@10"] == 0.0)
 
@@ -673,33 +700,43 @@ def _generate_report(
         f.write(f"- **Timestamp:** {data.get('timestamp', 'unknown')}\n")
         f.write(f"- **Version:** {registry.get('version', 'unknown')}\n")
         f.write(f"- **Database:** {registry.get('database_backend', 'unknown')}\n")
-        f.write(f"- **Registry contents:** {registry.get('servers', 0)} servers, "
-                f"{registry.get('agents', 0)} agents, {registry.get('skills', 0)} skills\n")
-        f.write(f"- **Queries:** {len(queries)} total, {len(successful)} succeeded, {len(failed)} failed\n")
+        f.write(
+            f"- **Registry contents:** {registry.get('servers', 0)} servers, "
+            f"{registry.get('agents', 0)} agents, {registry.get('skills', 0)} skills\n"
+        )
+        f.write(
+            f"- **Queries:** {len(queries)} total, {len(successful)} succeeded, {len(failed)} failed\n"
+        )
         f.write(f"- **Avg latency:** {avg_latency:.0f}ms per query\n\n")
 
         f.write("## Quality Metrics (against ground truth)\n\n")
-        f.write(f"| Metric | Value |\n")
-        f.write(f"|--------|-------|\n")
+        f.write("| Metric | Value |\n")
+        f.write("|--------|-------|\n")
         f.write(f"| NDCG@10 (avg) | {avg_ndcg:.4f} |\n")
         f.write(f"| MRR (avg) | {avg_mrr:.4f} |\n")
         f.write(f"| Recall@10 (avg) | {avg_recall:.4f} |\n")
         f.write(f"| Perfect queries (NDCG=1.0) | {perfect} / {len(query_metrics)} |\n")
         f.write(f"| Zero-hit queries (NDCG=0.0) | {zero_hit} / {len(query_metrics)} |\n")
-        f.write(f"| Evaluated queries | {len(query_metrics)} (queries with ground truth expectations) |\n")
+        f.write(
+            f"| Evaluated queries | {len(query_metrics)} (queries with ground truth expectations) |\n"
+        )
         skipped = len(successful) - len(query_metrics)
         if skipped > 0:
-            f.write(f"| Skipped from eval | {skipped} (no-answer queries with empty expected results) |\n")
+            f.write(
+                f"| Skipped from eval | {skipped} (no-answer queries with empty expected results) |\n"
+            )
         if failed:
             f.write(f"| Failed queries | {len(failed)} (API rejected, e.g. empty query) |\n")
         f.write("\n")
 
         f.write("## Score Health\n\n")
-        f.write(f"| Metric | Value |\n")
-        f.write(f"|--------|-------|\n")
+        f.write("| Metric | Value |\n")
+        f.write("|--------|-------|\n")
         f.write(f"| Total scores in results | {len(all_scores)} |\n")
         f.write(f"| Unique score values | {unique_scores} |\n")
-        f.write(f"| Saturated at 1.0 | {saturated} ({saturated*100//max(len(all_scores),1)}%) |\n")
+        f.write(
+            f"| Saturated at 1.0 | {saturated} ({saturated * 100 // max(len(all_scores), 1)}%) |\n"
+        )
         if all_scores:
             f.write(f"| Score range | {min(all_scores):.4f} to {max(all_scores):.4f} |\n\n")
 
@@ -726,7 +763,7 @@ def _generate_report(
         for q in successful:
             results = q.get("results", {})
             total = q.get("total_results", 0)
-            f.write(f"### \"{q['query']}\"\n\n")
+            f.write(f'### "{q["query"]}"\n\n')
             if q.get("description"):
                 f.write(f"*{q['description']}*\n\n")
 
@@ -756,7 +793,7 @@ def _generate_report(
                 for i, item in enumerate(items[:5]):
                     name = item.get("name", "unknown")
                     score = item.get("score", 0)
-                    f.write(f"| {i+1} | {name} | {score:.4f} |\n")
+                    f.write(f"| {i + 1} | {name} | {score:.4f} |\n")
                 f.write("\n")
 
             f.write("---\n\n")

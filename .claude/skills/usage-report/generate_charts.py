@@ -15,9 +15,10 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys
+
 import matplotlib.pyplot as plt
 import seaborn as sns
-import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -116,7 +117,7 @@ def _plot_single_facet(
     ax.set_xlabel("")
 
     # Add count and percentage labels on bars
-    for bar, count in zip(bars, counts):
+    for bar, count in zip(bars, counts, strict=False):
         pct = count / total * 100
         label_text = f" {count} ({pct:.0f}%)"
         ax.text(

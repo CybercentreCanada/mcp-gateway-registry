@@ -28,12 +28,8 @@ Scopes define what resources (MCP servers, agents) users can access and what act
       "tools": ["tool-name-1", "tool-name-2"]
     },
     {
-      "agents": {
-        "actions": [
-          {"action": "list_agents", "resources": ["/agent-path"]},
-          {"action": "get_agent", "resources": ["/agent-path"]}
-        ]
-      }
+      "agent": "/agent-path",
+      "actions": ["list_agents", "get_agent", "invoke_agent"]
     }
   ],
   "ui_permissions": {
@@ -88,7 +84,7 @@ This means users in either the Keycloak group `public-mcp-users` OR the Entra ID
 
 ### server_access Field
 
-The `server_access` array defines what MCP servers and methods users can access. Each entry can be either a server access rule or an agent actions block.
+The `server_access` array defines what MCP servers and A2A agents users can access. Each entry is either a **server rule** (`{"server", "methods", "tools"}`) or an **agent rule** (`{"agent", "actions"}`). Both use the same shape: an identifier key plus a verb list. `agent` mirrors `server` (the resource identifier) and `actions` mirrors `methods` (the allowed verbs). MCP scope resolution inspects only `server`-keyed entries and the A2A validator inspects only `agent`-keyed entries, so the two rule types coexist safely in one array.
 
 #### Server Access Rule
 
@@ -142,19 +138,21 @@ The `server_access` array defines what MCP servers and methods users can access.
 }
 ```
 
-#### Agent Actions Block
+#### Agent Rule
 
-Agent actions define what operations users can perform on A2A agents.
+An agent rule defines what operations users can perform on a specific A2A agent (or all agents). It has the same shape as a server rule: the `agent` key is the resource identifier and `actions` is the allowed-verb list.
 
 ```json
 {
-  "agents": {
-    "actions": [
-      {"action": "action-name", "resources": ["/agent-path-1", "/agent-path-2"]}
-    ]
-  }
+  "agent": "/agent-path",
+  "actions": ["list_agents", "get_agent", "invoke_agent"]
 }
 ```
+
+| Field | Description |
+|-------|-------------|
+| `agent` | Agent path (e.g., `/flight-booking`) or `"*"`/`"all"` for all agents |
+| `actions` | List of allowed agent actions, or `["all"]`/`["*"]` for every action |
 
 **Available Agent Actions:**
 
@@ -165,37 +163,29 @@ Agent actions define what operations users can perform on A2A agents.
 | `publish_agent` | Register new agents | `POST /api/agents/register` |
 | `modify_agent` | Update existing agents | `PUT /api/agents/{path}` |
 | `delete_agent` | Remove agents | `DELETE /api/agents/{path}` |
+| `invoke_agent` | Call the agent through the gateway (reverse-proxy mode) | `POST /agent/{path}/` |
 
-**Resource Patterns:**
-- `/agent-name` - Specific agent path (e.g., `/flight-booking`)
-- `all` - All agents (wildcard access)
+To grant access to multiple specific agents, add one rule per agent (each with its own `actions`):
 
-**Example - Limited agent access:**
+**Example - Limited agent access (two named agents):**
 ```json
 {
-  "agents": {
-    "actions": [
-      {"action": "list_agents", "resources": ["/flight-booking", "/code-reviewer"]},
-      {"action": "get_agent", "resources": ["/flight-booking", "/code-reviewer"]}
-    ]
-  }
+  "server_access": [
+    {"agent": "/flight-booking", "actions": ["list_agents", "get_agent", "invoke_agent"]},
+    {"agent": "/code-reviewer", "actions": ["list_agents", "get_agent"]}
+  ]
 }
 ```
 
 **Example - Full agent admin access:**
 ```json
 {
-  "agents": {
-    "actions": [
-      {"action": "list_agents", "resources": ["all"]},
-      {"action": "get_agent", "resources": ["all"]},
-      {"action": "publish_agent", "resources": ["all"]},
-      {"action": "modify_agent", "resources": ["all"]},
-      {"action": "delete_agent", "resources": ["all"]}
-    ]
-  }
+  "agent": "*",
+  "actions": ["list_agents", "get_agent", "publish_agent", "modify_agent", "delete_agent", "invoke_agent"]
 }
 ```
+
+> **Do not use the older nested form** `{"agents": {"actions": [{"action": ..., "resources": [...]}]}}`. It is silently dropped by the scope flattener (`_flatten_server_access`) and grants nothing. Use the flat `{"agent", "actions"}` shape shown above.
 
 ### ui_permissions Field
 
@@ -270,15 +260,8 @@ Full access to all servers, agents, and UI functions:
       "tools": ["all"]
     },
     {
-      "agents": {
-        "actions": [
-          {"action": "list_agents", "resources": ["all"]},
-          {"action": "get_agent", "resources": ["all"]},
-          {"action": "publish_agent", "resources": ["all"]},
-          {"action": "modify_agent", "resources": ["all"]},
-          {"action": "delete_agent", "resources": ["all"]}
-        ]
-      }
+      "agent": "*",
+      "actions": ["list_agents", "get_agent", "publish_agent", "modify_agent", "delete_agent", "invoke_agent"]
     }
   ],
   "ui_permissions": {
@@ -324,12 +307,12 @@ Access to specific MCP servers and one agent:
       "tools": []
     },
     {
-      "agents": {
-        "actions": [
-          {"action": "list_agents", "resources": ["/flight-booking"]},
-          {"action": "get_agent", "resources": ["/flight-booking"]}
-        ]
-      }
+      "agent": "/flight-booking",
+      "actions": ["list_agents", "get_agent", "invoke_agent"]
+    },
+    {
+      "agent": "/flight-booking-agent",
+      "actions": ["list_agents", "get_agent", "invoke_agent"]
     }
   ],
   "group_mappings": [
@@ -338,8 +321,8 @@ Access to specific MCP servers and one agent:
   ],
   "ui_permissions": {
     "list_service": ["all"],
-    "list_agents": ["/flight-booking"],
-    "get_agent": ["/flight-booking"]
+    "list_agents": ["/flight-booking", "/flight-booking-agent"],
+    "get_agent": ["/flight-booking", "/flight-booking-agent"]
   },
   "create_in_idp": true
 }

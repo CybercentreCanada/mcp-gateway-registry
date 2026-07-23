@@ -36,9 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import re
-import sys
 from pathlib import Path
 
 logging.basicConfig(
@@ -145,9 +143,7 @@ def _extract(
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(manifest, indent=2))
-    logger.info(
-        f"Wrote manifest with {len(markers)} sections needing commentary to {output_path}"
-    )
+    logger.info(f"Wrote manifest with {len(markers)} sections needing commentary to {output_path}")
 
 
 def _apply(
@@ -168,7 +164,11 @@ def _apply(
     raw = commentary_path.read_text().strip()
     # Allow either {section_id: text, ...} or {"commentary": {...}}
     parsed = json.loads(raw)
-    if isinstance(parsed, dict) and "commentary" in parsed and isinstance(parsed["commentary"], dict):
+    if (
+        isinstance(parsed, dict)
+        and "commentary" in parsed
+        and isinstance(parsed["commentary"], dict)
+    ):
         commentary = parsed["commentary"]
     elif isinstance(parsed, dict):
         commentary = parsed
@@ -209,13 +209,17 @@ def main() -> None:
 
     extract_p = sub.add_parser("extract", help="Build a manifest of sections needing commentary")
     extract_p.add_argument("--md", required=True, help="Path to the rendered report markdown")
-    extract_p.add_argument("--date", required=True, help="Report date YYYY-MM-DD (for the manifest)")
+    extract_p.add_argument(
+        "--date", required=True, help="Report date YYYY-MM-DD (for the manifest)"
+    )
     extract_p.add_argument("--output", required=True, help="Path to write the JSON manifest")
 
     apply_p = sub.add_parser("apply", help="Insert commentary into the markdown using a JSON map")
     apply_p.add_argument("--md", required=True, help="Path to the rendered report markdown")
     apply_p.add_argument("--commentary", required=True, help="Path to commentary.json from the LLM")
-    apply_p.add_argument("--output", default=None, help="Output path (defaults to in-place edit of --md)")
+    apply_p.add_argument(
+        "--output", default=None, help="Output path (defaults to in-place edit of --md)"
+    )
 
     args = parser.parse_args()
     if args.cmd == "extract":

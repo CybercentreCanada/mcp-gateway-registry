@@ -569,6 +569,18 @@ class AgentCard(BaseModel):
         alias="supportedProtocol",
         description="Agent protocol: 'a2a' for A2A protocol agents, 'other' for non-A2A agents",
     )
+    proxy_pass_url: str | None = Field(
+        default=None,
+        alias="proxyPassUrl",
+        description=(
+            "Internal backend URL the gateway proxies to when A2A reverse-proxy "
+            "mode is enabled. Set at registration time from the registrant's URL; "
+            "``url`` is then rewritten to the gateway-facing address so discovery "
+            "routes callers through the gateway. Mirrors the MCP-server "
+            "proxy_pass_url split and is redacted from non-admin read responses "
+            "(see registry/services/visibility.py)."
+        ),
+    )
     registry_name: str = Field(
         default="local",
         description="Registry this agent belongs to (federation origin).",
@@ -1176,7 +1188,7 @@ class BatchItemOp(str, Enum):
 
     register = "register"
     patch = "patch"
-    replace = "replace"
+    replace = "replace"  # type: ignore[assignment]  # enum member shadows str.replace
     delete = "delete"
 
 

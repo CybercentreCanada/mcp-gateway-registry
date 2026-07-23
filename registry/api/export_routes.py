@@ -4,6 +4,7 @@ import logging
 from typing import (
     Annotated,
     Any,
+    cast,
 )
 
 from fastapi import (
@@ -20,6 +21,9 @@ from pydantic import (
 
 from ..audit import set_audit_action
 from ..auth.dependencies import nginx_proxied_auth
+from ..repositories.documentdb.custom_entity_repository import DocumentDBCustomEntityRepository
+from ..repositories.documentdb.custom_type_repository import DocumentDBCustomTypeRepository
+from ..repositories.documentdb.scope_repository import DocumentDBScopeRepository
 from ..repositories.factory import (
     get_custom_entity_repository,
     get_custom_type_repository,
@@ -100,7 +104,7 @@ async def export_scopes(
     Returns the raw scope documents with full server_access rules,
     group_mappings, ui_permissions, and agent_access details.
     """
-    scope_repo = get_scope_repository()
+    scope_repo = cast(DocumentDBScopeRepository, get_scope_repository())
     collection = await scope_repo._get_collection()
     cursor = collection.find({})
     scopes = []
@@ -122,7 +126,7 @@ async def export_custom_types(
 
     Returns the raw descriptor documents from the mcp_custom_types collection.
     """
-    type_repo = get_custom_type_repository()
+    type_repo = cast(DocumentDBCustomTypeRepository, get_custom_type_repository())
     collection = await type_repo._get_collection()
     cursor = collection.find({})
     custom_types = []
@@ -144,7 +148,7 @@ async def export_custom_entities(
     Returns the raw record documents from the single mcp_custom_entities
     collection (records of all types, discriminated by entity_type).
     """
-    entity_repo = get_custom_entity_repository()
+    entity_repo = cast(DocumentDBCustomEntityRepository, get_custom_entity_repository())
     collection = await entity_repo._get_collection()
     cursor = collection.find({})
     custom_entities = []

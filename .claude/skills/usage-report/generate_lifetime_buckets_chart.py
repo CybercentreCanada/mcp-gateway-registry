@@ -35,10 +35,10 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys
+
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
-import seaborn as sns
-import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -186,10 +186,10 @@ def _generate_chart(
     # These are muted, print-safe, and visually distinct from each other
     # and from the red one-day-wonders line on the secondary axis.
     THRESHOLD_COLORS = {
-        3: "#1b7837",    # forest green (most common survival, dominant line)
-        7: "#2166ac",    # steel blue
-        14: "#762a83",   # muted purple
-        30: "#e08214",   # warm amber (rarest cohort, should pop)
+        3: "#1b7837",  # forest green (most common survival, dominant line)
+        7: "#2166ac",  # steel blue
+        14: "#762a83",  # muted purple
+        30: "#e08214",  # warm amber (rarest cohort, should pop)
     }
 
     # Survival-curve series: percentage of customer fleet whose age_days >= threshold
@@ -265,6 +265,7 @@ def _generate_chart(
 
     # Add right padding so direct labels at the line tips are not clipped
     from datetime import timedelta
+
     ax.set_xlim(parsed[0], parsed[-1] + timedelta(days=max(4, len(parsed) // 6)))
 
     for _ax in fig.axes:

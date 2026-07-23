@@ -7,6 +7,8 @@ Usage: python simple_agents_test.py --endpoint local|live [--debug]
 import argparse
 import json
 import logging
+import os
+import subprocess
 import sys
 import time
 import uuid
@@ -38,6 +40,107 @@ LIVE_ENDPOINTS = {
 
 AWS_REGION = "us-east-1"
 
+# Docker container names for the local agents (see docker-compose.local.yml).
+# Used only to read discovery config for the topology banner; the test does not
+# depend on Docker to run.
+_AGENT_CONTAINER_NAMES = {
+    "travel_assistant": "travel-assistant-agent",
+    "flight_booking": "flight-booking-agent",
+}
+
+
+def _read_container_discovery_config(
+    container_name: str,
+) -> dict[str, str] | None:
+    """Read an agent container's discovery config for the topology banner.
+
+    Returns the container's MCP_REGISTRY_URL and whether a discovery token is
+    set, by inspecting its environment. Returns None if Docker is unavailable or
+    the container is not running, so the test still works without Docker.
+
+    Args:
+        container_name: The docker container name to inspect.
+
+    Returns:
+        A dict with "registry_url" and "token" (masked state), or None.
+    """
+    try:
+        result = subprocess.run(  # nosec B603 B607 - hardcoded docker command, fixed container name
+            ["docker", "exec", container_name, "env"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    registry_url = ""
+    token_set = False
+    for line in result.stdout.splitlines():
+        if line.startswith("MCP_REGISTRY_URL="):
+            registry_url = line.split("=", 1)[1]
+        elif line.startswith("REGISTRY_JWT_TOKEN="):
+            token_set = bool(line.split("=", 1)[1].strip())
+
+    return {
+        "registry_url": registry_url or "(unset)",
+        "token": "set" if token_set else "NOT set",
+    }
+
+
+# Substrings of the sample-agent log lines that reveal the discovery + A2A
+# routing path (which registry it called, the discovered agent URL, the A2A hop).
+_ROUTING_LOG_MARKERS = (
+    "Discovery call ->",
+    "discovered agent:",
+    "Initializing A2A client",
+    "A2A call ->",
+    "HTTP Request: GET https",
+    "HTTP Request: POST https",
+)
+
+
+def _print_container_routing_proof(
+    container_name: str,
+    since_seconds: int,
+) -> None:
+    """Print the agent's own routing log lines to prove where it connected.
+
+    Reads the container's recent logs and echoes only the lines that show the
+    discovery call, the discovered agent URL, and the A2A hop, so the proof is
+    visible inline in the harness output (not just in a separate log tail).
+    Best-effort: silently no-ops if Docker is unavailable.
+
+    Args:
+        container_name: The agent's docker container name.
+        since_seconds: How far back to read the container log.
+    """
+    try:
+        result = subprocess.run(  # nosec B603 B607 - hardcoded docker command, fixed container name
+            ["docker", "logs", "--since", f"{since_seconds}s", container_name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return
+
+    proof_lines = []
+    for line in (result.stdout + result.stderr).splitlines():
+        if any(marker in line for marker in _ROUTING_LOG_MARKERS):
+            proof_lines.append(line)
+
+    if not proof_lines:
+        return
+
+    print(f"  --- routing proof from {container_name} log (agent's own hops) ---")
+    for line in proof_lines:
+        print(f"    {line}")
+    print("  --- end routing proof ---")
+
 
 class AgentTester:
     """Agent testing class for both local and live endpoints."""
@@ -49,6 +152,12 @@ class AgentTester:
     ) -> None:
         self.endpoints = endpoints
         self.is_live = is_live
+        # Bearer for the agent's own JWT middleware. The agents authenticate every
+        # request; in a presence-only test sandbox any non-empty bearer is
+        # accepted, so read AGENT_BEARER_TOKEN (or REGISTRY_JWT_TOKEN) if set.
+        self.agent_bearer = os.environ.get("AGENT_BEARER_TOKEN") or os.environ.get(
+            "REGISTRY_JWT_TOKEN"
+        )
         if is_live:
             self.bedrock_client = boto3.client("bedrock-agentcore", region_name=AWS_REGION)
 
@@ -86,14 +195,16 @@ class AgentTester:
                 },
             }
 
+            print(f"    -> POST {endpoint} (A2A message/send, agent={agent_type})")
             logger.debug(f"[REQUEST] Agent: {agent_type}, Endpoint: {endpoint}")
             logger.debug(f"[REQUEST] ID: {request_id}, Message ID: {message_id}")
             logger.debug(f"[REQUEST] Payload:\n{json.dumps(payload, indent=2)}")
 
             start_time = time.time()
-            response = requests.post(
-                endpoint, json=payload, headers={"Content-Type": "application/json"}, timeout=60
-            )
+            headers = {"Content-Type": "application/json"}
+            if self.agent_bearer:
+                headers["Authorization"] = f"Bearer {self.agent_bearer}"
+            response = requests.post(endpoint, json=payload, headers=headers, timeout=60)
             response_time = time.time() - start_time
 
             response_json = response.json()
@@ -200,14 +311,18 @@ class AgentTester:
         if not self.endpoints[agent_type]:
             raise ValueError(f"No endpoint configured for {agent_type}")
 
+        print(f"    -> {method.upper()} {url} (direct API, agent={agent_type})")
         logger.debug(f"[API REQUEST] Agent: {agent_type}, URL: {url}")
         logger.debug(f"[API REQUEST] Method: {method}, Params: {params}")
 
         start_time = time.time()
+        api_headers = {}
+        if self.agent_bearer:
+            api_headers["Authorization"] = f"Bearer {self.agent_bearer}"
         if method.upper() == "GET":
-            response = requests.get(url, params=params, timeout=60)
+            response = requests.get(url, params=params, headers=api_headers, timeout=60)
         else:
-            response = requests.post(url, params=params, timeout=60)
+            response = requests.post(url, params=params, headers=api_headers, timeout=60)
         response_time = time.time() - start_time
 
         response_json = response.json()
@@ -227,6 +342,7 @@ class AgentTester:
 
         try:
             url = f"{self.endpoints[agent_type]}/ping"
+            print(f"    -> GET {url} (ping, agent={agent_type})")
             logger.debug(f"[PING] Agent: {agent_type}, URL: {url}")
 
             start_time = time.time()
@@ -442,6 +558,11 @@ class AgentDiscoveryTests:
             return
 
         print("Testing cross-agent discovery and delegation flow...")
+        print(
+            f"    -> driving {self.tester.endpoints.get('travel_assistant')} "
+            "(Travel Assistant discovers + invokes Flight Booking via ITS OWN "
+            "MCP_REGISTRY_URL; the discovered agent URL is the one it connects to)"
+        )
 
         # This message explicitly instructs the LLM to use discovery tools
         message = (
@@ -451,7 +572,18 @@ class AgentDiscoveryTests:
         )
 
         logger.debug("[DISCOVERY TEST] Sending booking request to Travel Assistant...")
+        discovery_start = time.time()
         response = self.tester.send_agent_message("travel_assistant", message)
+
+        # Surface the agent's OWN routing hops inline (discovery call, discovered
+        # agent URL, A2A invoke) so the proof is in this output, not just a
+        # separate log tail. Only meaningful for the local containerized agent.
+        if not self.tester.is_live:
+            elapsed = int(time.time() - discovery_start) + 5
+            _print_container_routing_proof(
+                _AGENT_CONTAINER_NAMES["travel_assistant"],
+                since_seconds=elapsed,
+            )
 
         assert "result" in response, f"No result in discovery response: {response}"
         assert "artifacts" in response["result"], "No artifacts in discovery response"
@@ -511,6 +643,36 @@ def run_tests(
 
     is_live = endpoint_type == "live"
     tester = AgentTester(endpoints, is_live=is_live)
+
+    # Always show the topology so it is clear how agents are reached and which
+    # registry is used for discovery (not just under --debug).
+    print("\nEndpoints in use:")
+    for agent, url in endpoints.items():
+        print(f"  {agent:<18} -> {url}")
+    print(f"  discovery registry -> {registry_url}  (harness reachability probe only)")
+    bearer_state = "set" if tester.agent_bearer else "NOT set (agents may return 401)"
+    print(f"  agent bearer -> {bearer_state}")
+
+    # Agent-to-agent discovery runs INSIDE the Travel Assistant container using
+    # its OWN MCP_REGISTRY_URL (not the harness's). Surface it here so the whole
+    # topology is in one place. Best-effort: skipped cleanly if Docker is absent.
+    if not is_live:
+        ta_config = _read_container_discovery_config(_AGENT_CONTAINER_NAMES["travel_assistant"])
+        if ta_config:
+            print(
+                "  travel_assistant in-container discovery -> "
+                f"{ta_config['registry_url']}  (JWT: {ta_config['token']})"
+            )
+            print(
+                "  NOTE: the agent connects to the discovered agent's card URL "
+                "(e.g. <registry>/agent/flight-booking/); confirm in the container log."
+            )
+        else:
+            print(
+                "  travel_assistant in-container discovery -> (Docker not available; "
+                "check the container's MCP_REGISTRY_URL and log directly)"
+            )
+    print("=" * 50)
 
     try:
         # Test Travel Assistant

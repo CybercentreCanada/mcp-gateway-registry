@@ -110,9 +110,7 @@ class Summary:
             total_items += t.items
             total_time += t.duration_s
         logger.info("-" * 72)
-        logger.info(
-            f"{'TOTAL':<30} {'':<12} {total_items:>5} {total_time:>9.2f}"
-        )
+        logger.info(f"{'TOTAL':<30} {'':<12} {total_items:>5} {total_time:>9.2f}")
         if total_items > 0 and total_time > 0:
             logger.info(f"Throughput: {total_items / total_time:.1f} items/sec (wall clock)")
         logger.info("=" * 72)
@@ -549,16 +547,20 @@ def _run_bulk_batch_flow(
 
     mutate_items = []
     for i in range(half):
-        mutate_items.append({
-            "op": "patch",
-            "path": paths[i],
-            "card": {"description": f"Bulk-patched at index {i}"},
-        })
+        mutate_items.append(
+            {
+                "op": "patch",
+                "path": paths[i],
+                "card": {"description": f"Bulk-patched at index {i}"},
+            }
+        )
     for i in range(half, count):
-        mutate_items.append({
-            "op": "delete",
-            "path": paths[i],
-        })
+        mutate_items.append(
+            {
+                "op": "delete",
+                "path": paths[i],
+            }
+        )
 
     mutate_body = {
         "idempotency_key": f"bulk-mutate-{run_id}",
@@ -765,9 +767,7 @@ def _run_client_mode_flows(
             job.get("state") == "succeeded" and job.get("succeeded") == per_job,
             f"state={job.get('state')} succeeded={job.get('succeeded')}/{job.get('total')}",
         )
-        summary.record_job(
-            f"client-parallel-j{j}", jid, per_job, j_duration, job.get("state", "?")
-        )
+        summary.record_job(f"client-parallel-j{j}", jid, per_job, j_duration, job.get("state", "?"))
 
 
 def _cleanup(
@@ -862,8 +862,13 @@ def main() -> int:
                 session, base_url, summary, args.poll_timeout, args.poll_interval, count=100
             )
             _run_parallel_batch_flow(
-                session, base_url, summary, args.poll_timeout, args.poll_interval,
-                num_jobs=3, agents_per_job=20,
+                session,
+                base_url,
+                summary,
+                args.poll_timeout,
+                args.poll_interval,
+                num_jobs=3,
+                agents_per_job=20,
             )
 
         if run_client:
@@ -871,9 +876,7 @@ def main() -> int:
             logger.info("CLIENT MODE (api/registry_client.py)")
             logger.info("=" * 60)
             transport = _ClientTransport(base_url, token)
-            _run_client_mode_flows(
-                transport, summary, args.poll_timeout, args.poll_interval
-            )
+            _run_client_mode_flows(transport, summary, args.poll_timeout, args.poll_interval)
     finally:
         if args.keep:
             logger.info(f"--keep set; leaving {len(summary.created_paths)} agent(s) in place")

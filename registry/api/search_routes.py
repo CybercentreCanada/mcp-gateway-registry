@@ -364,6 +364,7 @@ async def _get_tool_schema_for_virtual_server(
 # original underscore-prefixed names so existing callers in this module
 # don't have to change.
 from ..services.visibility import (
+    redact_agent_backend_fields,
     should_redact_backend_urls,
 )
 from ..services.visibility import (
@@ -689,6 +690,13 @@ async def semantic_search(
             agent_card_obj.model_dump() if agent_card_obj else agent.get("agent_card", {})
         )
 
+        # Non-admins in with-gateway mode must never receive the internal backend
+        # (proxy_pass_url); strip it so search returns only the gateway-facing url.
+        # Mirrors the server-branch redaction above and the /api/agents/discover/
+        # semantic fix. Uses the same redact_backend decision computed once above.
+        if redact_backend and agent_card_dict:
+            redact_agent_backend_fields(agent_card_dict)
+
         # Ensure agent_card has the path for consistency
         if agent_card_dict and "path" not in agent_card_dict:
             agent_card_dict["path"] = agent_path
@@ -769,7 +777,7 @@ async def semantic_search(
         )
         # Build matching tools with schema lookup from backend servers
         # Only include tools that matched the search query
-        matching_tools: list[MatchingToolResult] = []
+        matching_tools = []
         for tool in allowed_vs_matching:
             tool_name = tool.get("tool_name") or tool.get("name", "")
             # Look up the tool schema from the backend server

@@ -15,12 +15,15 @@ factory (token / kubernetes / approle) before the client reaches this class.
 import asyncio
 import logging
 from collections.abc import Callable
+from typing import TypeVar
 
 from registry.egress_auth.schemas import StoredToken
 from registry.secrets import keys
 from registry.secrets.interfaces import SecretStoreBase, SecretStoreError
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 def _is_auth_expiry_error(exc: Exception) -> bool:
@@ -61,7 +64,7 @@ class OpenBaoStore(SecretStoreBase):
         self._prefix = prefix.strip("/")
         self._reauthenticate = reauthenticate
 
-    async def _run(self, fn: Callable[[], object]) -> object:
+    async def _run(self, fn: Callable[[], _T]) -> _T:
         """Run a blocking hvac call in a thread, re-authenticating + retrying ONCE
         if it fails because the Vault token expired."""
         try:
@@ -69,9 +72,7 @@ class OpenBaoStore(SecretStoreBase):
         except Exception as exc:
             if self._reauthenticate is None or not _is_auth_expiry_error(exc):
                 raise
-            logger.warning(
-                "OpenBao token rejected (%s); re-authenticating and retrying once", exc
-            )
+            logger.warning("OpenBao token rejected (%s); re-authenticating and retrying once", exc)
             await asyncio.to_thread(self._reauthenticate)
             return await asyncio.to_thread(fn)
 

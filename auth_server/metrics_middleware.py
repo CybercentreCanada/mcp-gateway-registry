@@ -48,6 +48,54 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# MCP transport endpoints. A data-plane MCP request ends in one of these (e.g.
+# "{server}/mcp", "{server}/sse"); its presence is what distinguishes a genuine
+# MCP server call from a control-plane path that merely has segments.
+_MCP_TRANSPORT_ENDPOINTS: frozenset[str] = frozenset({"mcp", "sse", "messages"})
+
+# Path prefixes that are CONTROL PLANE, not a routed target. These reach
+# /validate (the /api/* and static locations set auth_request in nginx) but must
+# NEVER be counted as MCP-server or agent routing. This mirrors the auth server's
+# own rule that /api/ paths do not yield a server_name (see server.py: the
+# `path_parts[0] != "api"` guard). Matched on the FIRST path segment after the
+# REGISTRY_ROOT_PATH prefix is stripped.
+_CONTROL_PLANE_FIRST_SEGMENTS: frozenset[str] = frozenset({"api", "static", "oauth2"})
+
+
+# Target-kind classification for the routing metric. Each rule recognizes a
+# routed DATA-PLANE target by its URL shape, checked in order (most specific
+# first). Anything that matches no rule and is not control plane is "unknown"
+# (never silently attributed to MCP servers) -- the classifier is an ALLOWLIST,
+# fail-safe by design, so a new/unrecognized route cannot inflate mcp_server.
+#
+# To track a NEW routed target type in the future: add one entry to
+# _TARGET_KIND_RULES with a predicate over the (already root-stripped) path
+# segments, and add the matching nginx route. No change to classify/emit logic.
+#
+# Each rule is (kind_label, predicate) where predicate(path_parts) -> bool.
+def _is_a2a_agent(path_parts: list[str]) -> bool:
+    # "{root}/agent/{agent_path}/..." -> at least "agent" + one path segment.
+    return len(path_parts) >= 2 and path_parts[0] == "agent"
+
+
+def _is_virtual_server(path_parts: list[str]) -> bool:
+    # "{root}/virtual/{id}/{transport}" -> a virtual MCP server data-plane call.
+    return len(path_parts) >= 2 and path_parts[0] == "virtual"
+
+
+def _is_mcp_server(path_parts: list[str]) -> bool:
+    # A real MCP server call ends in an MCP transport endpoint
+    # ("{server}/mcp", "{server}/sse", ...). Requiring the transport suffix is
+    # what keeps control-plane paths (which never carry it) out of mcp_server.
+    return len(path_parts) >= 2 and path_parts[-1] in _MCP_TRANSPORT_ENDPOINTS
+
+
+_TARGET_KIND_RULES: tuple[tuple[str, Any], ...] = (
+    ("a2a_agent", _is_a2a_agent),
+    ("virtual_mcp_server", _is_virtual_server),
+    ("mcp_server", _is_mcp_server),
+)
+
 
 class AuthMetricsMiddleware(BaseHTTPMiddleware):
     """
@@ -149,6 +197,73 @@ class AuthMetricsMiddleware(BaseHTTPMiddleware):
         except Exception:
             return "unknown"
 
+    def classify_target_kind(self, original_url: str) -> str:
+        """Classify a validated request by the kind of target it routes to.
+
+        Splits the auth metric by routed data-plane target type so routing
+        volume can be tracked per kind. Returns one of:
+
+        - ``a2a_agent``          - an A2A agent reverse-proxy call
+        - ``virtual_mcp_server`` - a virtual MCP server call
+        - ``mcp_server``         - a (real) MCP server transport call
+        - ``control_plane``      - an /api/, static, or oauth2 request (NOT a
+                                   routed target: the dashboard, login, config,
+                                   skill/agent CRUD, ARD, public endpoints)
+        - ``unknown``            - no path, or a shape we do not recognize
+
+        This is an ALLOWLIST classifier: a path is attributed to a data-plane
+        target ONLY when it matches an explicit rule. Everything else is
+        control_plane/unknown, never silently counted as an MCP server. That
+        mirrors the auth server's own rule that ``/api/`` paths yield no
+        server_name and do not engage the rate-limit target axis, so this metric
+        cannot inadvertently count control-plane API calls as MCP-server traffic.
+
+        Note on skills: skills have no data-plane proxy route -- they are managed
+        only via ``/api/skills/...`` CRUD -- so they correctly classify as
+        control_plane, not a routed target.
+
+        Path shapes honor an optional ``REGISTRY_ROOT_PATH`` prefix. Kept
+        self-contained (not imported from ``server``) to avoid a circular
+        import: ``server`` imports this middleware.
+
+        Args:
+            original_url: The X-Original-URL header value from nginx.
+
+        Returns:
+            The target-kind label.
+        """
+        if not original_url:
+            return "unknown"
+
+        try:
+            from urllib.parse import urlparse
+
+            parsed_url = urlparse(original_url)
+            path = parsed_url.path.strip("/")
+
+            registry_prefix = os.environ.get("REGISTRY_ROOT_PATH", "").strip("/")
+            if registry_prefix and path.startswith(registry_prefix):
+                path = path[len(registry_prefix) :].lstrip("/")
+
+            path_parts = path.split("/") if path else []
+            if not path_parts:
+                return "unknown"
+
+            # Control plane is checked FIRST so an /api/* path can never fall
+            # through to a data-plane target label.
+            if path_parts[0] in _CONTROL_PLANE_FIRST_SEGMENTS:
+                return "control_plane"
+
+            # Allowlist: attribute to a data-plane target only on an explicit match.
+            for kind, predicate in _TARGET_KIND_RULES:
+                if predicate(path_parts):
+                    return kind
+
+            # Recognized as neither control plane nor a known routed target.
+            return "unknown"
+        except Exception:
+            return "unknown"
+
     async def extract_tool_and_method_info(self, request: Request) -> dict[str, Any]:
         """Extract detailed tool and method information from headers (X-Body) instead of consuming body."""
         tool_info = {
@@ -210,8 +325,10 @@ class AuthMetricsMiddleware(BaseHTTPMiddleware):
 
         # Extract server name from original URL header
         original_url = request.headers.get("X-Original-URL")
+        target_kind = "unknown"
         if original_url:
             server_name = self.extract_server_name_from_url(original_url)
+            target_kind = self.classify_target_kind(original_url)
 
         # Extract detailed tool/method information
         tool_info = await self.extract_tool_and_method_info(request)
@@ -275,6 +392,7 @@ class AuthMetricsMiddleware(BaseHTTPMiddleware):
                     method=auth_method,
                     duration_ms=duration_ms,
                     server_name=server_name,
+                    target_kind=target_kind,
                     user_hash=user_hash,
                     error_code=error_code,
                     request_id=request_id,
@@ -316,15 +434,20 @@ class AuthMetricsMiddleware(BaseHTTPMiddleware):
         method: str,
         duration_ms: float,
         server_name: str,
+        target_kind: str,
         user_hash: str,
         error_code: str = None,
         request_id: str = None,
     ):
         """Emit authentication metric via OTel and (optionally) legacy HTTP POST.
 
-        Cardinality-controlled OTel attributes: ``success``, ``method``, ``server``.
-        The legacy ``user_hash`` and ``request_id`` dimensions are intentionally
-        not OTel attributes; per-user identification stays available in
+        Cardinality-controlled OTel attributes: ``success``, ``method``,
+        ``server``, ``target_kind``. ``target_kind`` (``a2a_agent`` /
+        ``mcp_server`` / ``unknown``) is a bounded label that lets the same
+        counter answer "how much traffic routed to agents vs MCP servers?"
+        without the unbounded per-target ``server`` name. The legacy
+        ``user_hash`` and ``request_id`` dimensions are intentionally not OTel
+        attributes; per-user identification stays available in
         auto-instrumentation span attributes for per-request debugging.
         """
         # 1) OTel emission (always-on, in-process, non-blocking)
@@ -332,6 +455,7 @@ class AuthMetricsMiddleware(BaseHTTPMiddleware):
             "success": str(success),
             "method": method,
             "server": server_name,
+            "target_kind": target_kind,
         }
         auth_request_total.add(1, otel_attrs)
         auth_request_duration_ms.record(duration_ms, otel_attrs)
@@ -357,6 +481,7 @@ class AuthMetricsMiddleware(BaseHTTPMiddleware):
                             "success": success,
                             "method": method,
                             "server": server_name,
+                            "target_kind": target_kind,
                             "user_hash": user_hash,
                         },
                         "metadata": {

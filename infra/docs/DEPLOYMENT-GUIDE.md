@@ -107,8 +107,9 @@ Nginx wraps non-200 from auth-server/registry as HTML 500. Likely causes (in ord
 Debug: `aws logs tail /ecs/mcp-gateway-auth-server --since 5m` and `/ecs/mcp-gateway-registry`.
 
 ### Empty scopes / "permission denied" after login
-Auth-server log shows `Final mapped scopes: []`. Either `storageBackend` ≠ `documentdb`
-in `config.yaml`, or `load-scopes.py` hasn't run. Re-run `post-deploy.sh`.
+Auth-server log shows `Final mapped scopes: []`. `storageBackend` in `config.yaml`
+must be `documentdb`, and the DocumentDB `mcp_scopes_*` collection must be seeded
+by the mongodb-configure init job.
 
 ### `oauth2_callback_failed` on login
 Auth-server still has the placeholder Keycloak client secret. Run `post-deploy.sh`,

@@ -78,7 +78,8 @@ class ArdIngestionScheduler:
                     continue
             logger.info(
                 "Scheduled ARD ingestion triggered for source '%s' (interval: %dm)",
-                source.source_id, cfg.sync_interval_minutes,
+                source.source_id,
+                cfg.sync_interval_minutes,
             )
             self._last_run[source.source_id] = now
             try:
@@ -86,15 +87,20 @@ class ArdIngestionScheduler:
                 if result.success:
                     logger.info(
                         "Scheduled ARD ingestion completed for '%s': %d servers, %d agents",
-                        source.source_id, result.servers_synced, result.agents_synced,
+                        source.source_id,
+                        result.servers_synced,
+                        result.agents_synced,
                     )
                 else:
                     logger.warning(
                         "Scheduled ARD ingestion failed for '%s': %s",
-                        source.source_id, result.error_message,
+                        source.source_id,
+                        result.error_message,
                     )
             except Exception as e:  # noqa: BLE001
-                logger.error("Error during scheduled ARD ingestion for '%s': %s", source.source_id, e)
+                logger.error(
+                    "Error during scheduled ARD ingestion for '%s': %s", source.source_id, e
+                )
 
 
 _scheduler: ArdIngestionScheduler | None = None

@@ -93,8 +93,7 @@ class TestDiscreteVarPathUnchanged:
         with patch("registry.core.config.settings", settings):
             uri = build_connection_string()
         assert uri == (
-            "mongodb://user:pass@myhost:27018/mydb"
-            "?authMechanism=SCRAM-SHA-256&authSource=admin"
+            "mongodb://user:pass@myhost:27018/mydb?authMechanism=SCRAM-SHA-256&authSource=admin"
         )
 
     def test_documentdb_backend_uses_scram_sha_1(self):

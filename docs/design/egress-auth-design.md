@@ -2,7 +2,7 @@
 
 How the MCP Gateway lets a user reach an authentication-protected ("auth-based") third-party MCP server — GitHub, Slack, Atlassian, etc. — **as themselves**, without the coding assistant ever handling the third-party token.
 
-- Status of the modes: **`none` (no egress auth) and `vault-oauth` (3LO) are implemented today**; **`token-exchange` (OBO)**, **`vault-pat` (PAT)**, and a **custom-header** egress mode are designed but not yet built (placeholders below).
+- Status of the modes: **`none` (no egress auth), `vault-oauth` (3LO), and `token-exchange` (OBO) are implemented today** (OBO via Microsoft Entra `jwt-bearer`; Keycloak RFC 8693 is the next phase); **`vault-pat` (PAT)** and a **custom-header** egress mode are designed but not yet built (placeholders below).
 - Authoritative implementation references: `registry/egress_auth/`, `registry/secrets/`, `registry/api/egress_auth_routes.py`, `auth_server/server.py` (`mcp_proxy`, `_vend_egress_token`, `_forward_headers`).
 
 ---
@@ -236,7 +236,7 @@ Wire the chosen value on the **registry** container across your deployment surfa
 |------|-------------|----------------------------------------|--------|
 | **`none` (no egress auth)** | No | The server needs no upstream credential. All client auth headers are stripped on egress; nothing is injected. The default for every server. | **Implemented** (`egress_auth_mode = "none"`) |
 | **`vault-oauth` (3LO)** | Yes | User completes provider OAuth (3LO) out of band; the gateway vaults the per-user token and injects it. This document's main flow. | **Implemented** (`egress_auth_mode = "oauth_user"`) |
-| **`token-exchange` (OBO)** | No | For same-trust-domain backends, the gateway exchanges the user's ingress token for a backend-audience token (RFC 8693 / Entra jwt-bearer). `sub` preserved; nothing stored. | **Placeholder — not implemented** |
+| **`token-exchange` (OBO)** | No | For same-trust-domain backends, the gateway exchanges the user's ingress token for a backend-audience token (Entra `jwt-bearer` / Keycloak RFC 8693). `sub` preserved; nothing stored. | **Implemented** (`egress_auth_mode = "obo_exchange"`; Entra `jwt-bearer` today, Keycloak RFC 8693 next) |
 | **`vault-pat` (PAT)** | Yes | A per-user static Personal Access Token / API key is stored in the vault and injected. No OAuth dance. | **Placeholder — not implemented** |
 | **custom-header** | Yes | A per-user credential the operator specifies by header **name + value**, stored in the vault and injected verbatim on egress. For backends with a bespoke/out-of-band auth scheme. Generalizes `vault-pat`. | **Placeholder — not implemented (planned with PAT)** |
 
@@ -250,9 +250,11 @@ The default. The server needs no upstream credential (or it is a public endpoint
 
 The flow described throughout this document. `egress_auth_mode = "oauth_user"` on the server, `egress_oauth` holds the provider config (client_id, encrypted client_secret, scopes). See [Per-User Egress Credential Vault](../egress-credential-vault.md) and the FAQ [Registering third-party MCP servers](../faq/registering-third-party-mcp-servers.md).
 
-### `token-exchange` (OBO) — placeholder
+### `token-exchange` (OBO) — implemented
 
-> Not yet implemented. Design intent: when the gateway IdP and the backend share a trust domain (e.g. M365 in the same Entra tenant), exchange the user's verified ingress token for a token scoped to the backend's audience and inject that. `sub` is carried cryptographically across the exchange; **no vault, no refresh loop, nothing stored per user.** Fails closed (never relays the ingress token, never falls back to app-only credentials). Its reach is limited to same-trust-domain backends — public SaaS (GitHub/Slack) does not federate with the gateway IdP, so those use `vault-oauth` instead.
+`egress_auth_mode = "obo_exchange"`. When the gateway IdP and the backend share a trust domain (e.g. M365 in the same Entra tenant), the gateway exchanges the user's verified ingress token for a token scoped to the backend's audience and injects that. `sub` is carried cryptographically across the exchange; **no vault, no refresh loop, nothing stored per user.** It fails closed: the ingress token is stripped and, on exchange failure, an error is returned — the ingress token is never relayed and there is no app-only (client-credentials) fallback that would drop the user identity. Its reach is limited to same-trust-domain backends — public SaaS (GitHub/Slack) does not federate with the gateway IdP, so those use `vault-oauth` instead.
+
+Provider support: **Microsoft Entra `jwt-bearer`** (the ingress token is the assertion, requesting the backend app audience) is implemented today. **Keycloak RFC 8693 token exchange** (ingress token as the subject token, backend as the audience) is the next phase and currently raises a not-implemented error. The exchange reuses the auth-server's configured IdP token endpoint and client credentials, runs on the async egress path, and logs no token material. Implementation: `auth_server/egress_obo.py` (`obo_exchange`) and the `mcp_proxy` egress hop in `auth_server/server.py`.
 
 ### `vault-pat` (PAT) — placeholder
 

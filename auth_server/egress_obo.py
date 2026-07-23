@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 # OAuth grant types for the two supported IdPs.
 _ENTRA_JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
-_RFC8693_TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
-_RFC8693_ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+_RFC8693_TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"  # nosec B105 - OAuth grant-type URN, not a secret
+_RFC8693_ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"  # nosec B105 - OAuth token-type URN, not a secret
 
 # Network timeout for the IdP token endpoint call (matches _vend_egress_token).
 _TOKEN_EXCHANGE_TIMEOUT_SECONDS: float = 10.0

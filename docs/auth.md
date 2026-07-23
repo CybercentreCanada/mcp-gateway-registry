@@ -141,7 +141,8 @@ Scopes are defined in JSON files and loaded into MongoDB. See [Scopes Management
   "_id": "registry-admins",
   "group_mappings": ["registry-admins", "4c46ec66-a4f7-4b62-9095-b7958662f4b6"],
   "server_access": [
-    {"server": "*", "methods": ["all"], "tools": ["all"]}
+    {"server": "*", "methods": ["all"], "tools": ["all"]},
+    {"agent": "*", "actions": ["list_agents", "get_agent", "publish_agent", "modify_agent", "delete_agent", "invoke_agent"]}
   ],
   "ui_permissions": {
     "list_agents": ["all"],
@@ -152,6 +153,8 @@ Scopes are defined in JSON files and loaded into MongoDB. See [Scopes Management
 }
 ```
 
+The `{"agent": ...}` rule lives in the same `server_access` array as the MCP `{"server": ...}` rules and follows the identical shape: an identifier key (`agent`, matching an agent path or `*`/`all`) plus an `actions` verb list (mirroring `methods` on a server rule). It gates A2A agent operations, including the reverse-proxy per-agent `invoke_agent` grant. MCP scope resolution ignores `agent`-keyed entries and the A2A validator ignores `server`-keyed entries, so the two rule types coexist in one scope. See [A2A Protocol Integration](design/a2a-protocol-integration.md#access-control-per-agent-fgac) for the matcher semantics.
+
 **Example: Limited User Scope**
 
 ```json
@@ -159,12 +162,14 @@ Scopes are defined in JSON files and loaded into MongoDB. See [Scopes Management
   "_id": "public-mcp-users",
   "group_mappings": ["public-mcp-users", "5f605d68-06bc-4208-b992-bb378eee12c5"],
   "server_access": [
-    {"server": "context7", "methods": ["initialize", "tools/list", "tools/call"], "tools": ["*"]}
+    {"server": "context7", "methods": ["initialize", "tools/list", "tools/call"], "tools": ["*"]},
+    {"agent": "/flight-booking", "actions": ["list_agents", "get_agent", "invoke_agent"]},
+    {"agent": "/flight-booking-agent", "actions": ["list_agents", "get_agent", "invoke_agent"]}
   ],
   "ui_permissions": {
     "list_service": ["all"],
-    "list_agents": ["/flight-booking"],
-    "get_agent": ["/flight-booking"]
+    "list_agents": ["/flight-booking", "/flight-booking-agent"],
+    "get_agent": ["/flight-booking", "/flight-booking-agent"]
   }
 }
 ```

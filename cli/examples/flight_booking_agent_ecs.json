@@ -1,9 +1,11 @@
 {
   "protocolVersion": "0.3.0",
+  "supportedProtocol": "a2a",
   "name": "Flight Booking Agent",
   "description": "Flight booking and reservation management agent",
-  "url": "http://flight-booking-agent.mcp-gateway-v2.local:9000",
+  "url": "http://mcpgateway.ddns.net:9002/",
   "version": "0.0.1",
+  "status": "active",
   "capabilities": {
     "streaming": true
   },

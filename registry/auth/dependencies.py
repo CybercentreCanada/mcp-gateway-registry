@@ -102,7 +102,7 @@ async def get_user_session_data(
 
 
 # Global scopes configuration - will be loaded during app startup
-SCOPES_CONFIG = {}
+SCOPES_CONFIG: dict[str, Any] = {}
 
 
 async def reload_scopes_from_repository():
@@ -186,7 +186,7 @@ async def get_ui_permissions_for_user(user_scopes: list[str]) -> dict[str, list[
     """
     from ..repositories.factory import get_scope_repository
 
-    ui_permissions = {}
+    ui_permissions: dict[str, set[str]] = {}
     scope_repo = get_scope_repository()
 
     # One round-trip for all scopes instead of one find_one per scope — on a

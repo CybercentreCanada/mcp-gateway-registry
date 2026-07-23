@@ -1041,19 +1041,19 @@ def main():
 Examples:
     # Run with default settings (check every 5 minutes, refresh 1 hour before expiry)
     uv run python credentials-provider/token_refresher.py
-    
+
     # Check every 10 minutes
     uv run python credentials-provider/token_refresher.py --interval 600
-    
+
     # Refresh tokens 2 hours before expiry
     uv run python credentials-provider/token_refresher.py --buffer 7200
-    
+
     # Run once and exit (for testing)
     uv run python credentials-provider/token_refresher.py --once
-    
+
     # Force refresh all tokens once and exit
     uv run python credentials-provider/token_refresher.py --once --force
-    
+
     # Run in background with logging
     nohup uv run python credentials-provider/token_refresher.py > token_refresher.log 2>&1 &
 """,

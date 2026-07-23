@@ -270,8 +270,7 @@ class AuditStatisticsResponse(BaseModel):
     activity_timeline_prior: list[TimeSeriesBucket] = Field(
         default_factory=list,
         description=(
-            "Daily event counts for the prior window of equal length, "
-            "for week-over-week overlay"
+            "Daily event counts for the prior window of equal length, for week-over-week overlay"
         ),
     )
     status_distribution: StatusDistribution = Field(
@@ -624,8 +623,10 @@ async def get_statistics(
     # Build all pipelines upfront
     user_field = "$username" if stream == "token_mint" else "$identity.username"
     op_field = (
-        "$token_kind" if stream == "token_mint"
-        else "$mcp_request.method" if stream == "mcp_access"
+        "$token_kind"
+        if stream == "token_mint"
+        else "$mcp_request.method"
+        if stream == "mcp_access"
         else "$action.operation"
     )
 
@@ -760,7 +761,7 @@ async def get_statistics(
             )
         )
 
-    results = await asyncio.gather(*tasks)
+    results: list[Any] = await asyncio.gather(*tasks)
 
     # Unpack results
     total_events = results[0]
@@ -1022,7 +1023,7 @@ async def _compute_executive_summary(
     maa_match = _window_match(now - timedelta(days=30), now, agent_filter)
 
     # Run all independent queries concurrently
-    results = await asyncio.gather(
+    results: list[Any] = await asyncio.gather(
         _count_distinct_usernames(repository, cur_window),
         repository.distinct("mcp_server.name", cur_mcp),
         repository.distinct("mcp_request.tool_name", cur_mcp),

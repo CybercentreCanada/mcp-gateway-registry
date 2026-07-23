@@ -283,6 +283,99 @@ class TestRegisterServerUrlValidation:
         assert result is True
         mock_server_repository.update.assert_called_once()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field_name", ["mcp_endpoint", "sse_endpoint"])
+    @pytest.mark.parametrize(
+        "bad_url",
+        [
+            "http://169.254.169.254/latest/meta-data/",  # cloud metadata literal
+            "http://10.0.0.1:8080/mcp",  # RFC-1918 literal
+            "http://127.0.0.1:8080/sse",  # loopback literal
+            "http://100.64.0.1/mcp",  # CGNAT (RFC 6598) literal
+            "ftp://acme.com/mcp",  # disallowed scheme
+            'http://acme.com/";} location /x { proxy_pass http://evil;',  # nginx injection
+            "http://acme.com/${SOME_VAR}",  # nginx variable sigil
+            "http://acme.com/a;b",  # directive terminator
+        ],
+    )
+    async def test_register_rejects_unsafe_endpoint_field(
+        self,
+        server_service: ServerService,
+        sample_server_dict: dict[str, Any],
+        mock_server_repository,
+        field_name,
+        bad_url,
+    ):
+        """An mcp_endpoint/sse_endpoint override gets the same guard as proxy_pass_url."""
+        from registry.exceptions import UrlValidationError
+
+        mock_server_repository.get.return_value = None
+        payload = {**sample_server_dict, field_name: bad_url}
+
+        with pytest.raises(UrlValidationError):
+            await server_service.register_server(payload)
+
+        mock_server_repository.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field_name", ["mcp_endpoint", "sse_endpoint"])
+    async def test_update_rejects_unsafe_endpoint_field(
+        self,
+        server_service: ServerService,
+        sample_server_dict: dict[str, Any],
+        mock_server_repository,
+        field_name,
+    ):
+        """Editing an endpoint override to a private target is rejected."""
+        from registry.exceptions import UrlValidationError
+
+        payload = {**sample_server_dict, field_name: "http://192.168.1.5/mcp"}
+
+        with pytest.raises(UrlValidationError):
+            await server_service.update_server(sample_server_dict["path"], payload)
+
+        mock_server_repository.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field_name", ["mcp_endpoint", "sse_endpoint"])
+    async def test_register_accepts_public_https_endpoint_field(
+        self,
+        server_service: ServerService,
+        sample_server_dict: dict[str, Any],
+        mock_server_repository,
+        mock_search_repository,
+        field_name,
+    ):
+        """A valid public https endpoint override is accepted."""
+        mock_server_repository.get.return_value = None
+        mock_server_repository.create.return_value = True
+        mock_server_repository.get_state.return_value = False
+
+        payload = {**sample_server_dict, field_name: "https://acme.example.com/mcp"}
+        result = await server_service.register_server(payload)
+
+        assert result["success"] is True
+        mock_server_repository.create.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_register_accepts_empty_endpoint_fields(
+        self,
+        server_service: ServerService,
+        sample_server_dict: dict[str, Any],
+        mock_server_repository,
+        mock_search_repository,
+    ):
+        """Empty/unset endpoint override fields are allowed (they are optional)."""
+        mock_server_repository.get.return_value = None
+        mock_server_repository.create.return_value = True
+        mock_server_repository.get_state.return_value = False
+
+        payload = {**sample_server_dict, "mcp_endpoint": "", "sse_endpoint": None}
+        result = await server_service.register_server(payload)
+
+        assert result["success"] is True
+        mock_server_repository.create.assert_called_once()
+
 
 class TestRegisterServer:
     """Test server registration functionality."""

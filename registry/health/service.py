@@ -418,7 +418,7 @@ class HealthMonitoringService:
         # endpoint blocks type changes today, but direct DB manipulation could
         # leave one behind).
         if server_info.get("deployment") == DeploymentType.LOCAL:
-            new_status = HealthStatus.LOCAL
+            new_status: str = HealthStatus.LOCAL
             self.server_health_status[service_path] = new_status
             self.server_last_check_time.pop(service_path, None)
             return previous_status != new_status
@@ -723,7 +723,9 @@ class HealthMonitoringService:
                         response = await client.get(
                             proxy_pass_url, headers=headers, follow_redirects=True, timeout=timeout
                         )
-                        return self._is_mcp_endpoint_healthy(response)
+                        if self._is_mcp_endpoint_healthy(response):
+                            return True, HealthStatus.HEALTHY
+                        return False, HealthStatus.UNHEALTHY_ENDPOINT_CHECK_FAILED
                     except (TimeoutError, httpx.TimeoutException) as e:
                         # For SSE endpoints, timeout while reading streaming response is normal after getting 200 OK
                         logger.debug(

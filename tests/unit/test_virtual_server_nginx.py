@@ -207,9 +207,7 @@ class TestGenerateVirtualBackendLocations:
         assert 'proxy_set_header Cookie "";' in result
 
     @pytest.mark.asyncio
-    async def test_bare_hostname_backend_uses_deferred_resolution(
-        self, mock_server_repository
-    ):
+    async def test_bare_hostname_backend_uses_deferred_resolution(self, mock_server_repository):
         """Bare hostnames defer DNS resolution so they cannot crash nginx at startup."""
         vs = _make_vs_config()
         # A docker-compose-style service name (no dot) is not resolvable in every
@@ -501,10 +499,7 @@ class TestIsHostResolvableAtStartup:
         """A bare service name with no dot is not safe to resolve at startup."""
         from registry.core.nginx_service import NginxConfigService
 
-        assert (
-            NginxConfigService._is_host_resolvable_at_startup("currenttime-server")
-            is False
-        )
+        assert NginxConfigService._is_host_resolvable_at_startup("currenttime-server") is False
 
     def test_empty_hostname_is_not_resolvable(self):
         """An empty hostname is treated as not safe."""

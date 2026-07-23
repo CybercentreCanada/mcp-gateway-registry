@@ -25,7 +25,7 @@ import logging
 import os
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 logging.basicConfig(
     level=logging.INFO,

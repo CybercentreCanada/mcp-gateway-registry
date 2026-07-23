@@ -340,6 +340,28 @@ class TestBackendUrlRedactionHelpers:
         assert doc["server_name"] == "s"
         assert doc["versions"][0]["version"] == "v1"
 
+    def test_redact_agent_strips_proxy_pass_url(self):
+        """The agent redactor removes proxy_pass_url (both spellings), keeps url."""
+        from registry.services.visibility import redact_agent_backend_fields
+
+        # snake_case (model_dump default)
+        snake = {
+            "name": "Flight Booking Agent",
+            "url": "https://gateway.example.com/agent/flight-booking-agent/",
+            "proxy_pass_url": "http://flight-booking-agent:9000/",
+        }
+        result = redact_agent_backend_fields(snake)
+        assert result is snake  # mutates in place
+        assert "proxy_pass_url" not in snake
+        # The gateway-facing url is preserved for the caller.
+        assert snake["url"] == "https://gateway.example.com/agent/flight-booking-agent/"
+
+        # camelCase (by_alias dump)
+        camel = {"url": "https://gw/agent/x/", "proxyPassUrl": "http://x:9000/"}
+        redact_agent_backend_fields(camel)
+        assert "proxyPassUrl" not in camel
+        assert camel["url"] == "https://gw/agent/x/"
+
 
 # =============================================================================
 # Sibling sweep: GET /server_details/{path}

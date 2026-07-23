@@ -29,6 +29,7 @@ class CognitoProvider(AuthProvider):
         region: str,
         domain: str | None = None,
         ide_oauth_client_id: str | None = None,
+        m2m_client_ids: list[str] | None = None,
     ):
         """Initialize Cognito provider.
 
@@ -41,6 +42,26 @@ class CognitoProvider(AuthProvider):
             ide_oauth_client_id: Optional public IDE client_id (IDE_OAUTH_CLIENT_ID).
                 Cognito access tokens minted by this client are also accepted, so
                 the IDE OAuth login flow works alongside the web client.
+            m2m_client_ids: Optional allowlist of Cognito app-client ids that mint
+                machine (``client_credentials``) access tokens the gateway should
+                accept (COGNITO_M2M_CLIENT_IDS). Cognito access tokens are not
+                audience-bound, so an M2M client's ``client_id`` claim must be
+                explicitly listed here or its token is rejected. Config-driven and
+                default-empty (fail closed): an unlisted client is never accepted,
+                so a token from a rogue/other client in the same pool cannot reach
+                the gateway. A machine token carries no ``cognito:groups`` /
+                ``username``; its authorization comes from the token's own
+                ``scope`` claim (Cognito resource-server scopes = registry scope
+                names), exactly like every other caller's resolved scopes.
+
+                The single value ``"*"`` is a wildcard scoped to M2M tokens ONLY:
+                accept ANY client_id in this user pool, but only for machine
+                tokens (no ``username`` claim). User/login tokens stay restricted
+                to the web + IDE clients regardless, so the wildcard cannot be
+                abused to forge a user login. Use ``"*"`` only when this pool is
+                dedicated to the gateway (with Pattern B, one M2M client per
+                agent, ``"*"`` avoids listing every agent's client_id); enumerate
+                explicitly when the pool is shared with other applications.
         """
         self.user_pool_id = user_pool_id
         self.client_id = client_id
@@ -53,10 +74,27 @@ class CognitoProvider(AuthProvider):
         # against this allowlist instead. The web client plus the optional public
         # IDE client (IDE_OAUTH_CLIENT_ID) are trusted; both live in the same
         # user pool and the user's groups (which drive authorization) come from
-        # the pool, not the client.
+        # the pool, not the client. M2M client ids (COGNITO_M2M_CLIENT_IDS) are
+        # appended so machine client_credentials tokens validate; the list is
+        # config-driven and default-empty (fail closed).
         self.accepted_client_ids = [client_id]
         if ide_oauth_client_id and ide_oauth_client_id != client_id:
             self.accepted_client_ids.append(ide_oauth_client_id)
+        # "*" = accept ANY client_id, but only for M2M (no-username) tokens; see
+        # docstring. Explicit ids are still appended for the non-wildcard case.
+        requested_m2m = list(m2m_client_ids or [])
+        self.m2m_accept_any = "*" in requested_m2m
+        self.m2m_client_ids = [c for c in requested_m2m if c and c != "*"]
+        for m2m_id in self.m2m_client_ids:
+            if m2m_id not in self.accepted_client_ids:
+                self.accepted_client_ids.append(m2m_id)
+        if self.m2m_accept_any:
+            logger.warning(
+                "COGNITO_M2M_CLIENT_IDS='*': accepting M2M (client_credentials) "
+                "tokens from ANY client in user pool %s. Safe only if this pool is "
+                "dedicated to the gateway; user/login tokens remain restricted.",
+                user_pool_id,
+            )
 
         # Cache for JWKS
         self._jwks_cache: dict[str, Any] | None = None
@@ -134,10 +172,21 @@ class CognitoProvider(AuthProvider):
                     options={"verify_exp": True, "verify_iat": True, "verify_aud": False},
                 )
                 token_client_id = claims.get("client_id")
-                if token_client_id not in self.accepted_client_ids:
+                # A machine (client_credentials) token has no end-user "username"
+                # claim. The "*" wildcard accepts any client_id but ONLY for such
+                # machine tokens, so it can never widen which clients may mint a
+                # USER/login token (those stay restricted to web + IDE clients).
+                is_machine_token = "username" not in claims
+                m2m_wildcard_ok = self.m2m_accept_any and is_machine_token
+                if token_client_id not in self.accepted_client_ids and not m2m_wildcard_ok:
                     raise ValueError(
                         f"Access token client_id '{token_client_id}' is not in the "
                         f"accepted client list {self.accepted_client_ids}"
+                        + (
+                            " (M2M wildcard applies to no-username tokens only)"
+                            if self.m2m_accept_any
+                            else ""
+                        )
                     )
             else:
                 # ID token: audience-bound to the client_id.

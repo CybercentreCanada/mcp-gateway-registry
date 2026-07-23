@@ -431,7 +431,9 @@ def _get_jwt_token(aws_region: str | None = None, keycloak_url: str | None = Non
             cmd.extend(["--keycloak-url", keycloak_url])
         cmd.append(client_name)
 
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(  # nosec B603 - hardcoded internal script path; args are validated flags
+            cmd, capture_output=True, text=True, check=True, timeout=60
+        )
 
         token = result.stdout.strip()
 
@@ -1088,6 +1090,155 @@ def cmd_config(args: argparse.Namespace) -> int:
 
     except Exception as e:
         logger.error(f"Failed to get config: {e}")
+        return 1
+
+
+def cmd_rate_limit_set(args: argparse.Namespace) -> int:
+    """Create or update a rate-limit definition.
+
+    Caller (group) axis uses --user-max-requests / --agent-max-requests (at least
+    one). Target axis uses --max-requests.
+    """
+    try:
+        client = _create_client(args)
+        result = client.set_rate_limit(
+            axis=args.axis,
+            entity_type=args.entity_type,
+            name=args.name,
+            max_requests=args.max_requests,
+            user_max_requests=args.user_max_requests,
+            agent_max_requests=args.agent_max_requests,
+            window_seconds=args.window_seconds,
+            fail_closed=args.fail_closed,
+            enabled=not args.disabled,
+        )
+        logger.info("Rate-limit definition stored")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to set rate limit: {e}")
+        return 1
+
+
+def cmd_rate_limit_list(args: argparse.Namespace) -> int:
+    """List all rate-limit definitions."""
+    try:
+        client = _create_client(args)
+        result = client.list_rate_limits()
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to list rate limits: {e}")
+        return 1
+
+
+def cmd_rate_limit_delete(args: argparse.Namespace) -> int:
+    """Delete a rate-limit definition by id."""
+    try:
+        client = _create_client(args)
+        result = client.delete_rate_limit(args.id)
+        logger.info(f"Deleted rate-limit definition {args.id}")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to delete rate limit: {e}")
+        return 1
+
+
+def cmd_rate_limit_get(args: argparse.Namespace) -> int:
+    """Read a single rate-limit definition by id."""
+    try:
+        client = _create_client(args)
+        result = client.get_rate_limit(args.id)
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to get rate limit: {e}")
+        return 1
+
+
+def cmd_rate_limit_enable(args: argparse.Namespace) -> int:
+    """Enable a rate-limit definition in place."""
+    try:
+        client = _create_client(args)
+        result = client.set_rate_limit_enabled(args.id, enabled=True)
+        logger.info(f"Enabled rate-limit definition {args.id}")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to enable rate limit: {e}")
+        return 1
+
+
+def cmd_rate_limit_disable(args: argparse.Namespace) -> int:
+    """Disable a rate-limit definition in place (without deleting it)."""
+    try:
+        client = _create_client(args)
+        result = client.set_rate_limit_enabled(args.id, enabled=False)
+        logger.info(f"Disabled rate-limit definition {args.id}")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to disable rate limit: {e}")
+        return 1
+
+
+def cmd_rate_limit_status(args: argparse.Namespace) -> int:
+    """Introspect rate-limit definitions for a caller and/or target."""
+    try:
+        client = _create_client(args)
+        result = client.rate_limit_status(
+            identity=args.identity,
+            entity_type=args.entity_type,
+            name=args.name,
+        )
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to get rate-limit status: {e}")
+        return 1
+
+
+def cmd_rate_limit_member_set(args: argparse.Namespace) -> int:
+    """Map a user or agent (client_id) to rate-limit group(s)."""
+    try:
+        client = _create_client(args)
+        groups = [g.strip() for g in args.groups.split(",") if g.strip()]
+        result = client.set_rate_limit_membership(
+            subject_type=args.subject_type,
+            subject=args.subject,
+            groups=groups,
+        )
+        logger.info(f"Set rate-limit membership {args.subject_type}:{args.subject}")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to set rate-limit membership: {e}")
+        return 1
+
+
+def cmd_rate_limit_member_list(args: argparse.Namespace) -> int:
+    """List all rate-limit memberships."""
+    try:
+        client = _create_client(args)
+        result = client.list_rate_limit_memberships()
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to list rate-limit memberships: {e}")
+        return 1
+
+
+def cmd_rate_limit_member_delete(args: argparse.Namespace) -> int:
+    """Delete a rate-limit membership by id ('<subject_type>:<subject>')."""
+    try:
+        client = _create_client(args)
+        result = client.delete_rate_limit_membership(args.id)
+        logger.info(f"Deleted rate-limit membership {args.id}")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to delete rate-limit membership: {e}")
         return 1
 
 
@@ -2776,14 +2927,12 @@ def cmd_agent_pull_card(args: argparse.Namespace) -> int:
         else:
             for change in response.changes:
                 logger.info(f"\n  Field: {change.field}")
-                logger.info(
-                    f"    current: {json.dumps(change.current_value, default=str)[:200]}"
-                )
-                logger.info(
-                    f"    remote:  {json.dumps(change.remote_value, default=str)[:200]}"
-                )
+                logger.info(f"    current: {json.dumps(change.current_value, default=str)[:200]}")
+                logger.info(f"    remote:  {json.dumps(change.remote_value, default=str)[:200]}")
             if dry_run:
-                logger.info("\n  Dry-run: no A2A-spec writes performed. Re-run with --apply to persist.")
+                logger.info(
+                    "\n  Dry-run: no A2A-spec writes performed. Re-run with --apply to persist."
+                )
             elif response.applied:
                 logger.info(f"\n  Applied {len(response.changes)} change(s).")
             else:
@@ -5951,9 +6100,7 @@ Examples:
     custom_record_list_parser = subparsers.add_parser(
         "custom-record-list", help="List records of a custom type"
     )
-    custom_record_list_parser.add_argument(
-        "--type", required=True, help="Custom type name"
-    )
+    custom_record_list_parser.add_argument("--type", required=True, help="Custom type name")
     custom_record_list_parser.add_argument(
         "--json", action="store_true", help="Print raw JSON response"
     )
@@ -5987,6 +6134,128 @@ Examples:
     )
     config_parser.add_argument(
         "--json", action="store_true", help="Output raw JSON instead of formatted text"
+    )
+
+    # Rate limit commands (issue #295)
+    rate_limit_set_parser = subparsers.add_parser(
+        "rate-limit-set", help="Create or update a rate-limit definition (admin)"
+    )
+    rate_limit_set_parser.add_argument(
+        "--axis", required=True, choices=["caller", "target"], help="Which side of the call"
+    )
+    rate_limit_set_parser.add_argument(
+        "--entity-type",
+        required=True,
+        dest="entity_type",
+        help="caller: 'group'; target: 'mcp_server' | 'a2a_agent'",
+    )
+    rate_limit_set_parser.add_argument(
+        "--name", required=True, help="Group name, server path, or agent path"
+    )
+    rate_limit_set_parser.add_argument(
+        "--max-requests",
+        type=int,
+        dest="max_requests",
+        help="TARGET axis: max requests per window across all callers",
+    )
+    rate_limit_set_parser.add_argument(
+        "--user-max-requests",
+        type=int,
+        dest="user_max_requests",
+        help="CALLER/group axis: max requests per window for a human user (>= user floor)",
+    )
+    rate_limit_set_parser.add_argument(
+        "--agent-max-requests",
+        type=int,
+        dest="agent_max_requests",
+        help="CALLER/group axis: max requests per window for an agent/client (>= agent floor)",
+    )
+    rate_limit_set_parser.add_argument(
+        "--window-seconds",
+        type=int,
+        default=60,
+        dest="window_seconds",
+        help="Window length in seconds (default 60; up to 86400)",
+    )
+    rate_limit_set_parser.add_argument(
+        "--fail-closed",
+        action="store_true",
+        dest="fail_closed",
+        help="Deny on backend error (security-critical limits only)",
+    )
+    rate_limit_set_parser.add_argument(
+        "--disabled", action="store_true", help="Store the definition disabled"
+    )
+
+    rate_limit_list_parser = subparsers.add_parser(
+        "rate-limit-list", help="List all rate-limit definitions (admin)"
+    )
+
+    rate_limit_delete_parser = subparsers.add_parser(
+        "rate-limit-delete", help="Delete a rate-limit definition by id (admin)"
+    )
+    rate_limit_delete_parser.add_argument(
+        "--id",
+        required=True,
+        help="Definition id, e.g. 'caller:group:developers:60'",
+    )
+
+    rate_limit_get_parser = subparsers.add_parser(
+        "rate-limit-get", help="Read a single rate-limit definition by id (admin)"
+    )
+    rate_limit_get_parser.add_argument(
+        "--id",
+        required=True,
+        help="Definition id, e.g. 'caller:group:developers:60'",
+    )
+
+    rate_limit_enable_parser = subparsers.add_parser(
+        "rate-limit-enable", help="Enable a rate-limit definition in place (admin)"
+    )
+    rate_limit_enable_parser.add_argument("--id", required=True, help="Definition id")
+
+    rate_limit_disable_parser = subparsers.add_parser(
+        "rate-limit-disable", help="Disable a rate-limit definition without deleting it (admin)"
+    )
+    rate_limit_disable_parser.add_argument("--id", required=True, help="Definition id")
+
+    rate_limit_status_parser = subparsers.add_parser(
+        "rate-limit-status", help="Introspect rate-limit definitions (admin)"
+    )
+    rate_limit_status_parser.add_argument("--identity", help="Caller group name to introspect")
+    rate_limit_status_parser.add_argument(
+        "--entity-type", dest="entity_type", help="Target entity type (e.g. mcp_server)"
+    )
+    rate_limit_status_parser.add_argument("--name", help="Target name")
+
+    # Rate-limit membership commands: map a user/agent to rate-limit group(s).
+    rate_limit_member_set_parser = subparsers.add_parser(
+        "rate-limit-member-set",
+        help="Map a user or agent (client_id) to rate-limit group(s) (admin)",
+    )
+    rate_limit_member_set_parser.add_argument(
+        "--subject-type",
+        required=True,
+        choices=["user", "client"],
+        dest="subject_type",
+        help="'user' (subject = username) or 'client' (subject = client_id)",
+    )
+    rate_limit_member_set_parser.add_argument(
+        "--subject", required=True, help="The username or client_id"
+    )
+    rate_limit_member_set_parser.add_argument(
+        "--groups", required=True, help="Comma-separated rate-limit group names"
+    )
+
+    rate_limit_member_list_parser = subparsers.add_parser(
+        "rate-limit-member-list", help="List all rate-limit memberships (admin)"
+    )
+
+    rate_limit_member_delete_parser = subparsers.add_parser(
+        "rate-limit-member-delete", help="Delete a rate-limit membership by id (admin)"
+    )
+    rate_limit_member_delete_parser.add_argument(
+        "--id", required=True, help="Membership id, e.g. 'user:alice' or 'client:my-agent-id'"
     )
 
     # Add to groups command
@@ -6216,14 +6485,20 @@ Examples:
     )
     ard_search_parser.add_argument("--query", required=True, help="Natural-language query")
     ard_search_parser.add_argument(
-        "--filter", action="append", default=None,
+        "--filter",
+        action="append",
+        default=None,
         help="ARD filter key=value (repeatable), e.g. --filter type=mcp_server --filter tags=finance",
     )
     ard_search_parser.add_argument(
-        "--federation", default="auto", choices=["auto", "referrals", "none"],
+        "--federation",
+        default="auto",
+        choices=["auto", "referrals", "none"],
         help="Federation mode (default: auto)",
     )
-    ard_search_parser.add_argument("--page-size", type=int, default=10, help="Results per page (1-100)")
+    ard_search_parser.add_argument(
+        "--page-size", type=int, default=10, help="Results per page (1-100)"
+    )
     ard_search_parser.add_argument("--page-token", default=None, help="Opaque pagination cursor")
     ard_search_parser.add_argument("--json", action="store_true", help="Output raw ARD JSON")
 
@@ -6231,14 +6506,20 @@ Examples:
         "ard-agents", help="ARD Registry browse over all asset types (GET /api/ard/agents)"
     )
     ard_agents_parser.add_argument(
-        "--filter", action="append", default=None,
+        "--filter",
+        action="append",
+        default=None,
         help="ARD filter key=value (repeatable), e.g. --filter type=a2a_agent",
     )
     ard_agents_parser.add_argument(
-        "--order-by", default="identifier", choices=["identifier", "displayName", "updatedAt"],
+        "--order-by",
+        default="identifier",
+        choices=["identifier", "displayName", "updatedAt"],
         help="Sort field (default: identifier)",
     )
-    ard_agents_parser.add_argument("--page-size", type=int, default=20, help="Items per page (1-100)")
+    ard_agents_parser.add_argument(
+        "--page-size", type=int, default=20, help="Items per page (1-100)"
+    )
     ard_agents_parser.add_argument("--page-token", default=None, help="Opaque pagination cursor")
     ard_agents_parser.add_argument("--json", action="store_true", help="Output raw ARD JSON")
 
@@ -6815,9 +7096,7 @@ Examples:
     user_group_list_parser.add_argument(
         "--provider", help="Filter by provider (e.g. manual, pingfederate)"
     )
-    user_group_list_parser.add_argument(
-        "--q", help="Substring filter on username/email"
-    )
+    user_group_list_parser.add_argument("--q", help="Substring filter on username/email")
     user_group_list_parser.add_argument(
         "--json", action="store_true", help="Output raw JSON instead of formatted text"
     )
@@ -6826,9 +7105,7 @@ Examples:
         "user-group-get",
         help="Get a single user-group record by username",
     )
-    user_group_get_parser.add_argument(
-        "--username", required=True, help="IdP username to look up"
-    )
+    user_group_get_parser.add_argument("--username", required=True, help="IdP username to look up")
     user_group_get_parser.add_argument(
         "--json", action="store_true", help="Output raw JSON instead of formatted text"
     )
@@ -6844,9 +7121,7 @@ Examples:
         "--groups",
         help="Comma-separated new groups list; empty string clears groups; omit to leave unchanged",
     )
-    user_group_update_parser.add_argument(
-        "--email", help="New email (omit to leave unchanged)"
-    )
+    user_group_update_parser.add_argument("--email", help="New email (omit to leave unchanged)")
     user_group_update_enabled = user_group_update_parser.add_mutually_exclusive_group()
     user_group_update_enabled.add_argument(
         "--enabled", action="store_true", help="Set enabled=True"
@@ -7337,6 +7612,16 @@ Examples:
         "remove": cmd_remove,
         "healthcheck": cmd_healthcheck,
         "config": cmd_config,
+        "rate-limit-set": cmd_rate_limit_set,
+        "rate-limit-list": cmd_rate_limit_list,
+        "rate-limit-get": cmd_rate_limit_get,
+        "rate-limit-delete": cmd_rate_limit_delete,
+        "rate-limit-enable": cmd_rate_limit_enable,
+        "rate-limit-disable": cmd_rate_limit_disable,
+        "rate-limit-status": cmd_rate_limit_status,
+        "rate-limit-member-set": cmd_rate_limit_member_set,
+        "rate-limit-member-list": cmd_rate_limit_member_list,
+        "rate-limit-member-delete": cmd_rate_limit_member_delete,
         "add-to-groups": cmd_add_to_groups,
         "remove-from-groups": cmd_remove_from_groups,
         "create-group": cmd_create_group,

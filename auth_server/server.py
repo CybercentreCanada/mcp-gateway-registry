@@ -83,10 +83,10 @@ sys.path.insert(0, "/app")
 # Import MCP audit logging components
 from registry.audit.mcp_logger import MCPLogger
 from registry.audit.models import Identity, MCPServer, TokenMintAuditRecord
-from registry.audit.service import AuditLogger
+from registry.audit.service import AuditLogger, NonDurableAuditError, enforce_durable_audit_sink
 from registry.audit.sink import emit_audit_event
 from registry.common.scopes_loader import reload_scopes_config
-from registry.common.secret_key import validate_secret_key
+from registry.common.secret_key import validate_secret_key, validate_signing_secret
 from registry.core.config import settings
 from registry.repositories.factory import get_scope_repository
 
@@ -129,7 +129,7 @@ DEFAULT_TOKEN_LIFETIME_HOURS = 8
 MCP_TRANSPORT_ENDPOINTS: frozenset[str] = frozenset({"mcp", "sse", "messages"})
 
 # Rate limiting for token generation (simple in-memory counter)
-user_token_generation_counts = {}
+user_token_generation_counts: dict[str, int] = {}
 MAX_TOKENS_PER_USER_PER_HOUR = int(os.environ.get("MAX_TOKENS_PER_USER_PER_HOUR", "100"))
 
 
@@ -196,7 +196,7 @@ def _read_mcp_filter_enabled() -> bool:
         value = getattr(settings, "mcp_tools_list_filter_enabled", None)
         if value is not None:
             return bool(value)
-    except Exception:
+    except Exception:  # nosec B110 - settings attr optional; falls back to env
         pass
     raw = os.getenv("MCP_TOOLS_LIST_FILTER_ENABLED", "true").lower()
     return raw in ("true", "1", "yes")
@@ -479,7 +479,7 @@ def _read_mcp_proxy_timeout() -> float:
 
 
 # Global scopes configuration (will be loaded during FastAPI startup)
-SCOPES_CONFIG = {}
+SCOPES_CONFIG: dict[str, Any] = {}
 
 
 def _log_scopes_loaded(scopes_config: dict) -> None:
@@ -510,8 +510,21 @@ _registry_static_token_requested: bool = (
     os.environ.get("REGISTRY_STATIC_TOKEN_AUTH_ENABLED", "false").lower() == "true"
 )
 
-# Static API key for Registry API (must match Bearer token value when enabled)
-REGISTRY_API_TOKEN: str = os.environ.get("REGISTRY_API_TOKEN", "")
+# Static API key for Registry API (must match Bearer token value when enabled).
+#
+# When set, this token is promoted to a legacy admin entry with unrestricted
+# scopes (see _build_static_token_map), so it grants the highest privilege in
+# the system. It must therefore clear the same strength bar as the application
+# signing secret: presence is optional (an unset token simply means no legacy
+# entry is created), but a value that IS present must be strong. Validating
+# through the canonical signing-secret helper fails closed at startup on an
+# empty/whitespace-only, too-short, or known-weak/placeholder value rather than
+# silently accepting a weak admin credential.
+REGISTRY_API_TOKEN: str = validate_signing_secret(
+    os.environ.get("REGISTRY_API_TOKEN"),
+    "REGISTRY_API_TOKEN",
+    required=False,
+)
 
 # Issue #779: multiple static API keys with per-key groups.
 _REGISTRY_API_KEYS_RAW: str = os.environ.get("REGISTRY_API_KEYS", "").strip()
@@ -540,7 +553,7 @@ if _registry_static_token_requested and not REGISTRY_API_TOKEN and not _REGISTRY
     )
     REGISTRY_STATIC_TOKEN_AUTH_ENABLED: bool = False
 else:
-    REGISTRY_STATIC_TOKEN_AUTH_ENABLED: bool = _registry_static_token_requested
+    REGISTRY_STATIC_TOKEN_AUTH_ENABLED = _registry_static_token_requested
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +607,26 @@ class _RegistryApiKeyEntry(BaseModel):
                 f"Key name '{v}' is reserved (legacy/internal). Pick a different name."
             )
         return v
+
+    @field_validator("key")
+    @classmethod
+    def _validate_key(
+        cls,
+        v: str,
+    ) -> str:
+        # A keyed entry grants the scopes mapped from its groups (which may
+        # include admin), so the key bypasses IdP JWT validation and must clear
+        # the same weak-value bar as every other privilege-granting credential.
+        # The min_length=32 Field constraint alone accepts a >=32-char known
+        # placeholder (e.g. the .env.example value); route the key through the
+        # canonical validator to reject well-known literals too. Pydantic
+        # validators must raise ValueError, so re-wrap the validator's
+        # RuntimeError -- the error then flows through _parse_registry_api_keys'
+        # fail-closed path (invalid REGISTRY_API_KEYS disables the feature).
+        try:
+            return validate_signing_secret(v, "REGISTRY_API_KEYS key", required=True)
+        except RuntimeError as e:
+            raise ValueError(str(e)) from e
 
 
 def _repair_stripped_json(
@@ -781,19 +814,32 @@ if _federation_static_token_requested and not FEDERATION_STATIC_TOKEN:
     )
     FEDERATION_STATIC_TOKEN_AUTH_ENABLED: bool = False
 else:
-    FEDERATION_STATIC_TOKEN_AUTH_ENABLED: bool = _federation_static_token_requested
+    FEDERATION_STATIC_TOKEN_AUTH_ENABLED = _federation_static_token_requested
 
-# Warn if token is too short (weak entropy)
 MIN_FEDERATION_TOKEN_LENGTH: int = 32
-if (
-    FEDERATION_STATIC_TOKEN_AUTH_ENABLED
-    and len(FEDERATION_STATIC_TOKEN) < MIN_FEDERATION_TOKEN_LENGTH
-):
-    logging.warning(
-        f"FEDERATION_STATIC_TOKEN is only {len(FEDERATION_STATIC_TOKEN)} characters. "
-        f"Recommended minimum is {MIN_FEDERATION_TOKEN_LENGTH} characters. "
-        'Generate a stronger token with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"'
-    )
+
+# The federation static token bypasses IdP JWT validation, so it must be held to
+# the same strength bar as every other signing/marker secret: a short OR
+# well-known placeholder value must never be armed for authentication. The
+# operator explicitly enabled the feature, so the token is required=True here.
+# This is an optional feature, so on a weak/invalid token we degrade gracefully
+# (disable the feature) rather than crash the whole process -- mirroring the
+# missing-token branch above. Failing closed means the weak token is NOT armed.
+if FEDERATION_STATIC_TOKEN_AUTH_ENABLED:
+    try:
+        FEDERATION_STATIC_TOKEN = validate_signing_secret(
+            FEDERATION_STATIC_TOKEN,
+            "FEDERATION_STATIC_TOKEN",
+            required=True,
+        )
+    except RuntimeError as e:
+        logging.error(
+            "FEDERATION_STATIC_TOKEN_AUTH_ENABLED=true but FEDERATION_STATIC_TOKEN is weak: %s "
+            "Federation static token auth is DISABLED. Set a strong FEDERATION_STATIC_TOKEN or "
+            "disable the feature. Falling back to standard IdP JWT validation.",
+            e,
+        )
+        FEDERATION_STATIC_TOKEN_AUTH_ENABLED = False
 
 # Federation endpoint path patterns (scoped access for federation static token)
 # REGISTRY_ROOT_PATH is prepended so pattern matching works when hosted on a base path
@@ -967,7 +1013,7 @@ def _mask_sensitive_dict(
     if not isinstance(data, dict):
         return data
 
-    masked = {}
+    masked: dict[str, Any] = {}
     for key, value in data.items():
         key_lower = key.lower()
         if any(sensitive in key_lower for sensitive in sensitive_keys):
@@ -1121,7 +1167,7 @@ async def map_groups_to_scopes(groups: list[str]) -> list[str]:
     return unique_scopes
 
 
-async def validate_session_cookie(cookie_value: str) -> dict[str, any]:
+async def validate_session_cookie(cookie_value: str) -> dict[str, Any]:
     """
     Validate session cookie using itsdangerous serializer.
 
@@ -1215,6 +1261,169 @@ def parse_server_and_tool_from_url(original_url: str) -> tuple[str | None, str |
     except Exception as e:
         logger.error(f"Failed to parse server/tool from URL {original_url}: {e}")
         return None, None
+
+
+def _classify_rate_limit_target(
+    original_url: str | None,
+    server_name: str | None,
+) -> tuple[str | None, str | None]:
+    """Classify the request target into a (entity_type, name) pair for Limit B.
+
+    v1 recognizes two coarse target kinds from the request path:
+    - A2A agent requests (``{root}/agent/{path}/...``) -> ("a2a_agent", agent_path).
+    - MCP server requests -> ("mcp_server", server_name).
+
+    Fine-grained tool/skill targets are a later phase (they need the JSON-RPC
+    payload) and are not classified here. Returns (None, None) when the request
+    is neither, so the caller simply skips the target gate.
+    """
+    agent_path = _get_a2a_agent_path(original_url)
+    if agent_path:
+        return "a2a_agent", agent_path
+    if server_name:
+        return "mcp_server", server_name
+    return None, None
+
+
+def _resolve_rate_limit_caller(
+    validation_result: dict,
+) -> tuple[str | None, str | None]:
+    """Resolve the (username, client_id) the rate limiter keys on.
+
+    The rate limiter classifies a caller as an AGENT when ``client_id`` is set,
+    else a USER, and keys the per-caller counter on that identity. But
+    ``validation_result['client_id']`` is NOT a reliable agent signal, and the
+    right discriminator is **provider-specific**:
+
+    - Keycloak / Entra / Auth0: a user (browser / password-grant) token carries
+      the OAuth client only as ``azp`` (copied into ``validation_result``), while
+      a machine (``client_credentials``) token additionally carries a top-level
+      ``client_id`` **claim** and a ``service-account-*`` subject. So the agent
+      signal is a top-level ``client_id`` claim (or a ``service-account-*``
+      ``preferred_username``).
+    - Cognito: BOTH user access tokens and M2M tokens carry a ``client_id``
+      claim, so ``client_id`` cannot discriminate. A Cognito user access token
+      carries a ``username`` claim; a Cognito M2M (``client_credentials``) token
+      does not. So the agent signal on Cognito is the ABSENCE of ``username``.
+
+    Using ``client_id`` alone would misclassify every human as an agent (picking
+    the group's agent limit, and bucketing all web users under one shared client
+    counter) -- on Keycloak for password-grant tokens, and on Cognito for every
+    user access token.
+
+    Returns (username, client_id) to pass to ``RateLimiter.check``: for a user,
+    ``(username, None)``; for an agent, ``(username_or_None, client_id)`` so the
+    limiter's agent branch is taken and keys on the client.
+    """
+    username = validation_result.get("username")
+    client_id = validation_result.get("client_id")
+    method = validation_result.get("method")
+    claims = validation_result.get("data") or {}
+    if not isinstance(claims, dict):
+        claims = {}
+
+    token_client_id = claims.get("client_id")
+
+    if method == "cognito":
+        # Cognito: M2M (client_credentials) access token has no end-user
+        # ``username`` claim; a user access token always does.
+        is_machine = bool(token_client_id) and "username" not in claims
+    else:
+        # Keycloak / Entra / Auth0 (and any OIDC provider that copies azp into
+        # client_id): only a client_credentials token carries a top-level
+        # client_id claim or a service-account-* subject.
+        preferred = claims.get("preferred_username") or ""
+        is_machine = bool(token_client_id) or preferred.startswith("service-account-")
+
+    if is_machine:
+        return username, (token_client_id or client_id)
+
+    # Human user: key on username; drop the azp/client_id so the limiter's user
+    # branch is taken.
+    return username, None
+
+
+async def _enforce_rate_limit(
+    validation_result: dict,
+    original_url: str | None,
+    server_name: str | None,
+) -> None:
+    """Enforce caller + target rate limits; raise HTTPException(429) if over a limit.
+
+    Keys strictly on the validated-token identity (``client_id`` or ``username`` from
+    ``validation_result``) -- NEVER a client-supplied header. No-op unless
+    ``RATE_LIMITING_ENABLED`` is set. Any unexpected limiter error is swallowed
+    (the limiter itself already fails open per-gate); rate limiting must never
+    turn into a 500 on the auth path.
+    """
+    # Dual import context (matches the observability/egress_obo pattern above):
+    # the deployed container runs server.py with /app as the module root (top-level
+    # import), while the repo-root/test context sees the auth_server package.
+    try:
+        from rate_limiting_config import RATE_LIMITING_ENABLED, get_rate_limiter
+    except ImportError:
+        from auth_server.rate_limiting_config import RATE_LIMITING_ENABLED, get_rate_limiter
+
+    if not RATE_LIMITING_ENABLED:
+        return
+
+    # Username / client_id from the validated token only, never a client header.
+    # The limiter resolves the caller's RATE-LIMIT groups from the memberships
+    # collection keyed on these; the token's authz "groups" claim is deliberately
+    # NOT passed here (no IdP emits rate-limit groups, and mixing them into authz
+    # groups could change scopes).
+    # Resolve the caller identity the limiter keys on. client_id is set ONLY for a
+    # genuine machine (client_credentials) token, so a human is classified as a
+    # user -- see _resolve_rate_limit_caller for why validation_result['client_id']
+    # (azp-derived) cannot be used directly.
+    username, client_id = _resolve_rate_limit_caller(validation_result)
+    if not username and not client_id:
+        return
+
+    target_entity_type, target_name = _classify_rate_limit_target(original_url, server_name)
+
+    # Scope: rate limiting applies to DATA-PLANE calls only (an MCP server or A2A
+    # agent target). Control-plane /api/* requests have no classified target, so
+    # they are exempt -- caller limits never throttle the dashboard/login/config UI.
+    if not target_entity_type:
+        return
+
+    # Admin bypass: an operator must not be able to lock themselves out. Admins
+    # skip caller gates (target gates still protect a weak backend).
+    is_admin = bool(validation_result.get("is_admin", False))
+
+    try:
+        decision = await get_rate_limiter().check(
+            username=username,
+            client_id=client_id,
+            is_admin=is_admin,
+            target_entity_type=target_entity_type,
+            target_name=target_name,
+        )
+    except Exception as exc:
+        # The limiter fails open internally; this is a last-resort guard so an
+        # unexpected error here can never 500 the /validate path.
+        logger.warning(f"rate-limit enforcement skipped due to error: {exc}")
+        return
+
+    if not decision.allowed:
+        # NOTE: /validate is nginx's internal auth_request subrequest, never a
+        # client-facing endpoint. nginx's auth_request module only forwards 401
+        # and 403 from the subrequest; any other status (including 429) is turned
+        # into a 500 at the parent location ("auth request unexpected status").
+        # So a throttle is signalled as a 403 carrying X-RateLimit-* headers (incl.
+        # the X-RateLimit-Throttled marker); the @forbidden_error named location in
+        # nginx captures those headers and rewrites the response into a real 429 +
+        # Retry-After for the client. Returning 429 here would surface as 500.
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "rate_limit_exceeded",
+                "axis": decision.axis,
+                "retry_after": decision.retry_after,
+            },
+            headers=decision.headers(),
+        )
 
 
 def _normalize_server_name(name: str) -> str:
@@ -1553,6 +1762,13 @@ async def lifespan(app: FastAPI):
     # Runs after scopes are loaded so map_groups_to_scopes can resolve groups.
     await _build_static_token_map()
 
+    # Prime the MCP/token-mint audit logger at startup so the durable-sink
+    # guard runs at boot. Without this the guard would only fire lazily on the
+    # first audited request; priming here makes the auth-server refuse to start
+    # (NonDurableAuditError) when audit logging is enabled but no durable sink is
+    # available, matching the registry process's fail-closed startup behavior.
+    get_mcp_logger()
+
     yield
 
     # Shutdown: Add cleanup code here if needed in the future
@@ -1739,8 +1955,8 @@ class SimplifiedCognitoValidator:
             region: Default AWS region
         """
         self.default_region = region
-        self._cognito_clients = {}  # Cache boto3 clients by region
-        self._jwks_cache = {}  # Cache JWKS by user pool
+        self._cognito_clients: dict[str, Any] = {}  # Cache boto3 clients by region
+        self._jwks_cache: dict[str, Any] = {}  # Cache JWKS by user pool
 
     def _get_cognito_client(self, region: str):
         """Get or create boto3 cognito client for region"""
@@ -1805,7 +2021,7 @@ class SimplifiedCognitoValidator:
 
             # Get JWKS and find matching key
             jwks = self._get_jwks(user_pool_id, region)
-            signing_key = None
+            signing_key: Any = None
 
             for key in jwks.get("keys", []):
                 if key.get("kid") == kid:
@@ -1823,8 +2039,8 @@ class SimplifiedCognitoValidator:
                             algorithms = get_default_algorithms()
                             signing_key = algorithms["RS256"].from_jwk(key)
                         except (ImportError, AttributeError):
-                            # For PyJWT 2.0.0+
-                            signing_key = PyJWK.from_jwk(json.dumps(key)).key
+                            # For PyJWT 2.0.0+ (from_jwk exists at runtime; stubs lag)
+                            signing_key = PyJWK.from_jwk(json.dumps(key)).key  # type: ignore[attr-defined]
                     break
 
             if not signing_key:
@@ -2041,7 +2257,7 @@ class SimplifiedCognitoValidator:
             jwt_claims = self.validate_jwt_token(access_token, user_pool_id, client_id, region)
 
             # Extract scopes and other info
-            scopes = []
+            scopes: list[str] = []
             if "scope" in jwt_claims:
                 scopes = jwt_claims["scope"].split() if jwt_claims["scope"] else []
 
@@ -2110,6 +2326,134 @@ def _is_registry_api_request(
         if path.startswith(pattern):
             return True
 
+    return False
+
+
+def _get_a2a_agent_path(
+    original_url: str | None,
+) -> str | None:
+    """Return the agent path for an A2A reverse-proxy request, or None.
+
+    Recognizes URLs of the form ``{root}/agent/{agent_path}/...``
+    and returns the agent path with a leading slash (e.g. "/flight-booking-agent"),
+    matching the agent's registered path and the ``invoke_agent`` scope
+    resources. Agent paths may be multi-segment (e.g. "/lob1/travel"); the trailing
+    agent-card discovery suffix is stripped so the card and JSON-RPC requests
+    resolve to the same agent path. Returns None for any non-agent request so the
+    caller falls back to MCP handling.
+
+    Args:
+        original_url: The X-Original-URL header value from nginx.
+
+    Returns:
+        The agent path (leading slash, one or more segments) or None.
+    """
+    if not original_url:
+        return None
+
+    parsed = urlparse(original_url)
+    path = parsed.path.strip("/")
+
+    registry_prefix = REGISTRY_ROOT_PATH.strip("/")
+    if registry_prefix and path.startswith(registry_prefix):
+        path = path[len(registry_prefix) :].lstrip("/")
+
+    parts = path.split("/") if path else []
+    if len(parts) < 2 or parts[0] != "agent":
+        return None
+
+    agent_segments = parts[1:]
+    # Drop the agent-card discovery suffix so /agent/x/.well-known/agent-card.json
+    # and /agent/x/ both resolve to the same agent path.
+    if agent_segments[-2:] == [".well-known", "agent-card.json"]:
+        agent_segments = agent_segments[:-2]
+
+    if not agent_segments or not all(agent_segments):
+        return None
+
+    return "/" + "/".join(agent_segments)
+
+
+# Admin scope/group markers that grant A2A invoke regardless of scope-doc shape.
+# Backwards compatibility: scope docs seeded before the {agent, actions} schema
+# (#1434) use the legacy nested {"agents": {"actions": [...]}} shape, which has no
+# invoke_agent action at all, so an admin on such a doc would otherwise be denied
+# invoke. Admins are allowed via these markers so operators need not re-seed their
+# group definitions. Non-admins on the legacy shape must use the new
+# {agent, actions} rule (or re-seed). Keyed only on the admin markers -- never on a
+# broad server grant -- so an MCP server scope never gates agent invoke. The set
+# matches the registry's own admin determination (registry/auth/dependencies.py
+# _user_is_admin): both the "mcp-registry-admin" scope and the "registry-admins"
+# bootstrap group/scope count as admin. Sourced from the shared single source of
+# truth so this cannot drift from the other layers that gate on admin groups.
+from registry.auth.privileged_constants import ADMIN_GROUP_MARKERS as _A2A_ADMIN_MARKERS
+
+
+async def validate_a2a_agent_access(
+    agent_path: str,
+    user_scopes: list[str],
+    user_groups: list[str] | None = None,
+) -> bool:
+    """Check per-agent A2A invocation access against structured agent scopes.
+
+    Enforced at the ``/validate`` auth subrequest: it answers "may this caller
+    invoke this agent?". Mirrors :func:`validate_server_tool_access` and uses the
+    same rule shape as a server rule: each ``server_access`` entry is a per-agent
+    dict ``{"agent": "<path or *>", "actions": [...]}`` -- ``agent`` is the
+    identifier (like ``server``) and ``actions`` are its siblings (like
+    ``methods``). A caller may invoke the agent if any of their scopes has a rule
+    whose ``agent`` matches (exact path, or ``*``/``all`` wildcard) and whose
+    ``actions`` include ``invoke_agent`` (or the ``all``/``*`` wildcard).
+
+    Backwards compatibility: an admin (see ``_A2A_ADMIN_MARKERS``) is always
+    allowed, so a deployment whose admin scope doc still uses the legacy nested
+    ``{"agents": {...}}`` shape (which predates ``invoke_agent``) keeps working
+    without re-seeding.
+
+    Args:
+        agent_path: Agent path with leading slash (e.g. "/travel").
+        user_scopes: Scope names resolved for the caller (from group mappings).
+        user_groups: IdP group names for the caller, used only for the admin
+            marker check (some deployments carry the admin marker as a group).
+
+    Returns:
+        True if any scope grants ``invoke_agent`` on this agent, else False.
+    """
+    # Admin bypass (legacy-schema backwards compatibility -- see _A2A_ADMIN_MARKERS).
+    markers = set(user_scopes or []) | set(user_groups or [])
+    if markers & _A2A_ADMIN_MARKERS:
+        logger.info(f"A2A invoke allowed for admin caller to agent {agent_path}")
+        return True
+
+    if not user_scopes:
+        return False
+
+    scope_repo = get_scope_repository()
+    # Single round-trip for all caller scopes (this runs on the /validate auth
+    # subrequest hot path); get_server_scopes_bulk uses an $in query rather than
+    # one find_one per scope.
+    try:
+        scope_rules = await scope_repo.get_server_scopes_bulk(user_scopes)
+    except Exception as exc:
+        logger.warning(f"A2A access: failed to resolve scopes {user_scopes}: {exc}")
+        return False
+
+    for scope_config in scope_rules.values():
+        if not scope_config:
+            continue
+
+        for entry in scope_config:
+            rule_agent = entry.get("agent")
+            if not isinstance(rule_agent, str):
+                continue
+            # Agent identifier match: exact path, or a wildcard covering any agent.
+            if rule_agent not in ("*", "all") and rule_agent != agent_path:
+                continue
+            actions = entry.get("actions", [])
+            if not isinstance(actions, list):
+                continue
+            if "invoke_agent" in actions or "all" in actions or "*" in actions:
+                return True
     return False
 
 
@@ -2264,16 +2608,66 @@ async def validate_request(request: Request):
 
     try:
         # Extract headers
-        # Check for X-Authorization first (custom header used by this gateway)
-        # Only if X-Authorization is not present, check standard Authorization header
-        authorization = request.headers.get("X-Authorization")
-        if not authorization:
-            authorization = request.headers.get("Authorization")
+        original_url = request.headers.get("X-Original-URL")
+        x_authorization = request.headers.get("X-Authorization")
+        raw_authorization = request.headers.get("Authorization")
+
+        # A2A agent-proxy trust model: on an /agent/... path the standard
+        # Authorization header carries the *target agent's* credential, which the
+        # calling agent obtained out-of-band (per the A2A spec) and which nginx
+        # forwards end-to-end to the agent backend. The gateway credential must
+        # travel in X-Authorization ONLY. So for agent paths we authenticate the
+        # caller on X-Authorization and never fall back to Authorization -- a
+        # fallback would authenticate on (and, since it is forwarded, leak) the
+        # target-agent credential. For every non-agent path the historic
+        # precedence (X-Authorization first, then Authorization) is preserved.
+        a2a_agent_path = _get_a2a_agent_path(original_url)
+        is_a2a_request = a2a_agent_path is not None
+        if x_authorization:
+            authorization = x_authorization
+        elif is_a2a_request:
+            # No gateway credential on an agent path: fail closed as
+            # unauthenticated rather than trusting the target-agent Authorization.
+            authorization = None
+        else:
+            authorization = raw_authorization
+
+        # Defense in depth: if a caller duplicates its gateway token into both
+        # X-Authorization and Authorization on an agent path, the Authorization
+        # copy would be forwarded to the registrant-controlled agent backend and
+        # could be replayed against the registry. Refuse the request (fail closed)
+        # rather than silently leaking the gateway credential. Compare the extracted
+        # token VALUES (strip an optional "Bearer " scheme + surrounding whitespace)
+        # so a duplicate that differs only in scheme prefix or whitespace is caught.
+        def _bearer_token_value(header: str | None) -> str:
+            if not header:
+                return ""
+            value = header.strip()
+            if value.lower().startswith("bearer "):
+                value = value[len("bearer ") :].strip()
+            return value
+
+        if (
+            is_a2a_request
+            and x_authorization
+            and _bearer_token_value(raw_authorization) == _bearer_token_value(x_authorization)
+        ):
+            logger.warning(
+                "A2A request for %s presents identical X-Authorization and "
+                "Authorization; refusing so the gateway credential cannot leak to "
+                "the agent backend.",
+                a2a_agent_path,
+            )
+            return JSONResponse(
+                content={"detail": "Authorization must not duplicate the gateway credential"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer", "Connection": "close"},
+            )
+
         cookie_header = request.headers.get("Cookie", "")
         user_pool_id = request.headers.get("X-User-Pool-Id")
         client_id = request.headers.get("X-Client-Id")
         region = request.headers.get("X-Region", "us-east-1")
-        original_url = request.headers.get("X-Original-URL")
         body = request.headers.get("X-Body")
         # capture_body.lua sets this when the request body was too large to buffer
         # in memory and spilled to a temp file, so no X-Body could be captured.
@@ -2427,11 +2821,17 @@ async def validate_request(request: Request):
             if hmac.compare_digest(bearer_token, FEDERATION_STATIC_TOKEN):
                 logger.info(f"Federation static token: Authenticated for {original_url}")
 
+                # The federation static token is a long-lived, non-expiring
+                # credential intended for federation DATA SYNC. It is therefore
+                # least-privilege READ-ONLY: it grants only "federation/read".
+                # Peer/federation-config management (create/update/delete) is a
+                # privileged operation and must be driven by a real admin
+                # credential, not this static token, so "federation/peers" is
+                # deliberately NOT granted here.
                 federation_scopes = [
                     "federation/read",
-                    "federation/peers",
                 ]
-                response_data = {
+                response_data: dict[str, Any] = {
                     "valid": True,
                     "username": "federation-peer",
                     "client_id": "federation-static",
@@ -2871,6 +3271,31 @@ async def validate_request(request: Request):
             )
         else:
             user_scopes = validation_result.get("scopes", [])
+
+        # A2A agent proxy requests: enforce per-agent invoke FGAC here at the
+        # auth subrequest, resolving the caller's scopes to an invoke_agent
+        # action that covers this agent (see validate_a2a_agent_access).
+        # a2a_agent_path was resolved once at the top of the handler so the token
+        # precedence and this FGAC check agree on whether the request is A2A.
+        if a2a_agent_path is not None:
+            if not await validate_a2a_agent_access(
+                a2a_agent_path, user_scopes, validation_result.get("groups", [])
+            ):
+                logger.warning(
+                    f"Access denied for user "
+                    f"{hash_username(validation_result.get('username', ''))} "
+                    f"to A2A agent {a2a_agent_path} - missing invoke scope"
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Access denied to agent {a2a_agent_path} - no invoke scope",
+                    headers={"Connection": "close"},
+                )
+            logger.info(f"A2A per-agent scope validation passed for {a2a_agent_path}")
+            # This is an agent proxy request, not an MCP server; skip the MCP
+            # server/tool scope validation below.
+            server_name = None
+
         if server_name:
             # For ANY server access, enforce scope validation (fail closed principle)
             # This includes MCP initialization methods that may not have a specific tool
@@ -3139,6 +3564,11 @@ async def validate_request(request: Request):
                 headers={"Connection": "close"},
             )
 
+        # Rate limiting (issue #295): enforced AFTER authorization, keyed on the
+        # validated-token identity. No-op unless RATE_LIMITING_ENABLED. Raises 429
+        # on limit exceeded, which the outer 4xx handler re-raises as-is.
+        await _enforce_rate_limit(validation_result, original_url, server_name)
+
         # Prepare JSON response data
         response_data = {
             "valid": True,
@@ -3180,7 +3610,7 @@ async def validate_request(request: Request):
             if mcp_logger:
                 try:
                     # Build identity from validation result
-                    identity = Identity(
+                    mcp_identity = Identity(
                         # Human-readable identity for the audit record
                         # (email -> preferred_username -> sub). The resolved
                         # claims are surfaced under validation_result["data"];
@@ -3205,7 +3635,7 @@ async def validate_request(request: Request):
                     # Log the MCP access event
                     await mcp_logger.log_mcp_access(
                         request_id=request_id,
-                        identity=identity,
+                        identity=mcp_identity,
                         mcp_server=mcp_server,
                         request_body=body.encode("utf-8") if body else b"",
                         response_status="success",
@@ -3285,7 +3715,7 @@ async def validate_request(request: Request):
             mcp_logger = get_mcp_logger()
             if mcp_logger:
                 try:
-                    identity = Identity(
+                    mcp_identity = Identity(
                         username="anonymous",
                         auth_method="unknown",
                         credential_type="none",
@@ -3297,7 +3727,7 @@ async def validate_request(request: Request):
                     )
                     await mcp_logger.log_mcp_access(
                         request_id=request_id,
-                        identity=identity,
+                        identity=mcp_identity,
                         mcp_server=mcp_server,
                         request_body=body.encode("utf-8") if body else b"",
                         response_status="error",
@@ -3402,17 +3832,29 @@ async def manage_federation_token(request: Request):
     body = await request.json()
     new_token = body.get("new_token")
 
-    # Validate minimum token length if a new token is provided
-    if new_token and len(new_token) < MIN_FEDERATION_TOKEN_LENGTH:
-        return JSONResponse(
-            content={
-                "detail": (
-                    f"Token must be at least {MIN_FEDERATION_TOKEN_LENGTH} characters. "
-                    'Generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"'
-                )
-            },
-            status_code=400,
-        )
+    # A rotated token arms the same privileged static credential as startup, so
+    # it must clear the same strength bar. Run it through the canonical validator
+    # (rejects too-short AND known-weak/placeholder values, weak-check before
+    # length) rather than a bare length check -- otherwise an admin could rotate
+    # to a long-but-well-known placeholder and silently undo the startup
+    # hardening.
+    if new_token:
+        try:
+            new_token = validate_signing_secret(
+                new_token,
+                "FEDERATION_STATIC_TOKEN",
+                required=True,
+            )
+        except RuntimeError as e:
+            return JSONResponse(
+                content={
+                    "detail": (
+                        f"{e} "
+                        'Generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"'
+                    )
+                },
+                status_code=400,
+            )
 
     if new_token:
         FEDERATION_STATIC_TOKEN = new_token
@@ -3509,6 +3951,112 @@ async def _emit_token_mint_audit(
         logger.warning("Failed to emit token-mint audit record", exc_info=True)
 
 
+def _validate_context_group_scope_shape(
+    user_context: dict[str, Any],
+) -> None:
+    """Fail closed on a malformed groups/scopes shape in a mint request body.
+
+    The internal mint endpoint stamps ``groups`` and ``scopes`` from the request
+    body straight into the minted JWT. The body is only reachable to a caller
+    holding the internal signing key, but we still refuse to mint from a
+    structurally ambiguous context rather than coerce it: ``groups`` and
+    ``scopes`` must each be a list of non-empty strings when present. A scalar,
+    ``None`` element, or non-string entry is rejected (a coerced
+    ``groups: "admin"`` string would otherwise be iterated character-by-character
+    downstream). Missing keys are allowed (they default to empty).
+
+    Raises:
+        HTTPException: 400 if either field is present but not a list of strings.
+    """
+    for field in ("groups", "scopes"):
+        value = user_context.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item.strip() for item in value
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"user_context.{field} must be a list of non-empty strings",
+                headers={"Connection": "close"},
+            )
+
+
+async def _reconcile_context_against_session(
+    user_context: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Reconcile a mint request's groups/scopes against the authoritative session.
+
+    The mint endpoint receives the caller-supplied ``user_context`` in the
+    request body. When that context carries a ``session_id``, we do not trust the
+    body's groups/scopes: we resolve the session from the authoritative session
+    store and reconcile against the groups persisted there at login. The minted
+    token then reflects the session's groups (and scopes derived from them), and
+    a body that tries to claim a privileged group the session does not hold is
+    rejected outright rather than silently minted. This binds a session-backed
+    mint to what the user actually had, closing the forged-context path for the
+    session-backed case.
+
+    When no ``session_id`` is present (pure internal / M2M callers with no
+    session-backed source), the body's own groups/scopes are used unchanged --
+    that trust boundary is explicit and documented; the caller already holds the
+    internal signing key.
+
+    Returns:
+        Tuple ``(groups, scopes)`` to stamp into the token.
+
+    Raises:
+        HTTPException: 403 if the body claims a privileged group the resolved
+            session does not hold, or 401 if the session_id cannot be resolved.
+    """
+    body_groups = list(user_context.get("groups") or [])
+    body_scopes = list(user_context.get("scopes") or [])
+
+    session_id = user_context.get("session_id")
+    if not session_id:
+        # No authoritative session-backed source for this caller. Trust boundary
+        # is the internal-JWT gate + validate_scope_subset; use the body as-is.
+        return body_groups, body_scopes
+
+    from session_store import resolve_session
+
+    session_data = await resolve_session(session_id)
+    if not session_data:
+        # A session_id was supplied but does not resolve to a live session ->
+        # fail closed rather than fall back to trusting the body.
+        raise HTTPException(
+            status_code=401,
+            detail="Session could not be resolved for token mint",
+            headers={"Connection": "close"},
+        )
+
+    session_groups = list(session_data.get("groups") or [])
+    session_group_set = set(session_groups)
+
+    # A body may not claim any privileged group the session does not hold.
+    forged_privileged = (set(body_groups) & _A2A_ADMIN_MARKERS) - session_group_set
+    if forged_privileged:
+        logger.warning(
+            "Refusing token mint: request claimed privileged group(s) %s not held by session for '%s'",
+            sorted(forged_privileged),
+            hash_username(session_data.get("username") or ""),
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Requested groups exceed the session's granted groups",
+            headers={"Connection": "close"},
+        )
+
+    # Mint the intersection of requested and session-held groups so the token can
+    # never exceed the session, then derive scopes from the reconciled groups.
+    if body_groups:
+        reconciled_groups = [g for g in body_groups if g in session_group_set]
+    else:
+        reconciled_groups = session_groups
+    reconciled_scopes = await map_groups_to_scopes(reconciled_groups)
+    return reconciled_groups, reconciled_scopes
+
+
 @internal_router.post("/tokens", response_model=GenerateTokenResponse)
 async def generate_user_token(
     body: GenerateTokenRequest,
@@ -3563,6 +4111,9 @@ async def generate_user_token(
     try:
         # Extract user context
         user_context = request.user_context
+        # Fail closed on a structurally ambiguous groups/scopes shape before any
+        # of it is trusted for scope-subset checks or stamped into a JWT.
+        _validate_context_group_scope_shape(user_context)
         username = user_context.get("username")
         user_scopes = user_context.get("scopes", [])
         # Human-readable identity for the audit record (email ->
@@ -3595,7 +4146,7 @@ async def generate_user_token(
                 token_kind=(TokenKind.RESOURCE.value if request.resource else TokenKind.USER.value),
                 resource_type=(request.resource.type.value if request.resource else None),
                 resource_id=(request.resource.id if request.resource else None),
-                token_path="unknown",
+                token_path="unknown",  # nosec B106 - audit metadata label, not a credential
                 requested_scopes=request.requested_scopes,
                 expires_in_seconds=None,
                 outcome="failure",
@@ -3622,8 +4173,16 @@ async def generate_user_token(
         # Check if user has stored OAuth tokens from their login session
         provider = user_context.get("provider")
         auth_method = user_context.get("auth_method")
-        user_groups = user_context.get("groups", [])
         user_email = user_context.get("email", "")
+
+        # Reconcile the caller-supplied groups/scopes against the authoritative
+        # session store when a session_id is present, so a forged body cannot
+        # inject groups/scopes the session never granted. When no session_id is
+        # present the body is used as-is (explicit, documented trust boundary).
+        user_groups, reconciled_scopes = await _reconcile_context_against_session(user_context)
+        # Re-narrow the requested scopes to what the reconciled context allows so
+        # a session-backed mint can never exceed the session's granted scopes.
+        requested_scopes = [s for s in requested_scopes if s in set(reconciled_scopes)]
 
         logger.info(
             f"Token request for user '{hash_username(username)}': "
@@ -3707,7 +4266,7 @@ async def generate_user_token(
                 token_kind=(TokenKind.RESOURCE.value if request.resource else TokenKind.USER.value),
                 resource_type=(request.resource.type.value if request.resource else None),
                 resource_id=(request.resource.id if request.resource else None),
-                token_path="self_signed",
+                token_path="self_signed",  # nosec B106 - audit metadata label, not a credential
                 requested_scopes=requested_scopes,
                 expires_in_seconds=expires_in,
                 outcome="success",
@@ -3770,7 +4329,7 @@ async def generate_user_token(
                 auth_method=auth_method or "m2m",
                 provider=provider,
                 internal_caller=caller,
-                token_kind="user",
+                token_kind="user",  # nosec B106 - audit metadata label, not a credential
                 resource_type=None,
                 resource_id=None,
                 token_path="m2m",
@@ -3799,7 +4358,7 @@ async def generate_user_token(
                 auth_method=auth_method or "m2m",
                 provider=provider,
                 internal_caller=caller,
-                token_kind="user",
+                token_kind="user",  # nosec B106 - audit metadata label, not a credential
                 resource_type=None,
                 resource_id=None,
                 token_path="m2m",
@@ -3827,10 +4386,10 @@ async def generate_user_token(
             auth_method=auth_method,
             provider=provider,
             internal_caller=caller,
-            token_kind="unknown",
+            token_kind="unknown",  # nosec B106 - audit metadata label, not a credential
             resource_type=None,
             resource_id=None,
-            token_path="unknown",
+            token_path="unknown",  # nosec B106 - audit metadata label, not a credential
             requested_scopes=[],
             expires_in_seconds=None,
             outcome="failure",
@@ -4049,6 +4608,21 @@ def get_mcp_logger() -> MCPLogger | None:
                         logger.warning(f"Failed to initialize MCP audit MongoDB repository: {e}")
                         mongodb_enabled = False
 
+                # Durability guard (fail closed), same posture as the registry
+                # process (registry/main.py). The auth-server owns the
+                # token-mint audit trail — the most forensically critical
+                # records (who was issued which scoped token, when) — so a
+                # silent degradation to a non-durable (or dropped) trail here is
+                # exactly the repudiation gap the guard closes. Refuse to
+                # initialize the logger when AUDIT_LOG_REQUIRE_DURABLE is set and
+                # no durable sink is available, instead of quietly logging to
+                # nowhere. Re-raised below so it fails startup rather than being
+                # swallowed as a generic init failure.
+                enforce_durable_audit_sink(
+                    durable_sink_available=mongodb_enabled,
+                    require_durable=getattr(settings, "audit_log_require_durable", True),
+                )
+
                 _mcp_audit_logger = AuditLogger(
                     log_dir=settings.audit_log_dir,
                     rotation_hours=settings.audit_log_rotation_hours,
@@ -4064,6 +4638,11 @@ def get_mcp_logger() -> MCPLogger | None:
                 )
             else:
                 logger.info("MCP audit logging is disabled")
+        except NonDurableAuditError:
+            # Fail closed: a required-but-unavailable durable audit sink must
+            # stop the process, not degrade to a silent no-op logger. Do not
+            # swallow into the generic handler below.
+            raise
         except Exception as e:
             logger.warning(f"Failed to initialize MCP audit logger: {e}")
             _mcp_logger = None
@@ -6020,7 +6599,7 @@ async def mcp_proxy(
                         token_kind=TokenKind.USER.value,
                         resource_type="server",
                         resource_id=server_first_segment,
-                        token_path="obo_exchange",
+                        token_path="obo_exchange",  # nosec B106 - audit metadata label, not a credential
                         requested_scopes=list(obo_scopes),
                         expires_in_seconds=None,
                         outcome="failure",
@@ -6038,7 +6617,7 @@ async def mcp_proxy(
                     token_kind=TokenKind.USER.value,
                     resource_type="server",
                     resource_id=server_first_segment,
-                    token_path="obo_exchange",
+                    token_path="obo_exchange",  # nosec B106 - audit metadata label, not a credential
                     requested_scopes=list(obo_scopes),
                     expires_in_seconds=None,
                     outcome="success",

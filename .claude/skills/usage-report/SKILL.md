@@ -47,7 +47,46 @@ If OUTPUT_DIR is not provided, save to `.scratchpad/usage-reports/`.
 
 All artifacts for a given run are placed in a **dated subfolder**: `OUTPUT_DIR/YYYY-MM-DD/`. This keeps each report self-contained and avoids a flat directory of hundreds of files. Previous metrics and CSV files are discovered by scanning both the base directory and all dated subdirectories.
 
-## Workflow
+## Orchestrated Workflow (primary path)
+
+The entire pipeline is wrapped in two shell scripts so the whole report runs in two commands with a single LLM step in between. This is the path to use. The per-step reference that follows ("Detailed Workflow") documents what each script does internally, for debugging or partial re-runs.
+
+The pipeline has exactly one non-deterministic step: generating the analyst commentary, which requires the LLM. Everything else is deterministic. The two scripts sit on either side of that seam:
+
+- **`run_report.sh`** (Half A) does everything up to the commentary: bastion export, all 14 charts, telemetry + liveness analysis, a chart-completeness gate, the deterministic report render, and the commentary-manifest extract.
+- **The LLM step**: the agent reads `commentary-manifest.json` and writes `commentary.json` (a flat `{section_id: paragraph}` map). See [Step 8](#step-8-augment-with-llm-commentary) for the exact constraints.
+- **`finish_report.sh`** (Half B) applies the commentary into the markdown and produces the self-contained HTML.
+
+### Running it
+
+```bash
+# Half A: export -> charts -> analysis -> render -> extract manifest.
+# Report date and OUTPUT_DIR both default; pass them explicitly to be safe.
+.claude/skills/usage-report/run_report.sh YYYY-MM-DD .scratchpad/usage-reports
+```
+
+Then the agent writes analyst commentary to `OUTPUT_DIR/YYYY-MM-DD/commentary.json`, reading the manifest at `OUTPUT_DIR/YYYY-MM-DD/commentary-manifest.json`. Follow the constraints in [Step 8](#step-8-augment-with-llm-commentary): 2-4 sentences per section, no invented numbers, empty string to drop a section.
+
+```bash
+# Half B: apply commentary -> pandoc HTML.
+.claude/skills/usage-report/finish_report.sh YYYY-MM-DD .scratchpad/usage-reports
+```
+
+Finally present results per [Step 10](#step-10-present-results).
+
+### Script behavior worth knowing
+
+- **Date math is computed once.** `run_report.sh` derives the previous complete day (report date - 1) for `--active-on-date` / `--yesterday`, and passes the base dir (not the dated subdir) as `--search-dir`. These are the args most easily gotten wrong by hand.
+- **Export is guarded.** If `registry_metrics.csv` already exists for the date, the bastion export is skipped so you can iterate on charts without re-pulling. Set `FORCE_EXPORT=1` to re-export. Pass `BASTION_IP=...` to skip the terraform lookup; `SSH_KEY=...` to override the identity file.
+- **Fail-loud.** `set -euo pipefail` throughout; any failing step aborts the run. The GitHub-stats fetch is the one intentional exception (non-fatal; the report omits that section if it fails).
+- **Completeness gate.** Before rendering, `run_report.sh` verifies all 14 mandatory charts exist and aborts with the list of any missing ones, so `render_report.py` never emits broken-image placeholders.
+- **Resume boundary.** If Half A succeeds but the commentary is bad, re-run only `finish_report.sh` (or re-run Half A without `FORCE_EXPORT` to skip the slow export). `finish_report.sh` refuses to run if the markdown or `commentary.json` is missing.
+
+---
+
+## Detailed Workflow (per-step reference)
+
+The steps below are what `run_report.sh` and `finish_report.sh` execute internally. Use them to debug a failing step or to re-run one chart by hand. In normal operation you do not run these individually.
 
 ### Step 1: Get Bastion IP
 
@@ -328,7 +367,7 @@ Same data-sourcing behavior as the other historical charts (scans all CSVs acros
 
 ### Step 5d: Generate Install Forecast Chart
 
-Project when the registry will reach 1,000 installs using two models: a 14-day OLS linear regression and a 7-day recent-pace extrapolation. Produces a PNG chart (cumulative installs with forecast line and confidence bands) and a JSON summary with ETAs.
+Project when the registry will reach 2,000 installs using two models: a 14-day OLS linear regression and a 7-day recent-pace extrapolation. Produces a PNG chart (cumulative installs with forecast line and confidence bands) and a JSON summary with ETAs. The target defaults to 2,000 and is overridable via `--target`.
 
 ```bash
 /usr/bin/python3 .claude/skills/usage-report/generate_install_forecast.py \
@@ -338,7 +377,7 @@ Project when the registry will reach 1,000 installs using two models: a 14-day O
 ```
 
 Outputs:
-- PNG chart showing cumulative installs, linear fit, and projected crossing of the 1,000-install target
+- PNG chart showing cumulative installs, linear fit, and projected crossing of the 2,000-install target
 - JSON summary with `today.installs`, `linear.eta` (with 95% CI bounds), `recent_pace.eta`, and model parameters
 
 Embed the chart in the report's **Install Forecast** section. Include a table showing both model ETAs and daily rates. This section should come after Version Adoption and before Customer Infra Spend.
@@ -568,7 +607,7 @@ The report MUST embed all 14 charts (the template's `![...]` references). If any
 6. `lifetime-buckets-YYYY-MM-DD.png` (retention % over time)
 7. `active-instances-YYYY-MM-DD.png` (DAI + MA7 + streak)
 8. `compute-installs-timeseries-YYYY-MM-DD.png` (compute platform cumulative + daily)
-9. `install-forecast-YYYY-MM-DD.png` (OLS + recent-pace to 1,000)
+9. `install-forecast-YYYY-MM-DD.png` (OLS + recent-pace to 2,000)
 10. `daily-reporters-YYYY-MM-DD.png` (daily AWS reporters: all + persisted >=2 events + persisted >=2 days)
 11. `ltv-spend-YYYY-MM-DD.png` (daily compute + bedrock + cumulative)
 12. `adoption-funnel-YYYY-MM-DD.png` (funnel from total to confirmed-alive)

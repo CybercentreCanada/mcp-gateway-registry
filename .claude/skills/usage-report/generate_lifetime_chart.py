@@ -13,9 +13,10 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys
+
 import matplotlib.pyplot as plt
 import seaborn as sns
-import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -177,15 +178,12 @@ def _generate_chart(
     if ages:
         sorted_ages = sorted(ages)
         n = len(sorted_ages)
-        median = sorted_ages[n // 2] if n % 2 else (sorted_ages[n // 2 - 1] + sorted_ages[n // 2]) / 2
+        median = (
+            sorted_ages[n // 2] if n % 2 else (sorted_ages[n // 2 - 1] + sorted_ages[n // 2]) / 2
+        )
         q1 = sorted_ages[n // 4]
         q3 = sorted_ages[(3 * n) // 4]
-        box_stats = (
-            f"Q1: {q1} d\n"
-            f"Median: {median:.1f} d\n"
-            f"Q3: {q3} d\n"
-            f"Max: {max_age} d"
-        )
+        box_stats = f"Q1: {q1} d\nMedian: {median:.1f} d\nQ3: {q3} d\nMax: {max_age} d"
         ax_box.text(
             0.95,
             0.97,
@@ -223,7 +221,7 @@ def _generate_chart(
     ax_bar.set_title("Age Buckets", fontsize=12, fontweight="bold")
     ax_bar.set_xlabel("Number of Instances", fontsize=11)
 
-    for bar, count in zip(bars, counts):
+    for bar, count in zip(bars, counts, strict=False):
         pct = count / total * 100
         label_text = f" {count} ({pct:.0f}%)"
         ax_bar.text(

@@ -780,6 +780,200 @@ class TestValidateEndpoint:
             assert data["username"] == "testuser"
 
     @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_agent_request_allowed(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """An A2A agent proxy request with invoke access passes and skips MCP checks.
+
+        The gateway credential is presented in X-Authorization (the A2A egress
+        trust model): Authorization is reserved for the target-agent credential.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_agent_request_denied(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """An A2A agent proxy request without invoke access is rejected with 403."""
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 403
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_no_authorization_fallback(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """On an agent path, Authorization is NOT accepted as the gateway credential.
+
+        Authorization carries the target-agent credential (forwarded end-to-end),
+        so a request with only Authorization and no X-Authorization must fail
+        closed as unauthenticated rather than authenticate on -- and leak -- the
+        target-agent credential.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "Authorization": "Bearer target-agent-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 401
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_rejects_duplicate_gateway_credential(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """Duplicating the gateway token into Authorization is refused (fail closed).
+
+        If Authorization equals the validated X-Authorization, the Authorization
+        copy would be forwarded to the registrant-controlled agent backend and
+        could be replayed against the registry. The request is rejected with 401.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    "Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 401
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_rejects_duplicate_ignoring_scheme_prefix(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """The duplicate-token guard compares token VALUES, not raw headers.
+
+        A caller that sends the same token but with a differing "Bearer " scheme
+        prefix / whitespace in one header must still be refused, or the gateway
+        credential would leak to the backend (PR #1434 finding SF-4).
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    # Same token value, no "Bearer " prefix: must still be caught.
+                    "Authorization": "test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 401
+
+    @patch("auth_server.server.get_auth_provider")
     def test_validate_uninspectable_body_fails_closed(
         self,
         mock_get_provider,
@@ -4505,3 +4699,661 @@ class TestInternalRelayDecision:
         """A federated copy (e.g. server claim 'ai-registry' from /ai-registry/...)
         is a different first path segment and must NOT relay."""
         assert self._decides_relay("ai-registry") is False
+
+
+# =============================================================================
+# A2A AGENT PROXY ACCESS TESTS
+# =============================================================================
+
+
+class TestGetA2AAgentPath:
+    """Tests for _get_a2a_agent_path URL parsing."""
+
+    def test_none_url_returns_none(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path(None) is None
+
+    def test_agent_jsonrpc_url(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path("https://mcp.example.com/agent/travel/") == "/travel"
+
+    def test_agent_card_url(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        url = "https://mcp.example.com/agent/flight-booking-agent/.well-known/agent-card.json"
+        assert _get_a2a_agent_path(url) == "/flight-booking-agent"
+
+    def test_non_agent_url_returns_none(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path("https://mcp.example.com/currenttime/mcp") is None
+
+    def test_api_url_returns_none(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path("https://mcp.example.com/api/agents") is None
+
+    def test_bare_agent_prefix_without_segment_returns_none(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path("https://mcp.example.com/agent/") is None
+
+    def test_multi_segment_agent_path(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path("https://mcp.example.com/agent/lob1/travel/") == "/lob1/travel"
+
+    def test_multi_segment_agent_card_url(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        url = "https://mcp.example.com/agent/lob1/travel/.well-known/agent-card.json"
+        assert _get_a2a_agent_path(url) == "/lob1/travel"
+
+    def test_registry_root_path_prefix_is_stripped(self):
+        """When the registry is hosted on a sub-path, the prefix is stripped."""
+        import auth_server.server as server_module
+
+        with patch.object(server_module, "REGISTRY_ROOT_PATH", "/registry"):
+            assert (
+                server_module._get_a2a_agent_path("https://mcp.example.com/registry/agent/travel/")
+                == "/travel"
+            )
+
+    def test_agent_card_at_root_returns_none(self):
+        """A card discovery URL with no agent segment resolves to None."""
+        from auth_server.server import _get_a2a_agent_path
+
+        url = "https://mcp.example.com/agent/.well-known/agent-card.json"
+        assert _get_a2a_agent_path(url) is None
+
+    def test_empty_agent_segment_returns_none(self):
+        """An empty path segment (…/agent/lob1//travel/) is rejected."""
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path("https://mcp.example.com/agent/lob1//travel/") is None
+
+
+class TestValidateA2AAgentAccess:
+    """Tests for validate_a2a_agent_access structured per-agent gating.
+
+    The function resolves each caller scope via the scope repository and looks
+    for a per-agent rule ``{"agent": "<path or *>", "actions": [...]}`` whose
+    ``agent`` matches and whose ``actions`` include ``invoke_agent`` (or a
+    wildcard). The rule shape mirrors a server rule (``agent`` like ``server``,
+    ``actions`` like ``methods``). The repository is mocked to return scope ->
+    server_access config, mirroring the MCP validate_server_tool_access tests.
+    """
+
+    @staticmethod
+    def _repo(scope_config: dict[str, list]):
+        """Build a mock scope repository returning the given scope -> config map."""
+        repo = AsyncMock()
+
+        async def get_server_scopes(scope_name: str):
+            return scope_config.get(scope_name, [])
+
+        async def get_server_scopes_bulk(scope_names: list[str]):
+            # Mirror the real bulk contract: one round-trip returning
+            # {scope_name: rules} for the requested scopes.
+            return {name: scope_config.get(name, []) for name in scope_names}
+
+        repo.get_server_scopes.side_effect = get_server_scopes
+        repo.get_server_scopes_bulk.side_effect = get_server_scopes_bulk
+        return repo
+
+    @staticmethod
+    def _invoke_scope(agent: str) -> list:
+        """A server_access list granting invoke_agent on the given agent (path or *)."""
+        return [{"agent": agent, "actions": ["invoke_agent"]}]
+
+    async def test_admin_scope_allows_regardless_of_doc_shape(self):
+        """An admin is allowed invoke even when their scope doc has NO agent rule
+        (legacy nested shape backwards compat -- no re-seed required)."""
+        from auth_server.server import validate_a2a_agent_access
+
+        # Legacy nested shape: no {agent, actions} rule, so the flattener yields
+        # nothing invoke-relevant; the admin marker must still grant access.
+        repo = self._repo({"registry-admins": []})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["registry-admins"]) is True
+
+    async def test_admin_group_marker_allows(self):
+        """The admin marker is honored when it arrives as a GROUP, not a scope."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert (
+                await validate_a2a_agent_access("/travel", [], user_groups=["mcp-registry-admin"])
+                is True
+            )
+
+    async def test_non_admin_legacy_shape_still_denied(self):
+        """A non-admin whose doc lacks a {agent, actions} invoke rule is denied
+        (admin bypass must not leak to ordinary users)."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"public-mcp-users": []})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["public-mcp-users"]) is False
+
+    async def test_invoke_wildcard_agent_allows(self):
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-invoker": self._invoke_scope("*")})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-invoker"]) is True
+
+    async def test_invoke_all_agent_keyword_allows(self):
+        """The ``all`` keyword works as a wildcard for the agent identifier too."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-invoker": self._invoke_scope("all")})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-invoker"]) is True
+
+    async def test_invoke_exact_path_allows(self):
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-travel": self._invoke_scope("/travel")})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-travel"]) is True
+
+    async def test_invoke_different_path_denied(self):
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-hr": self._invoke_scope("/hr")})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-hr"]) is False
+
+    async def test_sibling_path_not_matched(self):
+        """An exact-path rule for /travel-extended must NOT grant /travel."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-ext": self._invoke_scope("/travel-extended")})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-ext"]) is False
+
+    async def test_actions_wildcard_allows(self):
+        """A rule whose actions include the ``all`` wildcard grants invoke."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-admin": [{"agent": "/travel", "actions": ["all"]}]})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-admin"]) is True
+
+    async def test_non_invoke_action_denied(self):
+        """A rule granting only agent CRUD (no invoke_agent) is denied."""
+        from auth_server.server import validate_a2a_agent_access
+
+        crud = [{"agent": "*", "actions": ["get_agent", "list_agents"]}]
+        repo = self._repo({"a2a-reader": crud})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-reader"]) is False
+
+    async def test_mcp_only_scope_denied(self):
+        """A pure MCP server scope (no agents block) is denied."""
+        from auth_server.server import validate_a2a_agent_access
+
+        mcp = [{"server": "*", "methods": ["all"], "tools": ["all"]}]
+        repo = self._repo({"mcp-servers-unrestricted/read": mcp})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert (
+                await validate_a2a_agent_access("/travel", ["mcp-servers-unrestricted/read"])
+                is False
+            )
+
+    async def test_empty_scopes_denied(self):
+        from auth_server.server import validate_a2a_agent_access
+
+        assert await validate_a2a_agent_access("/travel", []) is False
+
+    async def test_scope_resolution_error_is_skipped_and_denied(self):
+        """A repository lookup that raises is not fatal; access is denied (fail closed)."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = AsyncMock()
+        repo.get_server_scopes_bulk.side_effect = RuntimeError("scope backend down")
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-invoker"]) is False
+
+    async def test_unknown_scope_with_empty_config_denied(self):
+        """A scope that resolves to an empty config is skipped (denied)."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["missing-scope"]) is False
+
+
+# =============================================================================
+# LEGACY STATIC ADMIN TOKEN STRENGTH VALIDATION AT STARTUP
+# =============================================================================
+
+
+class TestLegacyRegistryTokenStrengthValidation:
+    """Startup strength validation for the legacy REGISTRY_API_TOKEN.
+
+    When set, REGISTRY_API_TOKEN is promoted to an unrestricted admin entry, so
+    it grants the highest privilege in the system. It must therefore clear the
+    same strength bar as the application signing secret: an unset token is fine
+    (the feature simply has no legacy entry), but a token that is present must
+    be strong (non-empty after stripping, at least the minimum length, and not a
+    known-weak placeholder). A present-but-weak value must fail closed at
+    startup rather than silently arm a weak admin credential.
+
+    These tests reload the server module under a patched environment so the
+    real module-level validation runs, then restore a known-good module state
+    for the rest of the suite.
+    """
+
+    _STRONG = "x" * 40
+    _RESTORE_ENV = {
+        "SECRET_KEY": "test-secret-key-that-is-definitely-long-enough-32b",
+        "DOCUMENTDB_HOST": "localhost",
+    }
+
+    def _reload_with_token(self, token_value):
+        """Reload auth_server.server with REGISTRY_API_TOKEN set to token_value.
+
+        A ``None`` token_value means the variable is unset entirely. Returns the
+        freshly reloaded module. Raises whatever the module raises at import.
+        """
+        import importlib
+        import os
+
+        import auth_server.server as server_module
+
+        env = dict(self._RESTORE_ENV)
+        if token_value is not None:
+            env["REGISTRY_API_TOKEN"] = token_value
+
+        # patch.dict(clear=False) plus explicit pop keeps unrelated env intact
+        # while giving us precise control over REGISTRY_API_TOKEN.
+        with patch.dict(os.environ, env, clear=False):
+            if token_value is None:
+                os.environ.pop("REGISTRY_API_TOKEN", None)
+            return importlib.reload(server_module)
+
+    def teardown_method(self):
+        """Restore a valid module state so later tests see a sane module."""
+        import importlib
+        import os
+
+        import auth_server.server as server_module
+
+        with patch.dict(os.environ, self._RESTORE_ENV, clear=False):
+            os.environ.pop("REGISTRY_API_TOKEN", None)
+            importlib.reload(server_module)
+
+    def test_unset_token_is_accepted_and_empty(self):
+        """An unset token is fine: no legacy admin credential, no raise."""
+        reloaded = self._reload_with_token(None)
+        assert reloaded.REGISTRY_API_TOKEN == ""
+
+    def test_strong_token_is_accepted(self):
+        """A sufficiently long, non-placeholder token is accepted verbatim."""
+        reloaded = self._reload_with_token(self._STRONG)
+        assert reloaded.REGISTRY_API_TOKEN == self._STRONG
+
+    def test_short_token_fails_closed(self):
+        """A present but too-short token must raise at startup."""
+        with pytest.raises(RuntimeError):
+            self._reload_with_token("short")
+
+    def test_whitespace_only_token_is_treated_as_unset(self):
+        """A whitespace-only token is equivalent to unset: no admin credential.
+
+        The canonical validator treats a whitespace-only value as unset when the
+        secret is optional, which is the fail-closed outcome here: no legacy
+        admin entry is armed. A whitespace-only value is never accepted as a
+        usable credential (it strips to empty), so no weak admin token results.
+        """
+        reloaded = self._reload_with_token("   " * 20)
+        assert reloaded.REGISTRY_API_TOKEN == ""
+
+    def test_known_weak_literal_token_fails_closed(self):
+        """A present but known-weak placeholder literal must raise at startup."""
+        with pytest.raises(RuntimeError):
+            self._reload_with_token("change-this-immediately-use-a-strong-random-key-in-production")
+
+
+# =============================================================================
+# FEDERATION STATIC TOKEN IS LEAST-PRIVILEGE READ-ONLY
+# =============================================================================
+
+
+class TestFederationStaticTokenReadOnly:
+    """The federation static token grants read-only access.
+
+    The federation static token is a long-lived, non-expiring credential meant
+    for federation data sync. It must be least-privilege: it grants only
+    ``federation/read`` and must NOT carry a peer/federation management scope.
+    Peer management stays behind a real admin credential.
+    """
+
+    _TOKEN = "f" * 40
+
+    def test_validate_grants_only_read_scope(self):
+        """A matching federation token yields scopes == ['federation/read']."""
+        import auth_server.server as server_module
+
+        with (
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", True),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", self._TOKEN),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "Authorization": f"Bearer {self._TOKEN}",
+                    "X-Original-URL": "https://example.com/api/federation/peers",
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["method"] == "federation-static"
+        assert data["scopes"] == ["federation/read"]
+
+    def test_validate_does_not_grant_peer_management_scope(self):
+        """The federation token must not carry the peer-management scope."""
+        import auth_server.server as server_module
+
+        with (
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", True),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", self._TOKEN),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "Authorization": f"Bearer {self._TOKEN}",
+                    "X-Original-URL": "https://example.com/api/federation/peers",
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "federation/peers" not in data["scopes"]
+        assert "federation/peers" not in response.headers.get("X-Scopes", "")
+
+
+# =============================================================================
+# FEDERATION STATIC TOKEN STRENGTH VALIDATION (FAIL CLOSED ON WEAK TOKEN)
+# =============================================================================
+
+
+class TestFederationStaticTokenStrengthValidation:
+    """Startup strength validation for FEDERATION_STATIC_TOKEN.
+
+    The federation static token bypasses IdP JWT validation when armed, so it
+    must clear the same weak-value bar as every other privilege-granting
+    credential. When the operator explicitly enables the feature, the token is
+    required and must be strong: a short OR known-weak placeholder value must
+    NOT be armed. Because this is an optional feature, a weak token degrades
+    gracefully -- the feature is DISABLED (fail closed) rather than crashing the
+    process -- mirroring the missing-token branch. Warn-only is not fail closed.
+
+    These tests reload the server module under a patched environment so the real
+    module-level validation runs, then restore a known-good module state for the
+    rest of the suite.
+    """
+
+    _STRONG = "f" * 40
+    _RESTORE_ENV = {
+        "SECRET_KEY": "test-secret-key-that-is-definitely-long-enough-32b",
+        "DOCUMENTDB_HOST": "localhost",
+    }
+
+    def _reload_with_federation_token(self, token_value):
+        """Reload auth_server.server with the feature enabled and a given token.
+
+        A ``None`` token_value means FEDERATION_STATIC_TOKEN is unset entirely.
+        Returns the freshly reloaded module.
+        """
+        import importlib
+        import os
+
+        import auth_server.server as server_module
+
+        env = dict(self._RESTORE_ENV)
+        env["FEDERATION_STATIC_TOKEN_AUTH_ENABLED"] = "true"
+        if token_value is not None:
+            env["FEDERATION_STATIC_TOKEN"] = token_value
+
+        with patch.dict(os.environ, env, clear=False):
+            if token_value is None:
+                os.environ.pop("FEDERATION_STATIC_TOKEN", None)
+            return importlib.reload(server_module)
+
+    def teardown_method(self):
+        """Restore a valid module state (feature disabled) for later tests."""
+        import importlib
+        import os
+
+        import auth_server.server as server_module
+
+        with patch.dict(os.environ, self._RESTORE_ENV, clear=False):
+            os.environ.pop("FEDERATION_STATIC_TOKEN", None)
+            os.environ.pop("FEDERATION_STATIC_TOKEN_AUTH_ENABLED", None)
+            importlib.reload(server_module)
+
+    def test_strong_token_stays_enabled_and_armed(self):
+        """A strong token keeps the feature enabled and arms the token."""
+        reloaded = self._reload_with_federation_token(self._STRONG)
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is True
+        assert reloaded.FEDERATION_STATIC_TOKEN == self._STRONG
+
+    def test_short_token_disables_feature(self):
+        """A short token disables the feature (fail closed), does not raise."""
+        reloaded = self._reload_with_federation_token("short")
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+
+    def test_known_weak_literal_disables_feature(self):
+        """A known-weak >=32-char placeholder disables the feature."""
+        reloaded = self._reload_with_federation_token(
+            "change-this-immediately-use-a-strong-random-key-in-production"
+        )
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+
+    def test_unset_token_disables_feature(self):
+        """Enabling the feature without a token disables it (fail closed)."""
+        reloaded = self._reload_with_federation_token(None)
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+
+    def test_validate_does_not_authenticate_weak_token(self):
+        """A weak token is not armed: the /validate federation path rejects it."""
+        weak = "short"
+        reloaded = self._reload_with_federation_token(weak)
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+
+        client = TestClient(reloaded.app)
+        response = client.get(
+            "/validate",
+            headers={
+                "Authorization": f"Bearer {weak}",
+                "X-Original-URL": "https://example.com/api/federation/peers",
+            },
+        )
+        # The weak token is not armed, so it never authenticates via the
+        # federation-static path (it falls through to standard JWT validation,
+        # which rejects a non-JWT bearer).
+        assert response.status_code != 200 or response.json().get("method") != ("federation-static")
+
+
+# =============================================================================
+# REGISTRY_API_KEYS ENTRY WEAK-VALUE REJECTION (FAIL CLOSED)
+# =============================================================================
+
+
+class TestRegistryApiKeyEntryStrengthValidation:
+    """Per-key REGISTRY_API_KEYS entries must reject weak key values.
+
+    A keyed entry grants the scopes mapped from its groups (which may include
+    admin), so its key bypasses IdP JWT validation and must clear the same
+    weak-value bar as every other privilege-granting credential. The Pydantic
+    ``min_length=32`` constraint alone accepts a >=32-char known placeholder, so
+    the key is additionally routed through the canonical validator, which
+    rejects short AND known-weak literals. A weak key must fail closed: the
+    entry is rejected and the parse path disables the feature rather than arming
+    a weak keyed credential.
+    """
+
+    _STRONG = "x" * 40
+
+    def test_strong_key_validates(self):
+        """A strong, non-placeholder key builds a valid entry."""
+        import auth_server.server as server_module
+
+        entry = server_module._RegistryApiKeyEntry(
+            name="deploy-pipeline",
+            key=self._STRONG,
+            groups=["mcp-registry-admin"],
+        )
+        assert entry.key == self._STRONG
+
+    def test_short_key_raises(self):
+        """A key shorter than the minimum raises a validation error."""
+        import pydantic
+
+        import auth_server.server as server_module
+
+        with pytest.raises((pydantic.ValidationError, ValueError)):
+            server_module._RegistryApiKeyEntry(
+                name="deploy-pipeline",
+                key="short",
+                groups=["mcp-registry-admin"],
+            )
+
+    def test_known_weak_literal_key_raises(self):
+        """A >=32-char known-weak placeholder key raises a validation error."""
+        import pydantic
+
+        import auth_server.server as server_module
+
+        with pytest.raises((pydantic.ValidationError, ValueError)):
+            server_module._RegistryApiKeyEntry(
+                name="deploy-pipeline",
+                key="change-this-immediately-use-a-strong-random-key-in-production",
+                groups=["mcp-registry-admin"],
+            )
+
+    def test_parse_rejects_weak_key_entry(self):
+        """A >=32-char weak-literal key fails the parser (fail closed)."""
+        import json
+
+        import auth_server.server as server_module
+
+        raw = json.dumps(
+            {
+                "deploy-pipeline": {
+                    "key": "change-this-immediately-use-a-strong-random-key-in-production",
+                    "groups": ["mcp-registry-admin"],
+                }
+            }
+        )
+        with pytest.raises(ValueError, match="Invalid entry"):
+            server_module._parse_registry_api_keys(raw)
+
+    async def test_build_static_token_map_disabled_on_weak_key(self):
+        """A weak keyed entry disables static-token auth (matches malformed-JSON)."""
+        import json
+
+        import auth_server.server as server_module
+
+        raw = json.dumps(
+            {
+                "deploy-pipeline": {
+                    "key": "change-this-immediately-use-a-strong-random-key-in-production",
+                    "groups": ["mcp-registry-admin"],
+                }
+            }
+        )
+        with (
+            patch.object(server_module, "REGISTRY_STATIC_TOKEN_AUTH_ENABLED", True),
+            patch.object(server_module, "_REGISTRY_API_KEYS_RAW", raw),
+            patch.object(server_module, "REGISTRY_API_TOKEN", ""),
+            patch.object(server_module, "_STATIC_TOKEN_MAP", {}),
+        ):
+            await server_module._build_static_token_map()
+            assert server_module.REGISTRY_STATIC_TOKEN_AUTH_ENABLED is False
+            assert server_module._STATIC_TOKEN_MAP == {}
+
+
+# =============================================================================
+# RUNTIME FEDERATION-TOKEN ROTATION MUST ENFORCE THE SAME STRENGTH BAR
+# =============================================================================
+
+
+class TestFederationTokenRotationStrength:
+    """The runtime rotation endpoint must reject weak new tokens.
+
+    Rotating the federation static token arms the same privileged credential as
+    startup, so the rotation endpoint must clear the same weak-value bar: a short
+    OR known-weak placeholder value must be rejected with 400 and must NOT arm
+    the token, otherwise an admin could rotate to a long-but-well-known
+    placeholder and silently undo the startup hardening.
+    """
+
+    _ADMIN = "a" * 40
+    _STRONG = "f" * 40
+
+    def _client_and_module(self):
+        import auth_server.server as server_module
+
+        return TestClient(server_module.app), server_module
+
+    def test_short_new_token_rejected(self):
+        """A short rotation token is rejected (400) and does not arm the token."""
+        client, server_module = self._client_and_module()
+        with (
+            patch.object(server_module, "REGISTRY_API_TOKEN", self._ADMIN),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", ""),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", False),
+        ):
+            response = client.post(
+                "/admin/federation-token",
+                headers={"Authorization": f"Bearer {self._ADMIN}"},
+                json={"new_token": "short"},
+            )
+            assert response.status_code == 400
+            assert server_module.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+            assert server_module.FEDERATION_STATIC_TOKEN == ""
+
+    def test_known_weak_literal_new_token_rejected(self):
+        """A long-but-known-placeholder rotation token is rejected (400)."""
+        client, server_module = self._client_and_module()
+        with (
+            patch.object(server_module, "REGISTRY_API_TOKEN", self._ADMIN),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", ""),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", False),
+        ):
+            response = client.post(
+                "/admin/federation-token",
+                headers={"Authorization": f"Bearer {self._ADMIN}"},
+                json={"new_token": "change-this-immediately-use-a-strong-random-key-in-production"},
+            )
+            assert response.status_code == 400
+            assert server_module.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+            assert server_module.FEDERATION_STATIC_TOKEN == ""
+
+    def test_strong_new_token_rotates(self):
+        """A strong rotation token is accepted and arms the feature."""
+        client, server_module = self._client_and_module()
+        with (
+            patch.object(server_module, "REGISTRY_API_TOKEN", self._ADMIN),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", ""),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", False),
+        ):
+            response = client.post(
+                "/admin/federation-token",
+                headers={"Authorization": f"Bearer {self._ADMIN}"},
+                json={"new_token": self._STRONG},
+            )
+            assert response.status_code == 200
+            assert response.json()["action"] == "rotated"
+            assert server_module.FEDERATION_STATIC_TOKEN == self._STRONG
+            assert server_module.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is True

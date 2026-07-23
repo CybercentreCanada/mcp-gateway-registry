@@ -23,8 +23,12 @@ _read_outputs() {
     exit 1
   fi
 
+  # Keycloak/Registry URLs are HTTPS URLs when CloudFront is enabled (published
+  # by Auth/Service stacks after they front their ALBs). sslRequired=external
+  # on Keycloak realms blocks admin API calls over plain HTTP, so post-deploy
+  # admin ops MUST run against the HTTPS front.
   eval "$(jq -r '@sh "
-    KEYCLOAK_URL=\(."Registry-Service".KeycloakUrl // ."Registry-Auth".KeycloakUrl // "")
+    KEYCLOAK_URL=\(."Registry-Auth".KeycloakUrl // ."Registry-Service".KeycloakUrl // "")
     REGISTRY_URL=\(."Registry-Service".RegistryUrl // "")
     GRADIO_URL=\(."Registry-Service".GradioUiUrl // "")
     GRAFANA_URL=\(."Registry-Service".GrafanaUrl // "")"' "$outputs_file")"
@@ -43,13 +47,15 @@ _read_outputs() {
 # ---------------------------------------------------------------------------
 
 _wait_for_keycloak() {
-  _log_info "Waiting for Keycloak to be ready..."
-  local max_attempts=60
+  _log_info "Waiting for Keycloak to be ready at ${KEYCLOAK_URL}..."
+  # 180 attempts × 5s = 15 min. CloudFront distribution creation can take
+  # ~5-15 min to propagate to all edge locations after CDK reports COMPLETE.
+  local max_attempts=180
   local attempt=0
 
   while [ $attempt -lt $max_attempts ]; do
     local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" "${KEYCLOAK_URL}/" 2>/dev/null || echo "000")
+    http_code=$(curl -sk -o /dev/null -w "%{http_code}" "${KEYCLOAK_URL}/" 2>/dev/null || echo "000")
     if [ "$http_code" = "200" ] || [ "$http_code" = "302" ] || [ "$http_code" = "303" ]; then
       _log_success "Keycloak is ready (HTTP $http_code)"
       return 0
@@ -58,7 +64,7 @@ _wait_for_keycloak() {
     attempt=$((attempt + 1))
   done
 
-  _log_error "Keycloak did not become ready within 5 minutes"
+  _log_error "Keycloak did not become ready within 15 minutes"
   exit 1
 }
 
@@ -96,7 +102,7 @@ _disable_ssl_required() {
     -X PUT "${KEYCLOAK_URL}/admin/realms/${realm}" \
     -H "Authorization: Bearer ${token}" \
     -H "Content-Type: application/json" \
-    -d '{"sslRequired":"NONE"}')
+    -d '{"sslRequired":"EXTERNAL"}')
 
   if [ "$http_code" = "204" ]; then
     _log_success "Disabled sslRequired on realm: ${realm}"
@@ -127,7 +133,7 @@ _disable_ssl_via_ecs_exec() {
   local task_id="${task_arn##*/}"
 
   local kcadm_cmd="/opt/keycloak/bin/kcadm.sh"
-  local script="$kcadm_cmd config credentials --server http://localhost:8080 --realm master --user ${KC_ADMIN_USER} --password ${KC_ADMIN_PASSWORD} 2>&1 && $kcadm_cmd update realms/master -s sslRequired=NONE 2>&1 && echo SSL_DISABLED_OK"
+  local script="$kcadm_cmd config credentials --server http://localhost:8080 --realm master --user ${KC_ADMIN_USER} --password ${KC_ADMIN_PASSWORD} 2>&1 && $kcadm_cmd update realms/master -s sslRequired=EXTERNAL 2>&1 && echo SSL_DISABLED_OK"
 
   local output
   output=$(aws ecs execute-command --cluster keycloak --task "$task_id" \
@@ -143,28 +149,31 @@ _disable_ssl_via_ecs_exec() {
   _log_warn "ECS Exec output: $output"
   _log_warn "ECS Exec may have timed out but the command may still succeed. Verifying..."
 
+  # Verify by reading realm config via kcadm on loopback (sslRequired=external
+  # blocks external HTTP requests, so we cannot verify via the ALB). The
+  # inline echo runs only when grep matches, so absence of VERIFY_DONE means
+  # sslRequired has not yet been flipped.
+  local verify_script="/opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master --user ${KC_ADMIN_USER} --password ${KC_ADMIN_PASSWORD} >/dev/null 2>&1 && /opt/keycloak/bin/kcadm.sh get realms/master 2>/dev/null | grep -q 'sslRequired.*external' && echo VERIFY_DONE"
+
   local verify_attempt=0
-  local max_verify=12
+  local max_verify=6
   while [ $verify_attempt -lt $max_verify ]; do
     sleep 5
-    local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
-      -X POST "${KEYCLOAK_URL}/realms/master/protocol/openid-connect/token" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "username=${KC_ADMIN_USER}" \
-      -d "password=${KC_ADMIN_PASSWORD}" \
-      -d "grant_type=password" \
-      -d "client_id=admin-cli" 2>/dev/null || echo "000")
+    local verify_out
+    verify_out=$(aws ecs execute-command --cluster keycloak --task "$task_id" \
+      --container keycloak --interactive \
+      --command "sh -c '${verify_script}'" \
+      --region "$AWS_REGION" 2>&1) || true
 
-    if [ "$http_code" = "200" ]; then
-      _log_success "Verified: master realm SSL is now disabled (token request returned 200)"
+    if echo "$verify_out" | grep -q "VERIFY_DONE"; then
+      _log_success "Verified: master realm sslRequired is EXTERNAL"
       return 0
     fi
-    _log_info "Waiting for SSL disable to take effect (attempt $((verify_attempt + 1))/$max_verify, HTTP $http_code)..."
+    _log_info "Waiting for SSL flip to verify (attempt $((verify_attempt + 1))/$max_verify)..."
     verify_attempt=$((verify_attempt + 1))
   done
 
-  _log_error "Failed to disable SSL on master realm after ${max_verify} attempts"
+  _log_error "Failed to verify sslRequired=external on master realm after ${max_verify} attempts"
   return 1
 }
 
@@ -288,13 +297,6 @@ _run_in_registry() {
   return 1
 }
 
-_load_scopes() {
-  _log_info "Loading scopes configuration into DocumentDB..."
-  _run_in_registry "scopes load" \
-    "/app/.venv/bin/python scripts/load-scopes.py --scopes-file /app/config/scopes.yml" \
-    "Successfully loaded|Scopes loading complete|No changes for scope|Updated scope"
-}
-
 # ---------------------------------------------------------------------------
 # Validate all endpoints
 # ---------------------------------------------------------------------------
@@ -305,17 +307,29 @@ _validate_endpoints() {
 
   local all_ok=true
 
+  # Auth-server and Gradio are proxied by the registry container's nginx on
+  # port 8080 (behind CloudFront/ALB). Nginx paths:
+  #   /oauth2/* → auth-server via Service Connect
+  #   /       → gradio (uvicorn on 127.0.0.1:7860, via nginx default location)
+  # There are no separate 8888/7860 ALB listeners anymore (TF parity). The
+  # auth-server has no plain probe endpoint through nginx; a successful
+  # OAuth login flow (post-deploy step 4) is the real integration test.
   for url_label in \
     "Registry|${REGISTRY_URL}/health" \
-    "Gradio UI|${GRADIO_URL:-${REGISTRY_URL}:7860}/health" \
-    "Auth Server|${REGISTRY_URL}:8888/health" \
+    "Gradio UI|${REGISTRY_URL}/" \
     "Keycloak|${KEYCLOAK_URL}/" \
     "Keycloak Realm|${KEYCLOAK_URL}/realms/mcp-gateway/.well-known/openid-configuration"; do
 
     local label="${url_label%%|*}"
     local url="${url_label##*|}"
+    if [ -z "$url" ]; then
+      echo -e "  ${YELLOW}[SKIP]${NC} $label (URL unset)"
+      continue
+    fi
     local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
+    # -k: CloudFront default cert is valid but the ALB HTTP URLs are naked.
+    # -L: follow redirects when CloudFront viewer-protocol-policy issues 301.
+    http_code=$(curl -skL -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
 
     if [ "$http_code" = "200" ] || [ "$http_code" = "302" ] || [ "$http_code" = "303" ]; then
       echo -e "  ${GREEN}[PASS]${NC} $label ($http_code)"
@@ -348,9 +362,10 @@ _print_summary() {
   Service URLs
   ------------
   Registry:          ${GREEN}${REGISTRY_URL}${NC}
-  Registry API:      ${GREEN}${REGISTRY_URL}/api/v1${NC}
-  Gradio UI:         ${GREEN}${GRADIO_URL:-${REGISTRY_URL}:7860}${NC}
-  Auth Server:       ${GREEN}${REGISTRY_URL}:8888${NC}
+  Registry OpenAPI:  ${GREEN}${REGISTRY_URL}/docs${NC}
+  Registry API:      ${GREEN}${REGISTRY_URL}/api/agents${NC}  (also /api/audit/*, /api/admin/*, /api/register)
+  Gradio UI:         ${GREEN}${REGISTRY_URL}${NC}
+  OAuth callback:    ${GREEN}${REGISTRY_URL}/oauth2/callback/keycloak${NC}
   Keycloak:          ${GREEN}${KEYCLOAK_URL}${NC}
   Keycloak Admin:    ${GREEN}${KEYCLOAK_URL}/admin${NC}${GRAFANA_URL:+
   Grafana:           ${GREEN}${GRAFANA_URL}${NC}}
@@ -410,11 +425,6 @@ main() {
   _disable_ssl_required "$(_get_admin_token)" "mcp-gateway"
 
   _update_client_secrets
-
-  # Top-level scopes (server defs) into DocumentDB. UI-scope group docs are
-  # loaded by the ScopesLoader Lambda in the Registry-Service stack.
-  _retry "Scopes load" 3 20 _load_scopes \
-    || _log_warn "Scopes could not be loaded. Agent registration may return 403."
 
   _restart_services
   _validate_endpoints

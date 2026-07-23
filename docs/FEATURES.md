@@ -30,6 +30,7 @@ This document provides a comprehensive overview of the MCP Gateway & Registry so
 - **Enterprise SSO Ready**: Seamless integration with existing identity providers including Microsoft Entra ID
 - **Service Principal Support**: M2M service accounts with OAuth2 Client Credentials flow for AI agent identity
 - **Fine-Grained Access Control**: Scopes define which MCP servers, methods, tools, and agents each user can access
+- **Application-Level Rate Limiting**: Identity/group/target-aware request limits at the auth-server `/validate` hop (complementary to per-IP nginx edge limiting). Cap a caller (user or agent, by rate-limit group membership) and/or a target (MCP server / A2A agent) per time window, with config-time lockout-safeguard floors, admin bypass, a fail-open availability guardrail (fail-closed per-limit), and 429 responses carrying `X-RateLimit-*` / `Retry-After`. Off by default; definitions managed via the admin API / CLI / UI. See [Rate Limiting Design](design/rate-limiting.md)
 - **Self-Signed JWT Tokens**: Human users can generate tokens for CLI tools and AI coding assistants
 - **Secure Token Management**: OAuth token refresh and validation with centralized session management
 - **MCP Server Security Scanning**: Integrated vulnerability scanning with Cisco AI Defense MCP Scanner

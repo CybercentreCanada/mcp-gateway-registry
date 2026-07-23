@@ -406,7 +406,7 @@ def _safe_eval_arithmetic(expression: str) -> int | float:
     def _eval_node(node: ast.AST) -> int | float:
         if isinstance(node, ast.Expression):
             return _eval_node(node.body)
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, int | float):
             return node.value
         if isinstance(node, ast.BinOp):
             op_func = _SAFE_OPERATORS.get(type(node.op))

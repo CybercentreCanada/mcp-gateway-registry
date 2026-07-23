@@ -21,6 +21,7 @@ import AuditLogsPage from './AuditLogsPage';
 import IAMGroups from '../components/IAMGroups';
 import IAMUsers from '../components/IAMUsers';
 import IAMM2M from '../components/IAMM2M';
+import IAMRateLimits from '../components/IAMRateLimits';
 import IAMUserGroups from '../components/IAMUserGroups';
 import RegistryCardSettings from '../components/RegistryCardSettings';
 import ApplicationLogs from '../components/ApplicationLogs';
@@ -115,6 +116,7 @@ const SETTINGS_CATEGORIES: SettingsCategory[] = [
       { id: 'groups', label: 'Groups', path: '/settings/iam/groups' },
       { id: 'users', label: 'Users', path: '/settings/iam/users' },
       { id: 'm2m', label: 'M2M Accounts', path: '/settings/iam/m2m' },
+      { id: 'rate-limits', label: 'Rate Limits', path: '/settings/iam/rate-limits' },
       { id: 'user-groups', label: 'User Groups', path: '/settings/iam/user-groups' },
     ],
   },
@@ -338,6 +340,11 @@ const SettingsPage: React.FC = () => {
     // IAM > M2M Accounts
     if (path === '/settings/iam/m2m') {
       return <IAMM2M onShowToast={showToast} />;
+    }
+
+    // IAM > Rate Limits (definitions CRUD; issue #295)
+    if (path === '/settings/iam/rate-limits') {
+      return <IAMRateLimits onShowToast={showToast} />;
     }
 
     // IAM > User Groups (idp_user_groups fallback records).

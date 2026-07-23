@@ -1,6 +1,6 @@
 # Enable the publish_skill permission in the default scope seeds.
 # When true, the MCP Servers Unrestricted scopes include "publish_skill": ["all"].
-publishSkillEnabled: false
+publishSkillEnabled: true
 
 # Image used by the init (wait-for-mongodb) and main job containers.
 # Override this when the default public.ecr.aws image is not reachable from the cluster.

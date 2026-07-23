@@ -198,7 +198,7 @@ for config in "${AGENTS[@]}"; do
     ((AGENT_FAIL++))
     continue
   fi
-  
+
   echo -e "${BLUE}  → Registering: $(basename $config)${NC}"
   set +e  # Temporarily disable exit on error
   uv run python "${SCRIPT_DIR}/registry_management.py" \
@@ -225,7 +225,7 @@ echo ""
 FEDERATION_CONFIG="${REPO_ROOT}/cli/examples/federation-config-example.json"
 if [[ -f "$FEDERATION_CONFIG" ]]; then
   echo -e "${YELLOW}Step 4: Configuring Federation with Anthropic Registry...${NC}"
-  
+
   echo -e "${BLUE}  → Saving federation config...${NC}"
   if uv run python "${SCRIPT_DIR}/registry_management.py" \
     --token-file "$TOKEN_FILE" \

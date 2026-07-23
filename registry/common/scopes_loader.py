@@ -25,7 +25,7 @@ async def load_scopes_from_repository(
     Returns:
         Dict with "group_mappings", scope definitions, and "UI-Scopes"
     """
-    last_exception = None
+    last_exception: Exception | None = None
 
     for attempt in range(max_retries):
         try:
@@ -44,9 +44,9 @@ async def load_scopes_from_repository(
             # Get all groups and build scopes configuration
             groups_dict = await scope_repo.list_groups()
 
-            group_mappings = {}
-            scopes_config = {}
-            ui_scopes = {}
+            group_mappings: dict[str, list[str]] = {}
+            scopes_config: dict[str, Any] = {}
+            ui_scopes: dict[str, Any] = {}
 
             # Build scopes config from repository
             for group_name in groups_dict.keys():

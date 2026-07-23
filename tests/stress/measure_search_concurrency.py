@@ -24,6 +24,7 @@ import json
 import logging
 import statistics
 import time
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -199,9 +200,7 @@ async def _run_level(
     )
 
     for i in range(total_iterations):
-        batch_latencies = await _run_concurrent_batch(
-            base_url, queries, concurrency, token
-        )
+        batch_latencies = await _run_concurrent_batch(base_url, queries, concurrency, token)
 
         if i == 0:
             logger.debug("Concurrency=%d: warmup iteration discarded", concurrency)
@@ -244,18 +243,18 @@ async def _run_level(
 def _generate_markdown(report: dict[str, Any]) -> str:
     """Generate a human-readable markdown report."""
     lines = []
-    lines.append(f"# Search Concurrency Report")
-    lines.append(f"")
+    lines.append("# Search Concurrency Report")
+    lines.append("")
     lines.append(f"- **Backend:** {report['backend']}")
     lines.append(f"- **Base URL:** {report['base_url']}")
     lines.append(f"- **Queries:** {report['num_queries']} curated queries")
     lines.append(f"- **k:** {SEARCH_K}")
     lines.append(f"- **Iterations per level:** {report['iterations']}")
-    lines.append(f"- **Warmup:** first iteration discarded")
+    lines.append("- **Warmup:** first iteration discarded")
     lines.append(f"- **Timestamp:** {report['timestamp']}")
-    lines.append(f"")
-    lines.append(f"## Results")
-    lines.append(f"")
+    lines.append("")
+    lines.append("## Results")
+    lines.append("")
     lines.append(
         "| Concurrency | Requests | Throughput (rps) | p50 (ms) | p90 (ms) | p95 (ms) | p99 (ms) | Max (ms) |"
     )
@@ -276,24 +275,22 @@ def _generate_markdown(report: dict[str, Any]) -> str:
             f"| {agg['max_ms']:>8.1f} |"
         )
 
-    lines.append(f"")
-    lines.append(f"## Interpretation")
-    lines.append(f"")
+    lines.append("")
+    lines.append("## Interpretation")
+    lines.append("")
     lines.append(
-        f"- **Concurrency=1** is the baseline single-user latency (should match Phase 2 serial results)."
+        "- **Concurrency=1** is the baseline single-user latency (should match Phase 2 serial results)."
     )
+    lines.append("- **Concurrency=10** simulates a small team using search simultaneously.")
     lines.append(
-        f"- **Concurrency=10** simulates a small team using search simultaneously."
+        "- **Concurrency=100** simulates burst load from agent-driven discovery workflows."
     )
+    lines.append("")
     lines.append(
-        f"- **Concurrency=100** simulates burst load from agent-driven discovery workflows."
+        "If p99 at concurrency=100 is less than 2x the p99 at concurrency=1, "
+        "the search backend scales well under concurrent load."
     )
-    lines.append(f"")
-    lines.append(
-        f"If p99 at concurrency=100 is less than 2x the p99 at concurrency=1, "
-        f"the search backend scales well under concurrent load."
-    )
-    lines.append(f"")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -337,7 +334,7 @@ async def _main_async(args: argparse.Namespace) -> int:
         )
 
     elapsed = time.time() - overall_start
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     report = {
         "backend": args.backend,
@@ -346,7 +343,7 @@ async def _main_async(args: argparse.Namespace) -> int:
         "iterations": args.iterations,
         "num_queries": len(queries),
         "k": SEARCH_K,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "elapsed_seconds": round(elapsed, 1),
         "registry_info": registry_info,
         "levels": levels,

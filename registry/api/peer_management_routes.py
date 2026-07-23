@@ -424,9 +424,9 @@ async def update_peer_token(
         # Get peer info before update for audit context
         peer_name = "unknown"
         try:
-            existing_peer = await service.get_peer_by_id(peer_id)
+            existing_peer = await service.get_peer(peer_id)
             peer_name = existing_peer.name
-        except Exception:
+        except Exception:  # nosec B110 - best-effort peer name for audit context
             pass  # Continue even if we can't get peer name
 
         # Use the standard update_peer with only the token field

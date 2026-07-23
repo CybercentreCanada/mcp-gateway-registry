@@ -66,6 +66,10 @@ services:
       - CODING_ASSISTANTS=${CODING_ASSISTANTS:-}
       # UI title override. Empty = deployment-mode-aware default.
       - UI_TITLE=${UI_TITLE:-}
+      # Base64-encoded HTML snippet served as /rum.js for frontend RUM. Empty disables RUM. May contain a vendor token.
+      - RUM_SNIPPET_B64=${RUM_SNIPPET_B64:-}
+      # Comma-separated host allowlist for the RUM snippet (fail-closed when set). Empty disables the check.
+      - RUM_ALLOWED_HOSTS=${RUM_ALLOWED_HOSTS:-}
       - GATEWAY_ADDITIONAL_SERVER_NAMES=${GATEWAY_ADDITIONAL_SERVER_NAMES:-}
       # Registry Card Configuration
       - REGISTRY_URL=${REGISTRY_URL:-http://localhost}
@@ -218,6 +222,15 @@ services:
       - DOCUMENTDB_USE_IAM=${DOCUMENTDB_USE_IAM:-false}
       - DOCUMENTDB_REPLICA_SET=${DOCUMENTDB_REPLICA_SET:-rs0}
       - DOCUMENTDB_READ_PREFERENCE=${DOCUMENTDB_READ_PREFERENCE:-secondaryPreferred}
+      # Rate Limiting Configuration (issue #295). Off by default.
+      - RATE_LIMITING_ENABLED=${RATE_LIMITING_ENABLED:-false}
+      - RATE_LIMIT_BACKEND=${RATE_LIMIT_BACKEND:-documentdb}
+      - RATE_LIMIT_FAIL_OPEN=${RATE_LIMIT_FAIL_OPEN:-true}
+      - RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS=${RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS:-30}
+      - RATE_LIMIT_BACKEND_TIMEOUT_MS=${RATE_LIMIT_BACKEND_TIMEOUT_MS:-250}
+      # Lockout-safeguard floors (registry validates group definitions at config time).
+      - RATE_LIMIT_USER_FLOOR_PER_MIN=${RATE_LIMIT_USER_FLOOR_PER_MIN:-20}
+      - RATE_LIMIT_AGENT_FLOOR_PER_MIN=${RATE_LIMIT_AGENT_FLOOR_PER_MIN:-10}
       # Embeddings Configuration
       - EMBEDDINGS_PROVIDER=${EMBEDDINGS_PROVIDER:-sentence-transformers}
       - EMBEDDINGS_MODEL_NAME=${EMBEDDINGS_MODEL_NAME:-all-MiniLM-L6-v2}
@@ -436,6 +449,12 @@ services:
       - DOCUMENTDB_USE_IAM=${DOCUMENTDB_USE_IAM:-false}
       - DOCUMENTDB_REPLICA_SET=${DOCUMENTDB_REPLICA_SET:-rs0}
       - DOCUMENTDB_READ_PREFERENCE=${DOCUMENTDB_READ_PREFERENCE:-secondaryPreferred}
+      # Rate Limiting Configuration (issue #295). Off by default; enforced here.
+      - RATE_LIMITING_ENABLED=${RATE_LIMITING_ENABLED:-false}
+      - RATE_LIMIT_BACKEND=${RATE_LIMIT_BACKEND:-documentdb}
+      - RATE_LIMIT_FAIL_OPEN=${RATE_LIMIT_FAIL_OPEN:-true}
+      - RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS=${RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS:-30}
+      - RATE_LIMIT_BACKEND_TIMEOUT_MS=${RATE_LIMIT_BACKEND_TIMEOUT_MS:-250}
       # Registry API static token auth
       - REGISTRY_STATIC_TOKEN_AUTH_ENABLED=${REGISTRY_STATIC_TOKEN_AUTH_ENABLED:-false}
       - REGISTRY_API_TOKEN=${REGISTRY_API_TOKEN:-}

@@ -155,11 +155,11 @@ async def _perform_agent_security_scan_on_registration(
                     # the warning it earned.
                     agent_info = await agent_service.get_agent_info(path)
                     if agent_info:
-                        updated_card = agent_info.model_dump()
-                        updated_card["tags"] = current_tags
-                        from ..schemas.agent_models import AgentCard as AgentCardModel
-
-                        await agent_service.update_agent(path, AgentCardModel(**updated_card))
+                        # update_agent takes a dict of fields to merge (it calls
+                        # updates.get(...)); pass the dict directly, not an
+                        # AgentCard instance (which has no .get and raises
+                        # AttributeError). Only the changed field is needed.
+                        await agent_service.update_agent(path, {"tags": current_tags})
                     logger.info(f"Added 'security-pending' tag to agent {path}")
 
             # Disable agent if configured
@@ -234,6 +234,136 @@ def _build_agent_health_urls(
     parsed = urlparse(base_url)
     agent_card_url = f"{parsed.scheme}://{parsed.netloc}/.well-known/agent-card.json"
     return [agent_card_url, base_url]
+
+
+async def _probe_agent_backend_health(
+    path: str,
+    agent_card: AgentCard,
+) -> dict[str, Any]:
+    """Probe an A2A agent's real backend and return its health result.
+
+    Tries GET on the agent-card URL(s) first, then a HEAD ping fallback (any HTTP
+    response means reachable). In reverse-proxy mode the advertised ``url`` is the
+    gateway, so the registrant's backend lives in ``proxy_pass_url``; fall back to
+    ``url`` for agents registered before the flag was on. Shared by the manual
+    ``/health`` route and the enable/register flow so a freshly enabled agent gets
+    a real status (not the default "unknown", which would block its nginx block).
+
+    Args:
+        path: Normalized agent path (for logging).
+        agent_card: The agent whose backend is probed.
+
+    Returns:
+        Dict with keys: status ("healthy"/"unhealthy"), status_code, detail,
+        response_time_ms, health_check_url, last_checked (datetime),
+        last_checked_iso.
+    """
+    backend_url = getattr(agent_card, "proxy_pass_url", None) or agent_card.url
+    base_url = str(backend_url).rstrip("/")
+    health_urls = _build_agent_health_urls(base_url)
+    timeout_seconds = max(1, settings.health_check_timeout_seconds)
+
+    status_label = "unhealthy"
+    detail = None
+    status_code = None
+    response_time_ms = None
+    health_check_url = health_urls[0]
+
+    for url in health_urls:
+        health_check_url = url
+        start_time = datetime.now(UTC)
+        try:
+            async with guarded_async_client(
+                profile=PROXY_PROFILE, timeout=timeout_seconds
+            ) as client:
+                response = await client.get(url)
+            status_code = response.status_code
+            response_time_ms = int((datetime.now(UTC) - start_time).total_seconds() * 1000)
+            if response.status_code == 200:
+                status_label = "healthy"
+                detail = None
+                logger.info(f"Agent health check for {path} succeeded via GET on {url}")
+                break
+            detail = f"Agent responded with HTTP {response.status_code}"
+            logger.debug(f"Agent health check for {path} got HTTP {response.status_code} on {url}")
+        except httpx.TimeoutException:
+            detail = f"Health check timed out on {url}"
+            logger.debug(f"Agent health check for {path} timed out on {url}")
+        except httpx.HTTPError as exc:
+            detail = f"Health check failed on {url}"
+            logger.debug(f"Agent health check for {path} failed on {url}: {exc}")
+        except Exception as exc:
+            detail = f"Unexpected health check error on {url}"
+            logger.debug(f"Agent health check for {path} unexpected error on {url}: {exc}")
+
+    # Fallback: if GET-based checks failed, try HEAD on the base URL. A
+    # non-connection-error response (even 401/403) means the server is reachable.
+    if status_label == "unhealthy":
+        logger.info(f"Agent {path} GET checks failed, falling back to HEAD ping on {base_url}")
+        try:
+            start_time = datetime.now(UTC)
+            async with guarded_async_client(
+                profile=PROXY_PROFILE, timeout=timeout_seconds
+            ) as client:
+                response = await client.head(base_url)
+            status_code = response.status_code
+            response_time_ms = int((datetime.now(UTC) - start_time).total_seconds() * 1000)
+            health_check_url = base_url
+            status_label = "healthy"
+            detail = f"Reachable via HEAD (HTTP {response.status_code})"
+            logger.info(
+                f"Agent health check for {path} succeeded via HEAD ping "
+                f"(HTTP {response.status_code})"
+            )
+        except httpx.TimeoutException:
+            logger.debug(f"Agent {path} HEAD ping timed out on {base_url}")
+        except httpx.HTTPError as exc:
+            logger.debug(f"Agent {path} HEAD ping failed on {base_url}: {exc}")
+        except Exception as exc:
+            logger.debug(f"Agent {path} HEAD ping unexpected error on {base_url}: {exc}")
+
+    last_checked = datetime.now(UTC)
+    return {
+        "status": status_label,
+        "status_code": status_code,
+        "detail": detail,
+        "response_time_ms": response_time_ms,
+        "health_check_url": health_check_url,
+        "last_checked": last_checked,
+        "last_checked_iso": last_checked.isoformat(),
+    }
+
+
+async def _refresh_agent_health(
+    path: str,
+) -> None:
+    """Probe an enabled A2A agent and persist its health so nginx will route it.
+
+    A freshly registered/enabled agent defaults to health_status "unknown", which
+    the nginx generator treats as not-healthy and therefore emits no proxy block.
+    Nothing else flips it automatically (the periodic health loop only covers MCP
+    servers), so an enabled agent would be silently unroutable until a manual
+    ``/health`` call. Call this after enabling/registering-enabled so the block is
+    generated. Best-effort: failures are logged, never raised.
+
+    Args:
+        path: Normalized agent path.
+    """
+    try:
+        agent_card = await agent_service.get_agent_info(path)
+        if not agent_card:
+            return
+        result = await _probe_agent_backend_health(path, agent_card)
+        await agent_service.update_agent(
+            path,
+            {
+                "health_status": result["status"],
+                "last_health_check": result["last_checked"],
+            },
+        )
+        logger.info(f"Agent '{path}' health refreshed on enable: {result['status']}")
+    except Exception as e:
+        logger.warning(f"Failed to refresh health for agent {path} on enable: {e}")
 
 
 # A2A-spec fields the pull-card diff considers. Registry-extension fields
@@ -507,6 +637,78 @@ def _normalize_path(
         path = path.rstrip("/")
 
     return path
+
+
+def _normalize_tag_list(tags: str | list[str]) -> list[str]:
+    """Normalize a tags field that may be a comma-separated string or a list."""
+    if isinstance(tags, str):
+        return [tag.strip() for tag in tags.split(",") if tag.strip()]
+    return [str(tag).strip() for tag in tags if str(tag).strip()]
+
+
+def _gateway_agent_url(
+    agent_path: str,
+) -> str:
+    """Build the gateway-facing A2A URL that clients use to reach an agent.
+
+    When A2A reverse-proxy mode is on, the registry advertises this URL as the
+    agent's ``url`` (and keeps the registrant's real backend in
+    ``proxy_pass_url``) so discovery routes callers through the gateway. Mirrors
+    the nginx location route ``{ROOT_PATH}/agent/<path>/`` with a trailing slash
+    so it matches the JSON-RPC prefix location.
+
+    Args:
+        agent_path: Normalized agent path with a leading slash (e.g. "/travel").
+
+    Returns:
+        Absolute gateway URL, e.g. "https://gateway.example.com/agent/travel/".
+    """
+    from ..core.nginx_service import AGENT_ROUTE_PREFIX
+
+    base = settings.registry_url.rstrip("/")
+    return f"{base}{AGENT_ROUTE_PREFIX}/{agent_path.strip('/')}/"
+
+
+def _apply_a2a_reverse_proxy_split(
+    agent_card: AgentCard,
+    path: str,
+) -> None:
+    """Advertise the gateway url and keep the registrant backend in proxy_pass_url.
+
+    In A2A reverse-proxy mode the stored ``url`` is the gateway-facing address and
+    the registrant's real backend lives in ``proxy_pass_url``. This mutates the
+    card in place so discovery routes callers through the gateway. It is idempotent
+    and MUST run on every write path (register, PUT, PATCH), not just register, or
+    an edit that changes ``url`` would desync the advertised url from the backend.
+
+    Only applies when ``a2a_reverse_proxy_effective`` (flag AND with-gateway) and
+    the agent speaks a2a; otherwise the card is left untouched (registry-only mode
+    keeps url == backend, and non-a2a agents are never proxied). When the card's
+    ``url`` already points at the gateway (an edit that did not touch the backend),
+    the existing ``proxy_pass_url`` is preserved rather than overwritten with the
+    gateway url.
+
+    Args:
+        agent_card: The card being written; mutated in place.
+        path: Normalized agent path with a leading slash (e.g. "/travel").
+    """
+    if not settings.a2a_reverse_proxy_effective:
+        return
+    if (agent_card.supported_protocol or "").lower() != "a2a":
+        return
+
+    gateway_url = _gateway_agent_url(path)
+    if agent_card.url == gateway_url:
+        # url already gateway-facing (edit that did not change the backend); keep
+        # the stored backend so we do not clobber it with the gateway url.
+        return
+
+    agent_card.proxy_pass_url = agent_card.url
+    agent_card.url = gateway_url
+    logger.info(
+        f"A2A reverse-proxy: agent '{path}' advertised url set to gateway "
+        f"({agent_card.url}); backend preserved in proxy_pass_url."
+    )
 
 
 def _weak_etag_for(agent_card: AgentCard) -> str:
@@ -798,7 +1000,7 @@ async def register_agent(
             },
         )
 
-    tag_list = [tag.strip() for tag in request.tags.split(",") if tag.strip()]
+    tag_list = _normalize_tag_list(request.tags)
 
     # Parse external_tags
     external_tag_list = []
@@ -907,6 +1109,21 @@ async def register_agent(
                 },
             )
 
+        # A2A reverse-proxy mode: advertise the gateway-facing URL and keep the
+        # registrant's real backend in proxy_pass_url. Done AFTER validation so
+        # the endpoint health check above still probes the real backend, not the
+        # gateway. Mirrors the MCP-server url/proxy_pass_url split; proxy_pass_url
+        # is redacted from non-admin reads (registry/services/visibility.py) and
+        # the nginx generator proxies to it. When the flag is off, the card is
+        # stored exactly as registered (no proxy_pass_url) -- backwards compatible.
+        #
+        # Gated on a2a_reverse_proxy_effective (flag AND with-gateway), NOT the
+        # raw flag: in registry-only mode there is no gateway to route through, so
+        # we must NOT advertise a gateway url that would 503. url and
+        # proxy_pass_url stay identical (backend) in that case. The same split is
+        # re-applied on the PUT/PATCH update paths via this shared helper.
+        _apply_a2a_reverse_proxy_split(agent_card, path)
+
     except ValueError as e:
         logger.error(f"Invalid agent card data: {e}")
         raise HTTPException(
@@ -959,6 +1176,12 @@ async def register_agent(
     is_enabled = await _perform_agent_security_scan_on_registration(
         path, agent_card, agent_card_dict
     )
+
+    # If registration left the agent enabled, probe its backend and persist health
+    # so the nginx reverse-proxy block is generated (default "unknown" would be
+    # treated as not-healthy and skipped).
+    if is_enabled:
+        await _refresh_agent_health(path)
 
     # Best-effort ANS linking if ans_agent_id is provided
     if request.ans_agent_id and settings.ans_integration_enabled:
@@ -1241,77 +1464,8 @@ async def check_agent_health(
             detail="Cannot perform health check on a disabled agent",
         )
 
-    base_url = str(agent_card.url).rstrip("/")
-    health_urls = _build_agent_health_urls(base_url)
-    timeout_seconds = max(1, settings.health_check_timeout_seconds)
-
-    status_label = "unhealthy"
-    detail = None
-    status_code = None
-    response_time_ms = None
-    health_check_url = health_urls[0]
-
-    for url in health_urls:
-        health_check_url = url
-        start_time = datetime.now(UTC)
-
-        try:
-            async with guarded_async_client(
-                profile=PROXY_PROFILE, timeout=timeout_seconds
-            ) as client:
-                response = await client.get(url)
-            status_code = response.status_code
-            response_time_ms = int((datetime.now(UTC) - start_time).total_seconds() * 1000)
-
-            if response.status_code == 200:
-                status_label = "healthy"
-                detail = None
-                logger.info(f"Agent health check for {path} succeeded via GET on {url}")
-                break
-
-            detail = f"Agent responded with HTTP {response.status_code}"
-            logger.debug(f"Agent health check for {path} got HTTP {response.status_code} on {url}")
-
-        except httpx.TimeoutException:
-            detail = f"Health check timed out on {url}"
-            logger.debug(f"Agent health check for {path} timed out on {url}")
-        except httpx.HTTPError as exc:
-            detail = f"Health check failed on {url}"
-            logger.debug(f"Agent health check for {path} failed on {url}: {exc}")
-        except Exception as exc:
-            detail = f"Unexpected health check error on {url}"
-            logger.debug(f"Agent health check for {path} unexpected error on {url}: {exc}")
-
-    # Fallback: if GET-based checks failed, try HEAD on the base URL.
-    # A non-connection-error response (even 401/403) means the server is reachable.
-    if status_label == "unhealthy":
-        logger.info(f"Agent {path} GET checks failed, falling back to HEAD ping on {base_url}")
-        try:
-            start_time = datetime.now(UTC)
-            async with guarded_async_client(
-                profile=PROXY_PROFILE, timeout=timeout_seconds
-            ) as client:
-                response = await client.head(base_url)
-            status_code = response.status_code
-            response_time_ms = int((datetime.now(UTC) - start_time).total_seconds() * 1000)
-            health_check_url = base_url
-
-            # Any HTTP response means the server is reachable
-            status_label = "healthy"
-            detail = f"Reachable via HEAD (HTTP {response.status_code})"
-            logger.info(
-                f"Agent health check for {path} succeeded via HEAD ping "
-                f"(HTTP {response.status_code})"
-            )
-        except httpx.TimeoutException:
-            logger.debug(f"Agent {path} HEAD ping timed out on {base_url}")
-        except httpx.HTTPError as exc:
-            logger.debug(f"Agent {path} HEAD ping failed on {base_url}: {exc}")
-        except Exception as exc:
-            logger.debug(f"Agent {path} HEAD ping unexpected error on {base_url}: {exc}")
-
-    last_checked = datetime.now(UTC)
-    last_checked_iso = last_checked.isoformat()
+    probe = await _probe_agent_backend_health(path, agent_card)
+    status_label = probe["status"]
 
     # Persist health status to MongoDB
     try:
@@ -1319,7 +1473,7 @@ async def check_agent_health(
             path,
             {
                 "health_status": status_label,
-                "last_health_check": last_checked,
+                "last_health_check": probe["last_checked"],
             },
         )
     except Exception as e:
@@ -1327,17 +1481,17 @@ async def check_agent_health(
 
     logger.info(
         f"Agent health check for {path} completed with status {status_label} "
-        f"(last URL tried: {health_check_url})"
+        f"(last URL tried: {probe['health_check_url']})"
     )
 
     return {
         "agent_path": path,
-        "health_check_url": health_check_url,
+        "health_check_url": probe["health_check_url"],
         "status": status_label,
-        "status_code": status_code,
-        "detail": detail,
-        "response_time_ms": response_time_ms,
-        "last_checked_iso": last_checked_iso,
+        "status_code": probe["status_code"],
+        "detail": probe["detail"],
+        "response_time_ms": probe["response_time_ms"],
+        "last_checked_iso": probe["last_checked_iso"],
     }
 
 
@@ -1491,6 +1645,16 @@ async def toggle_agent(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"detail": "Failed to toggle agent state"},
         )
+
+    # On enable, probe the backend and persist health so the nginx reverse-proxy
+    # block is actually generated: a freshly enabled agent defaults to "unknown",
+    # which the generator treats as not-healthy and skips. Re-mark nginx dirty so
+    # the (debounced) reload regenerates with the refreshed status.
+    if enabled:
+        await _refresh_agent_health(path)
+        from ..core.nginx_service import nginx_reload_scheduler
+
+        nginx_reload_scheduler.mark_dirty()
 
     try:
         search_repo = get_search_repository()
@@ -2003,7 +2167,17 @@ async def get_agent(
         )
 
     response.headers["ETag"] = _weak_etag_for(agent_card)
-    return agent_card.model_dump()
+    agent_dict = agent_card.model_dump()
+    # Hide the internal backend (proxy_pass_url) from non-admins in with-gateway
+    # mode; admins and registry-only mode see it. Mirrors MCP-server redaction.
+    from ..services.visibility import (
+        redact_agent_backend_fields,
+        should_redact_backend_urls,
+    )
+
+    if should_redact_backend_urls(user_context):
+        redact_agent_backend_fields(agent_dict)
+    return agent_dict
 
 
 @router.put("/agents/{path:path}")
@@ -2060,7 +2234,7 @@ async def update_agent(
             detail="You can only update agents you registered",
         )
 
-    tag_list = [tag.strip() for tag in request.tags.split(",") if tag.strip()]
+    tag_list = _normalize_tag_list(request.tags)
 
     try:
         # Build optional kwargs for fields that have defaults on AgentCard
@@ -2122,6 +2296,11 @@ async def update_agent(
                 },
             )
 
+        # Re-apply the reverse-proxy url/proxy_pass_url split (validation above
+        # probed the real backend); without this a PUT that changes url would
+        # desync the advertised gateway url from the stored backend.
+        _apply_a2a_reverse_proxy_split(updated_agent, path)
+
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -2145,7 +2324,9 @@ async def update_agent(
             detail=f"Registration denied by policy gate: {gate_result.error_message}",
         )
 
-    success = await agent_service.update_agent(path, updated_agent)
+    # update_agent takes a dict of fields to merge (it calls updates.get(...)),
+    # so pass the model dump, not the AgentCard instance.
+    success = await agent_service.update_agent(path, updated_agent.model_dump())
 
     if not success:
         return JSONResponse(
@@ -2294,6 +2475,11 @@ async def patch_agent(
                 "errors": validation_result.errors,
             },
         )
+
+    # Re-apply the reverse-proxy url/proxy_pass_url split so a PATCH of url keeps
+    # the advertised gateway url in sync with the stored backend (idempotent when
+    # url already points at the gateway).
+    _apply_a2a_reverse_proxy_split(merged_agent, path)
 
     # Registration gate (parity with PUT)
     gate_result = await check_registration_gate(
@@ -2580,6 +2766,11 @@ async def discover_agents_semantic(
 
     logger.info(f"User {user_context['username']} semantic search for agents: {query}")
 
+    from ..services.visibility import (
+        redact_agent_backend_fields,
+        should_redact_backend_urls,
+    )
+
     try:
         search_results = await search_repo.search(
             query=query,
@@ -2593,6 +2784,11 @@ async def discover_agents_semantic(
         all_agents = await agent_service.get_all_agents()
         agent_map = {agent.path: agent for agent in all_agents}
 
+        # Non-admins get the gateway-facing url only; the internal backend
+        # (proxy_pass_url) is stripped so discovery never leaks it. Mirrors the
+        # MCP-server semantic-search redaction.
+        redact_backend = should_redact_backend_urls(user_context)
+
         accessible_results = []
         for result in results:
             agent_card = agent_map.get(result.get("path"))
@@ -2604,6 +2800,8 @@ async def discover_agents_semantic(
 
             # Return full agent card with relevance score
             agent_data = agent_card.model_dump()
+            if redact_backend:
+                redact_agent_backend_fields(agent_data)
             agent_data["relevance_score"] = result.get("relevance_score", 0.0)
 
             accessible_results.append(agent_data)

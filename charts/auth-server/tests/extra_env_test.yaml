@@ -48,8 +48,14 @@ tests:
       #   env[2] = OTEL_METRIC_EXPORT_INTERVAL_MS  (Issue #1122)
       #   env[3] = OTEL_EXPORTER_PROMETHEUS_HOST   (Issue #1122)
       #   env[4] = OTEL_EXPORTER_PROMETHEUS_PORT   (Issue #1122)
-      #   env[5] = MY_FLAG       (extraEnv[0])
-      #   env[6] = MY_SECRET_VAR (extraEnv[1])
+      #   env[5]  = AUDIT_LOG_REQUIRE_DURABLE (always rendered)
+      #   env[6]  = RATE_LIMITING_ENABLED (issue #295, always rendered)
+      #   env[7]  = RATE_LIMIT_BACKEND
+      #   env[8]  = RATE_LIMIT_FAIL_OPEN
+      #   env[9]  = RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS
+      #   env[10] = RATE_LIMIT_BACKEND_TIMEOUT_MS
+      #   env[11] = MY_FLAG       (extraEnv[0])
+      #   env[12] = MY_SECRET_VAR (extraEnv[1])
       - equal:
           path: spec.template.spec.containers[0].env[0].name
           value: ENTRA_CLIENT_SECRET
@@ -58,9 +64,18 @@ tests:
           value: METRICS_LEGACY_HTTP_POST
       - equal:
           path: spec.template.spec.containers[0].env[5].name
-          value: MY_FLAG
+          value: AUDIT_LOG_REQUIRE_DURABLE
       - equal:
           path: spec.template.spec.containers[0].env[6].name
+          value: RATE_LIMITING_ENABLED
+      - equal:
+          path: spec.template.spec.containers[0].env[10].name
+          value: RATE_LIMIT_BACKEND_TIMEOUT_MS
+      - equal:
+          path: spec.template.spec.containers[0].env[11].name
+          value: MY_FLAG
+      - equal:
+          path: spec.template.spec.containers[0].env[12].name
           value: MY_SECRET_VAR
 
   - it: appends extraEnvFrom entries after chart-managed envFrom sources
@@ -153,6 +168,24 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "\"EGRESS_REGISTRY_INTERNAL_URL\" is a reserved variable"
+
+  - it: fails when extraEnv contains AUDIT_LOG_REQUIRE_DURABLE
+    set:
+      extraEnv:
+        - name: AUDIT_LOG_REQUIRE_DURABLE
+          value: "false"
+    asserts:
+      - failedTemplate:
+          errorPattern: "\"AUDIT_LOG_REQUIRE_DURABLE\" is a reserved variable"
+
+  - it: fails when extraEnv contains RATE_LIMITING_ENABLED (issue #295)
+    set:
+      extraEnv:
+        - name: RATE_LIMITING_ENABLED
+          value: "true"
+    asserts:
+      - failedTemplate:
+          errorPattern: "\"RATE_LIMITING_ENABLED\" is a reserved variable"
 
   - it: fails on duplicate names within extraEnv
     set:

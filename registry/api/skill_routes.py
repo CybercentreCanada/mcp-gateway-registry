@@ -214,17 +214,22 @@ async def list_skills(
 
     service = get_skill_service()
 
-    # Determine if user has unrestricted access (no skills will be filtered out)
+    # Determine if the caller sees every skill unfiltered. Skill visibility is a
+    # SKILL-scoped concern: only an admin is exempt from per-skill visibility
+    # filtering (matching list_skills_for_user, which returns all skills solely
+    # for admins). Agent-scoped grants such as "all" in accessible_agents must
+    # NOT unlock private/group skills -- doing so is a cross-resource permission
+    # confusion. Fail closed: any non-admin (or missing user_context) takes the
+    # filtered fallback path.
     is_admin = user_context.get("is_admin", False) if user_context else False
-    accessible_agent_list = user_context.get("accessible_agents", []) if user_context else []
-    is_unrestricted = is_admin or "all" in accessible_agent_list
+    is_unrestricted = is_admin
     # include_disabled=False (default) means "exclude disabled" which IS a filter.
     # Only include_disabled=True (show all) with no tag requires no filtering.
     has_field_filters = bool(tag or not include_disabled)
 
     # Dual-path pagination:
-    # - Fast path: DB-level skip/limit for unrestricted users without field filters
-    # - Fallback: full fetch + Python filter + slice for restricted users or field filters
+    # - Fast path: DB-level skip/limit for admins without field filters
+    # - Fallback: full fetch + Python filter + slice for non-admins or field filters
     if is_unrestricted and not has_field_filters:
         # FAST PATH: DB-level pagination -- correct because no skills are filtered out
         # and no field filters need a full scan for accurate total_count
@@ -302,7 +307,11 @@ async def list_skills(
 @router.post("/parse-skill-md", summary="Parse SKILL.md content from URL")
 async def parse_skill_md(
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
-    url: str = Query(..., description="URL to SKILL.md file"),
+    url: str = Query(
+        ...,
+        max_length=4096,
+        description="URL to SKILL.md file",
+    ),
     auth_scheme: str = Query(
         "none", description="Auth scheme: none, global_credentials, bearer, api_key"
     ),
@@ -397,7 +406,7 @@ async def search_skills(
     if not include_draft:
         excluded_statuses.add("draft")
 
-    matching_skills = []
+    matching_skills: list[dict[str, Any]] = []
     for skill in skills:
         # Filter by lifecycle status
         skill_status = getattr(skill, "status", "active") or "active"
@@ -1448,7 +1457,7 @@ async def _perform_skill_security_scan_on_registration(
         # scan_complete webhook (Issue #1330): safe or unsafe path.
         fire_scan_complete_event(
             skill.model_dump(),
-            result,
+            result,  # type: ignore[arg-type]  # SkillSecurityScanResult is structurally handled by the shared scan-complete emitter
             auto_disabled=auto_disabled,
             registration_type="skill",
         )

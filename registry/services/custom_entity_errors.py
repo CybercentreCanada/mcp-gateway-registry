@@ -112,4 +112,6 @@ class CustomTypeLimitError(CustomEntityError):
         cap: int,
     ):
         self.cap = cap
-        super().__init__(f"Cannot create custom type: the limit of {cap} custom types has been reached")
+        super().__init__(
+            f"Cannot create custom type: the limit of {cap} custom types has been reached"
+        )

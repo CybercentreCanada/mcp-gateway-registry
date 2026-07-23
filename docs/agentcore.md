@@ -9,6 +9,8 @@ This guide covers how to register AgentCore Gateways and Agent Runtimes in the M
 | **Method 1: Bulk Scanner** | Discovering and registering all resources in an AWS account at once | Automated via `token_refresher.py` |
 | **Method 2: Per-Server Registration** | Registering individual gateways or agents manually (same as any other MCP server/agent) | Manual token generation |
 
+Both methods above authenticate the gateway with a shared machine-to-machine (M2M) credential. If instead you want the gateway to be called **as the individual end user** (three-legged OAuth), see the FAQ [How do I use a 3LO (per-user OAuth) AgentCore Gateway with the registry?](faq/agentcore-3lo-per-user-oauth.md).
+
 ---
 
 ## Method 1: Bulk Scanner (Auto-Registration)

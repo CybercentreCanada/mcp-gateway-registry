@@ -3,7 +3,7 @@ global:
   image:
     # Container registry (host + optional namespace). Shared default across subcharts.
     registry: public.ecr.aws/p3v1o3c6
-    tag: 1.26.0
+    tag: 1.27.0
     pullPolicy: IfNotPresent
   cloud:
     # AWS region for cloud detection in telemetry. Set this when deploying
@@ -194,6 +194,12 @@ app:
   deploymentMode: with-gateway
   # Registry mode: full, skills-only, mcp-servers-only, agents-only
   registryMode: full
+  # A2A reverse-proxy gateway (opt-in; default off). When true, each enabled A2A
+  # agent gets nginx location blocks proxying its card + JSON-RPC through the
+  # gateway for centralized auth and metrics. Requires deploymentMode:
+  # with-gateway. Internal agent backends live at private ClusterIPs, so also set
+  # ssrfAllowedHosts / ssrfAllowedCidrs above or they are marked unhealthy.
+  a2aReverseProxyEnabled: false
   # Internal/workshop deployment classification (telemetry labels only; issue #1216).
   # Tags a deployment as one of our own internal/workshop installs so it can be
   # distinguished from community installs in telemetry. Does NOT change access control.
@@ -239,6 +245,26 @@ app:
   updateCheck:
     enabled: true
     intervalHours: 24
+  # Audit durability guard (fail closed). When true (default), the registry
+  # refuses to start if audit logging is enabled but no durable sink
+  # (DocumentDB/MongoDB) is available, instead of silently degrading to
+  # non-durable JSON log lines that are lost on restart and not queryable for
+  # forensics. Set to false only where a non-durable audit trail is acceptable.
+  auditLogRequireDurable: true
+  # Rate Limiting (issue #295). Application-level, identity/group/target-aware
+  # limits enforced at the auth-server /validate hop (complementary to the
+  # coarse per-IP nginx edge limiting). Off by default; definitions are managed
+  # via the admin API/CLI. Counters use DocumentDB (no new infrastructure).
+  rateLimiting:
+    enabled: false
+    backend: documentdb
+    failOpen: true
+    definitionsCacheTtlSeconds: 30
+    backendTimeoutMs: 250
+    # Lockout-safeguard floors (config-time validation of group definitions on
+    # short windows). A group's user/agent limit must be >= its floor.
+    userFloorPerMin: 20
+    agentFloorPerMin: 10
   # Tool-level access control (issue #1026)
   mcpToolsListFilterEnabled: true # Registry-side awareness of the MCP tools/list filter (also read by auth-server)
   toolFilterAuditLogLevel: "INFO" # Audit log level for tool-prune events (DEBUG, INFO, WARNING)
@@ -295,6 +321,12 @@ app:
   # set the same value here so the Connect dialog emits --callback-port. 0
   # (default) lets the IDE pick a port (correct for Keycloak's wildcard redirect).
   ideOauthCallbackPort: 0
+  # Optional install scope for the Claude Code Connect snippet (local|project|
+  # user). When set, the generated `claude mcp add` command emits `--scope <value>`
+  # (e.g. "user" = install for every project, not just the current directory).
+  # Empty (default) omits the flag, keeping Claude Code's default (local). Only
+  # affects the displayed Claude Code snippet.
+  ideConnectScope: ""
 # Metrics scrape configuration (Issue #1122)
 # Controls the NetworkPolicy that gates the OTel exporter-prometheus port.
 metricsScrape:
@@ -507,6 +539,22 @@ ingress:
   routingMode: subdomain
   # Path prefix when using path-based routing (default: /registry)
   path: /registry
+# Frontend RUM (feature #1471): base64-encoded HTML snippet served as /rum.js
+# for Real User Monitoring. Empty (default) disables RUM. This renders as a
+# plain RUM_SNIPPET_B64 env value, so it is fine for token-free snippets. For a
+# snippet that carries a vendor token, do NOT set this plain value; instead
+# keep rumSnippetB64 empty and supply RUM_SNIPPET_B64 from a Secret via
+# extraEnvFrom (RUM_SNIPPET_B64 is a reserved name, so it cannot be set through
+# extraEnv). The chart renders the plain env only when this value is non-empty,
+# so the Secret-sourced key is not shadowed. Example:
+#   extraEnvFrom:
+#     - secretRef:
+#         name: my-rum-secret   # must expose a RUM_SNIPPET_B64 key
+rumSnippetB64: ""
+# Comma-separated allowlist of hosts the RUM snippet may reference (script src +
+# beacon). When set, a snippet referencing any host not on the list is rejected
+# at startup (fail closed, empty stub served). Empty (default) disables the check.
+rumAllowedHosts: ""
 # Extra environment variables appended to the container's `env:` list.
 # Uses the native Kubernetes EnvVar schema, so `valueFrom` is supported.
 #

@@ -140,6 +140,13 @@ module "ecs_service_auth" {
           name  = "COGNITO_DOMAIN"
           value = var.cognito_domain
         },
+        # Cognito M2M (client_credentials) app-client id allowlist. Comma/space-
+        # separated; the auth-server accepts machine access tokens from these
+        # clients (their client_id claim). Default-empty = fail closed. Not a secret.
+        {
+          name  = "COGNITO_M2M_CLIENT_IDS"
+          value = var.cognito_m2m_client_ids
+        },
         # IDE OAuth login public client_id (PR #1224). The auth-server accepts
         # access tokens from this client (e.g. Cognito allowlist). Not a secret.
         {
@@ -391,6 +398,30 @@ module "ecs_service_auth" {
           value = var.documentdb_namespace
         },
         {
+          name  = "RATE_LIMITING_ENABLED"
+          value = tostring(var.rate_limiting_enabled)
+        },
+        {
+          name  = "RATE_LIMIT_BACKEND"
+          value = var.rate_limit_backend
+        },
+        {
+          name  = "RATE_LIMIT_FAIL_OPEN"
+          value = tostring(var.rate_limit_fail_open)
+        },
+        {
+          name  = "RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS"
+          value = tostring(var.rate_limit_definitions_cache_ttl_seconds)
+        },
+        {
+          name  = "RATE_LIMIT_BACKEND_TIMEOUT_MS"
+          value = tostring(var.rate_limit_backend_timeout_ms)
+        },
+        # NOTE: the RATE_LIMIT_*_FLOOR_PER_MIN vars are intentionally NOT set on the
+        # auth-server -- only the registry reads them (it validates group definitions
+        # at config time). They are set on the registry container instead, matching
+        # the Helm chart (charts/registry only).
+        {
           name  = "DOCUMENTDB_USE_TLS"
           value = tostring(var.documentdb_use_tls)
         },
@@ -409,6 +440,10 @@ module "ecs_service_auth" {
         {
           name  = "AUDIT_LOG_MONGODB_TTL_DAYS"
           value = tostring(var.audit_log_ttl_days)
+        },
+        {
+          name  = "AUDIT_LOG_REQUIRE_DURABLE"
+          value = tostring(var.audit_log_require_durable)
         },
         {
           name  = "APP_LOG_CENTRALIZED_ENABLED"
@@ -1126,6 +1161,37 @@ module "ecs_service_registry" {
           value = var.documentdb_namespace
         },
         {
+          name  = "RATE_LIMITING_ENABLED"
+          value = tostring(var.rate_limiting_enabled)
+        },
+        {
+          name  = "RATE_LIMIT_BACKEND"
+          value = var.rate_limit_backend
+        },
+        {
+          name  = "RATE_LIMIT_FAIL_OPEN"
+          value = tostring(var.rate_limit_fail_open)
+        },
+        {
+          name  = "RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS"
+          value = tostring(var.rate_limit_definitions_cache_ttl_seconds)
+        },
+        {
+          name  = "RATE_LIMIT_BACKEND_TIMEOUT_MS"
+          value = tostring(var.rate_limit_backend_timeout_ms)
+        },
+        # Floors are read by the REGISTRY (it validates group definitions at config
+        # time); the auth-server does not read them. Registry-only, matching the
+        # Helm chart (charts/registry only).
+        {
+          name  = "RATE_LIMIT_USER_FLOOR_PER_MIN"
+          value = tostring(var.rate_limit_user_floor_per_min)
+        },
+        {
+          name  = "RATE_LIMIT_AGENT_FLOOR_PER_MIN"
+          value = tostring(var.rate_limit_agent_floor_per_min)
+        },
+        {
           name  = "DOCUMENTDB_USE_TLS"
           value = tostring(var.documentdb_use_tls)
         },
@@ -1213,6 +1279,10 @@ module "ecs_service_registry" {
         {
           name  = "AUDIT_LOG_MONGODB_TTL_DAYS"
           value = tostring(var.audit_log_ttl_days)
+        },
+        {
+          name  = "AUDIT_LOG_REQUIRE_DURABLE"
+          value = tostring(var.audit_log_require_durable)
         },
         {
           name  = "APP_LOG_CENTRALIZED_ENABLED"
@@ -1308,6 +1378,12 @@ module "ecs_service_registry" {
           name  = "IDE_OAUTH_CALLBACK_PORT"
           value = tostring(var.ide_oauth_callback_port)
         },
+        # Optional Claude Code Connect snippet scope (local|project|user). Empty
+        # (default) omits --scope. Display-only; registry-read.
+        {
+          name  = "IDE_CONNECT_SCOPE"
+          value = var.ide_connect_scope
+        },
         {
           name  = "DEPLOYMENT_MODE"
           value = var.deployment_mode
@@ -1315,6 +1391,24 @@ module "ecs_service_registry" {
         {
           name  = "REGISTRY_MODE"
           value = var.registry_mode
+        },
+        # A2A reverse-proxy gateway (opt-in; default off). When true, each enabled
+        # A2A agent gets nginx location blocks proxying its card + JSON-RPC.
+        {
+          name  = "A2A_REVERSE_PROXY_ENABLED"
+          value = tostring(var.a2a_reverse_proxy_enabled)
+        },
+        # SSRF guard bypass for internal upstreams at private IPs. The health
+        # checker and proxy validate each MCP-server / A2A-agent upstream URL
+        # through the SSRF guard, which blocks private IPs by default. List exact
+        # hosts or CIDR ranges; the cloud metadata address is never permitted.
+        {
+          name  = "SSRF_ALLOWED_HOSTS"
+          value = var.ssrf_allowed_hosts
+        },
+        {
+          name  = "SSRF_ALLOWED_CIDRS"
+          value = var.ssrf_allowed_cidrs
         },
         # Internal/workshop deployment classification (telemetry labels; issue #1216)
         {
@@ -1620,6 +1714,24 @@ module "ecs_service_registry" {
             value = var.mongodb_connection_string
           }
         ] : [],
+        # Feature #1471: RUM snippet served as /rum.js (plain-text variant).
+        # Only emitted when var.registry_rum_snippet_b64 is non-empty and a
+        # Secrets Manager ARN was not provided. When empty, RUM is disabled.
+        var.registry_rum_snippet_b64 != "" && var.registry_rum_snippet_secret_arn == "" ? [
+          {
+            name  = "RUM_SNIPPET_B64"
+            value = var.registry_rum_snippet_b64
+          }
+        ] : [],
+        # Feature #1471: RUM host allowlist (plain text, not secret). Only
+        # emitted when non-empty; when set the snippet is rejected at startup
+        # (fail closed) if it references a host outside the list.
+        var.registry_rum_allowed_hosts != "" ? [
+          {
+            name  = "RUM_ALLOWED_HOSTS"
+            value = var.registry_rum_allowed_hosts
+          }
+        ] : [],
         # Extra environment variables from user (Issue #1000)
         var.registry_extra_env
       )
@@ -1657,6 +1769,15 @@ module "ecs_service_registry" {
           {
             name      = "MONGODB_CONNECTION_STRING"
             valueFrom = var.mongodb_connection_string_secret_arn
+          }
+        ] : [],
+        # Feature #1471: RUM snippet served as /rum.js (Secrets Manager variant).
+        # Preferred when the snippet contains a vendor token (avoids plain text
+        # in state). The operator supplies the ARN of their own secret.
+        var.registry_rum_snippet_secret_arn != "" ? [
+          {
+            name      = "RUM_SNIPPET_B64"
+            valueFrom = var.registry_rum_snippet_secret_arn
           }
         ] : [],
         var.storage_backend == "documentdb" ? [

@@ -374,6 +374,16 @@ session_cookie_domain = ""     # Empty for CloudFront mode
 # browser origin must call the API. Empty = same-origin only (no wildcard).
 # cors_allowed_origins = "https://app.example.com,https://admin.example.com"
 
+# WAFv2 Web ACLs on the ALBs (AWS managed rule sets + WAF-level rate rules) as
+# optional defense-in-depth. OFF by default as a cost decision (WAFv2 carries a
+# per-Web-ACL and per-request cost and needs wafv2:* IAM permissions). It is NOT
+# required for per-client-IP rate limiting: the container nginx already rate-limits
+# the auth-validation fan-out per real client IP out of the box — trusted_real_ip_cidrs
+# defaults to this stack's VPC CIDR, so nginx's realip module rewrites the rate-limit
+# key from the ALB's IP to the real client. Turn WAF on for an extra managed-rules
+# layer on internet-facing deployments.
+# enable_waf = true
+
 # Container images: NOTHING to set here for a standard deployment. Core services
 # default to pre-built PUBLIC ECR images (public.ecr.aws/p3v1o3c6/...), Keycloak to
 # quay.io/keycloak/keycloak, and Grafana to the stock public image. Only set the

@@ -214,7 +214,7 @@ _validate_terraform_outputs() {
         "keycloak_url"
         "mcp_gateway_efs_id"
     )
-    
+
     # Note: registry_url is only set in custom domain mode
     # cloudfront_mcp_gateway_url is only set in CloudFront mode
     # At least one of these should be available for a valid deployment
@@ -243,11 +243,11 @@ _validate_terraform_outputs() {
         export KEYCLOAK_ADMIN_URL=$(jq -r '.keycloak_url.value' "$OUTPUTS_FILE")
         export AUTH_SERVER_EXTERNAL_URL=$(jq -r '.mcp_gateway_auth_url.value' "$OUTPUTS_FILE")
         export ECS_CLUSTER_NAME=$(jq -r '.ecs_cluster_name.value' "$OUTPUTS_FILE")
-        
+
         # REGISTRY_URL: prefer custom domain, fallback to CloudFront URL
         local registry_url=$(jq -r '.registry_url.value // empty' "$OUTPUTS_FILE")
         local cloudfront_url=$(jq -r '.cloudfront_mcp_gateway_url.value // empty' "$OUTPUTS_FILE")
-        
+
         if [[ -n "$registry_url" && "$registry_url" != "null" ]]; then
             export REGISTRY_URL="$registry_url"
         elif [[ -n "$cloudfront_url" && "$cloudfront_url" != "null" ]]; then
@@ -257,7 +257,7 @@ _validate_terraform_outputs() {
             export REGISTRY_URL=$(jq -r '.mcp_gateway_url.value' "$OUTPUTS_FILE")
             log_warning "Using ALB URL as REGISTRY_URL (no HTTPS configured)"
         fi
-        
+
         # Also export CloudFront URL if available (for init-keycloak.sh)
         if [[ -n "$cloudfront_url" && "$cloudfront_url" != "null" ]]; then
             export CLOUDFRONT_REGISTRY_URL="$cloudfront_url"
@@ -454,7 +454,7 @@ _initialize_keycloak() {
     # Try to load INITIAL_ADMIN_PASSWORD from Secrets Manager if not set
     if [[ -z "${INITIAL_ADMIN_PASSWORD:-}" ]]; then
         log_info "INITIAL_ADMIN_PASSWORD not set, attempting to load from Secrets Manager..."
-        
+
         # Find the admin password secret by name pattern (mcp-gateway-v2-admin-password-*)
         local secret_name
         secret_name=$(aws secretsmanager list-secrets \
@@ -462,14 +462,14 @@ _initialize_keycloak() {
             --filter Key=name,Values=mcp-gateway-v2-admin-password \
             --query 'SecretList[0].Name' \
             --output text 2>/dev/null)
-        
+
         if [[ -n "$secret_name" && "$secret_name" != "None" ]]; then
             INITIAL_ADMIN_PASSWORD=$(aws secretsmanager get-secret-value \
                 --secret-id "$secret_name" \
                 --region "$AWS_REGION" \
                 --query 'SecretString' \
                 --output text 2>/dev/null)
-            
+
             if [[ -n "$INITIAL_ADMIN_PASSWORD" ]]; then
                 export INITIAL_ADMIN_PASSWORD
                 log_success "Loaded INITIAL_ADMIN_PASSWORD from Secrets Manager ($secret_name)"

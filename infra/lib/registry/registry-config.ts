@@ -136,6 +136,13 @@ export interface FederationConfig {
   encryptionKey: string;
   /** Enable AWS Agent Registry federation */
   awsRegistryFederationEnabled: boolean;
+  /**
+   * IAM role ARNs the registry task may assume for cross-account AWS Agent
+   * Registry federation. Empty (default) disables cross-account access: the
+   * sts:AssumeRole grant is omitted entirely and only same-account federation
+   * works. Fail-closed: an unset list grants no cross-account trust.
+   */
+  awsRegistryFederationAssumeRoleArns: string[];
 }
 
 export interface AuditConfig {
@@ -474,6 +481,7 @@ export const DEFAULT_REGISTRY_CONFIG: RegistryConfig = {
     staticToken: '',
     encryptionKey: '',
     awsRegistryFederationEnabled: false,
+    awsRegistryFederationAssumeRoleArns: [],
   },
 
   audit: {
@@ -704,6 +712,18 @@ export function loadRegistryConfig(configPath: string): RegistryConfig {
         'Set them as environment variables before running cdk synth/deploy.',
       );
     }
+  }
+
+  // Keycloak sslRequired=external blocks admin ops over plain HTTP, so a
+  // public HTTPS front is required. Fail fast at synth if neither option is
+  // enabled — otherwise KeycloakService throws late during construct build.
+  if (!config.enableRoute53Dns && !config.cloudfront.enabled) {
+    throw new Error(
+      'Keycloak needs a public HTTPS front: set enableRoute53Dns=true (custom ' +
+      'domain + ACM) or cloudfront.enabled=true (CloudFront default cert) in config.yaml. ' +
+      'Plain HTTP ALB is not supported because Keycloak sslRequired=external ' +
+      'blocks admin/OIDC endpoints over unencrypted connections.',
+    );
   }
 
   return config;

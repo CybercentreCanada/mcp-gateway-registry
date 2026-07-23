@@ -150,3 +150,41 @@ class TestConfigureEgressUrlValidation:
         )
         assert resp.status_code == 200, resp.text
         assert client._svc.updated_with["egress_oauth"]["provider"] == "github"
+
+    def test_custom_resource_accepted_persisted_and_exposed(self, make_client):
+        # RFC 8707 resource indicator: a valid absolute https URI is stored and
+        # echoed back in the non-secret config view.
+        res = "https://mcp.atlassian.com/v1/mcp/authv2"
+        client = make_client()
+        resp = client.post("/servers/gh/egress-auth", json=_body(custom_resource=res))
+        assert resp.status_code == 200, resp.text
+        assert client._svc.updated_with["egress_oauth"]["custom_resource"] == res
+        assert resp.json()["custom_resource"] == res
+
+    def test_custom_resource_http_scheme_rejected(self, make_client):
+        client = make_client()
+        resp = client.post(
+            "/servers/gh/egress-auth",
+            json=_body(custom_resource="http://mcp.atlassian.com/v1/mcp/authv2"),
+        )
+        assert resp.status_code == 400
+        assert "custom_resource" in resp.json()["detail"]
+        assert client._svc.updated_with is None
+
+    def test_custom_resource_with_fragment_rejected(self, make_client):
+        client = make_client()
+        resp = client.post(
+            "/servers/gh/egress-auth",
+            json=_body(custom_resource="https://mcp.atlassian.com/v1/mcp/authv2#frag"),
+        )
+        assert resp.status_code == 400
+        assert "custom_resource" in resp.json()["detail"]
+
+    def test_builtin_provider_ignores_custom_resource(self, make_client):
+        # custom_resource is only validated/used for the 'custom' provider.
+        client = make_client()
+        resp = client.post(
+            "/servers/gh/egress-auth",
+            json=_body(egress_provider="github", custom_resource="http://bad#frag"),
+        )
+        assert resp.status_code == 200, resp.text

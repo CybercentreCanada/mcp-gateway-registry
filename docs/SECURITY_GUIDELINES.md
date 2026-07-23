@@ -36,6 +36,27 @@ sanitizer that isn't called) is equivalent to no check.
   right error. Normalize (strip) and reuse the same value everywhere so all
   services derive an identical key (avoids cross-replica signature mismatches).
   Wire the validator into EVERY signing entrypoint — grep for all of them.
+- **Every credential that grants privilege must go through the ONE canonical
+  signing-secret validator at its startup entrypoint — the legacy/backward-compat
+  path is where this check gets skipped.** When a newer keyed scheme enforces a
+  minimum length/weak-value bar but an older single-value credential is read raw
+  (`os.environ.get("TOKEN", "")`) and then promoted to a privileged (often admin,
+  unrestricted-scope) entry, that legacy credential is asymmetrically weaker than
+  both the keyed entries and the app signing secret. Run it through the SAME
+  `validate_signing_secret` helper (missing AND weak: unset/empty/whitespace,
+  `< 32` stripped chars, known-weak literals, weak-check before length) at the
+  point it is read/built, and fail closed. Presence may be optional (unset simply
+  means the legacy entry is not created — that is the safe outcome), but a value
+  that IS present must be strong; never silently accept a weak privilege-granting
+  credential just because it predates the current key scheme. This applies to ALL
+  sibling credential paths, not only the reported one — a federation/static bypass
+  token, each per-key entry in a keyed scheme, and any other value that bypasses
+  IdP validation must each run through the SAME validator. A `min_length`-only
+  Pydantic constraint or a `logging.warning(...)` on a short value is NOT fail
+  closed: a weak privilege-granting token that is merely warned about is still
+  armed. Reject it — raise where a raise is safe, or (for an optional feature that
+  degrades gracefully) disable the feature so the weak token is never armed —
+  never merely warn.
 - **Match placeholder markers as substrings ANYWHERE, not just as a prefix.** An
   operator rarely leaves the `.env.example` value verbatim — they prepend a
   prefix or edit the middle (`internal-CHANGE-ME-...`, `prod-generate-with-openssl-...`).
@@ -103,10 +124,36 @@ sanitizer that isn't called) is equivalent to no check.
   loopback, link-local, reserved, multicast, unspecified, and cloud-metadata
   (`169.254.169.254` — never allowlistable); unwrap IPv4-mapped IPv6; require
   http/https. Fail closed. Do not create per-call-site `_is_safe_url` variants.
+- **Don't rely on the language runtime's `is_private` to cover reserved ranges —
+  block them explicitly and pin the range in a test.** Ranges like CGNAT / shared
+  address space (`100.64.0.0/10`, RFC 6598) are only classified private on newer
+  runtimes; depending on interpreter semantics means a downgrade or a stdlib
+  change silently re-opens an SSRF pivot. Add the range to the guard's explicit
+  block list (treated like the other private ranges — operator-CIDR-allowlistable,
+  never for metadata) and add a unit test asserting both a sample IP is blocked
+  AND the exact network is pinned, so a semantics change fails loudly instead of
+  quietly. Apply to every guard implementation, including any legacy one still in
+  use.
 - **Validate at registration (structural) AND pin the resolved IP at fetch
   time.** A pre-fetch check followed by a separate client call re-resolves DNS =
   TOCTOU / DNS-rebinding. Pin the validated public IP into the transport
   (preserve Host header + TLS SNI) and re-validate on every redirect hop.
+- **Re-validate the destination through the SSRF guard at the moment a stored
+  credential is attached.** Registration-time validation is not enough when the
+  destination is mutable — a `proxy_pass_url`/endpoint changed after registration
+  (or a registration-time bypass) could point a stored credential at a
+  private/metadata address. Every site that decrypts a stored credential and
+  hands it to an outbound request (including an external scanner or SDK client
+  that opens its own connection, which the pinned guarded transport cannot
+  protect) must re-run `validate_url` with the proxy profile first and fail
+  closed: no valid destination, no credential. Grep every `decrypt_credential` /
+  credential-attach site, not just the reported one; a single guarded helper
+  they all call is ideal. Make the header/credential builder SELF-GUARD on the
+  destination it is handed rather than trusting each caller to have validated
+  first — a builder that decrypts a secret only because the caller "should have"
+  checked leaks that secret the first time a caller forgets. Pass the destination
+  into the builder and have it withhold the decrypted secret (return only
+  non-secret headers) when the destination is missing or fails validation.
 - **Never build or attach credentials for a target that fails validation.**
   Validate the URL before decrypting/attaching stored credentials, so a
   malicious registered URL cannot exfiltrate them.
@@ -145,6 +192,20 @@ sanitizer that isn't called) is equivalent to no check.
   via an explicit CA bundle env var (fail closed if the configured bundle is
   missing); any insecure escape hatch must be explicit opt-in, logged, default
   off.
+- **Every alternate/override URL field is a bypass — validate the whole family,
+  not just the primary field.** A server record often carries a main backend URL
+  (`proxy_pass_url`) plus optional override endpoints (`mcp_endpoint`,
+  `sse_endpoint`) that are fetched and interpolated into config exactly like the
+  main URL. If only the primary field goes through the canonical guard, the
+  override field is an unguarded SSRF / config-injection sink. At EVERY write path
+  (register, edit, internal-register, version-add), run each present override
+  field through the SAME `validate_proxy_pass_url()` as the primary; empty/unset
+  is fine, present-but-invalid is rejected. Then RE-validate the resolved URL at
+  fetch time (`resolve=True`) on each fetch path (health check, tool discovery,
+  and especially before handing the URL to an external subprocess the pinned
+  guarded client cannot protect — e.g. a scanner CLI) so a value that was rebound
+  after registration, or that reached the connect through the override field, is
+  still blocked before any credential is attached or process spawned.
 
 ## Injection (nginx config generation, NoSQL/regex)
 
@@ -157,6 +218,20 @@ sanitizer that isn't called) is equivalent to no check.
   never fall back to a raw user string when tokenization yields nothing. Escape
   at the SINK (the repository method that builds the query), not at the caller —
   a caller-escape contract silently breaks the moment a new caller forgets it.
+- **A user-supplied value interpolated into an outbound URL PATH segment must be
+  validated against a strict identifier allowlist — mirror the resource's own
+  canonical name rule (e.g. `^[a-z0-9]+(-[a-z0-9]+)*\Z`) rather than a looser
+  superset — BEFORE building the URL.** Otherwise a value like
+  `../../api/management/iam/users` normalizes (via the HTTP client) to a
+  DIFFERENT endpoint after the request is issued, and if the client carries a
+  privileged credential (M2M / API token) the traversed request inherits that
+  privilege. A non-empty `.strip()` check is not sufficient. Anchor the pattern
+  with `\Z`, not `$`: Python's `$` also matches just before a trailing newline,
+  so `^...+$` would accept `"validname\n"`. Validate at the interpolation site —
+  do not trust the downstream service to reject the traversed path. Fail closed:
+  return the handler's error shape, do not raise. Query parameters are lower risk
+  (they don't traverse the path), but still reject absolute (`/`-leading) and
+  `..`-containing values as defense-in-depth.
 
 ## Authorization & ownership
 
@@ -167,15 +242,56 @@ sanitizer that isn't called) is equivalent to no check.
 - **Enforce ownership server-side before EVERY mutation — across the whole
   endpoint family, not just the reported one.** If register-overwrite needs an
   ownership check, so do the version, rename, auth-credential, and delete
-  siblings. Add CSRF (or non-cookie auth) to all state-changing endpoints.
+  siblings. Add CSRF (or non-cookie auth) to all state-changing endpoints. The
+  member that gets forgotten is usually delete/remove — a family whose update
+  handlers require permission-AND-ownership but whose delete handler checks only
+  permission lets a user with a delete grant destroy someone else's resource.
+  Combine permission and ownership (defense in depth) uniformly, and fail closed
+  when ownership cannot be established (a missing `registered_by` denies a
+  non-admin).
 - **`getattr(a_dict, "key", None)` always returns None** (dicts don't expose keys
   as attributes) — the guard becomes dead code that never denies. Use
   `dict.get("key")`; watch for dict-vs-Pydantic-model confusion.
 - **No substring matching for privilege decisions** (`"unrestricted" in scope`
   accepted access scopes as admin). Match exact, centralized constants.
+- **Reserve the wildcard/sentinel names at every write that turns user input
+  into an authorization key.** If a resolver treats a magic value (`all`, `*`)
+  as a cross-cutting wildcard, then any name derived from user input — a server
+  registration `path` normalized (`lstrip("/")`) into a scope `server` value —
+  that equals that sentinel silently escalates to "all resources". Reject the
+  reserved names at the registration/validation chokepoint (fail closed, exact
+  set — do not over-strip so adjacent names like `all-tools` stay valid) AND at
+  the deepest write sink as defense-in-depth. Enumerate ALL write sinks: a
+  direct-write path that skips the canonical `add_*` helper (e.g. a bulk
+  `import_group` that persists the rule list verbatim via `replace_one`) bypasses
+  the sink guard and needs its own check. Make the scan flatten/normalize/coerce
+  IDENTICALLY to the resolver's read path (share the flatten helper; `str()`-
+  coerce exactly as the resolver does) so the guard can never be blind to a shape
+  or type the resolver would still honor as a wildcard. Keep the read-side
+  sentinel set and the write-side reject set cross-referenced so they stay in
+  lockstep. Existing rows written before the fix are a separate data-cleanup
+  concern (audit `{"server": {"$in": ["all","*"]}}`), not covered by a code guard.
+- **Canonicalize a path before any deny-list / classifier decision.** A path
+  that drives an authorization decision (a resource-token deny-list, a route
+  classifier) arrives from an attacker-controlled raw request URI, typically
+  percent-encoded (nginx forwards `$request_uri`). Percent-decode ONCE and
+  resolve `.`/`..` segments to a canonical absolute path BEFORE matching — an
+  encoded traversal like `/api/agents/%2e%2e/tokens/generate` must classify
+  identically to its canonical `/api/tokens/generate`, or it bypasses the
+  byte-exact deny-list. Decode exactly once (a doubly-encoded `%252e` stays
+  literal and fails closed), clamp traversal at root, and put the normalization
+  inside the single shared entrypoint so every consumer benefits.
 - **Attach a shared/global credential only on explicit opt-in.** Make the
   privileged code path default to not attaching it and gate its use behind an
   admin check.
+- **A static, long-lived, non-expiring token must be least-privilege.** Never
+  bundle a management/write scope onto a token whose purpose is read/data-sync.
+  A token meant for federation (or any) data sync should grant only the read
+  scope (`.../read`); create/update/delete of peers or config is a management
+  operation that must stay behind a real admin credential, not the shared static
+  token. The blast radius of a leaked never-expiring token is exactly the union
+  of the scopes it carries, so keep that union minimal and audit any grant that
+  couples a read scope with a management scope on the same static token.
 - **Never forward the caller's inbound credential to a proxied/untrusted
   destination.** When the gateway proxies to a registrant-controlled upstream (or
   an agent calls a discovered remote agent), strip `Authorization`/`Cookie` from
@@ -214,6 +330,27 @@ sanitizer that isn't called) is equivalent to no check.
   path silently confers privilege. Drive the mapping from config, fail closed to
   no groups when unset/malformed, and grep every provider's sync sibling (okta,
   auth0, …) for the same pattern.
+- **Never mint privilege (groups/scopes/roles) from an unverified request
+  body.** A token-mint endpoint that stamps the groups/scopes carried in its
+  POST body into the issued token trusts the caller to be honest about identity.
+  Reconcile against an authoritative source — resolve the session id from the
+  session store and mint only the intersection of requested and session-held
+  groups, rejecting any privileged group the session does not hold. Where no
+  session-backed source exists (pure service-to-service), keep the subset check
+  but make the trust boundary explicit and fail closed on a missing/malformed
+  context (a `groups: "admin"` string must be rejected, not iterated
+  character-by-character). Note the residual: a caller holding the internal
+  signing key can bypass the endpoint entirely, so this is defense in depth
+  pending asymmetric signing.
+- **Group enrichment from a mutable store must be strictly gated and audited.**
+  When empty-group tokens are enriched from a DB collection, gate it to exactly
+  the token class it is designed for (machine/M2M) — a check of "has some
+  client_id" is not "is an M2M client"; a self-signed user token can carry a
+  client_id and would otherwise be escalated from the M2M table. Gate by an
+  explicit token-type marker AND the sentinel value, fail closed if either is
+  missing, honor the record's disabled flag in the query AND on the returned doc,
+  and emit a WARNING-level audit line whenever enrichment adds a privileged
+  group so a write to the collection is attributable.
 - **Protect the admin population from lockout and self-harm.** Admin user-mgmt
   must refuse self-deletion, refuse removing/demoting the LAST admin (count
   remaining admins first, fail closed if the population can't be enumerated), and
@@ -229,6 +366,19 @@ sanitizer that isn't called) is equivalent to no check.
   SEPARATE explicit acknowledgement (e.g. `confirm_sensitive_export`) in addition
   to `include_sensitive`, reject (fail closed) when the acknowledgement is absent,
   and redact the sensitive values otherwise. Audit every sensitive export.
+- **Don't disclose deployment topology / feature surface to anonymous callers —
+  it's reconnaissance.** A config/topology read (deployment mode, registry mode,
+  active auth provider, enabled feature flags, proxy-update state) tells an
+  attacker how the system is wired before they authenticate. Gate it behind an
+  authenticated session and fail closed (401) for anonymous callers. Serve the
+  genuinely pre-login needs (app title, available OAuth providers, auth-server
+  URL) from dedicated MINIMAL anonymous endpoints, not a broad config dump — so
+  gating the config endpoint doesn't break the login page. Then sweep the OTHER
+  anonymous endpoints for the same fields: a load-balancer `/health` probe, a
+  `/status`, or an OpenAPI/schema dump commonly re-leaks the exact topology you
+  just gated — trim them to a liveness signal (probes rely on the HTTP status,
+  not the body). RFC-mandated anonymous surfaces (OAuth `.well-known` discovery)
+  are the deliberate exception.
 - **Honor the disabled/inactive flag everywhere access is derived, on EVERY
   request.** A user/group/client marked disabled must contribute no
   groups/scopes and be denied — enforce it at the group→scope enrichment / session
@@ -236,6 +386,15 @@ sanitizer that isn't called) is equivalent to no check.
   it to the DB query filter AND re-check the returned doc (defense in depth).
   Fail closed if the flag can't be read. Grep every group-source sibling (user
   groups, M2M-client groups) — the sync path may actively write `enabled: false`.
+  **Treat only an explicit "active" value as active; anything else is disabled.**
+  A schemaless store (MongoDB/DocumentDB) does not enforce field types, so an
+  `enabled` field can hold `False`, `null`, `0`, `""`, or the string `"false"`.
+  A truthiness/identity re-check like `enabled is not False` passes every one of
+  those non-`False` values (`0 is not False` is `True`) — the wrong direction.
+  The re-check must be `enabled is True` (with a missing field treated as active
+  only for documented backward-compat), and the query filter (`{"$ne": False}`)
+  is a pre-filter, not the authority. Prefer widening the deny set: anything that
+  is not provably active is disabled.
 - **Trust forwarded request metadata only from the proxy hop, never the client.**
   For audit client-IP, take `X-Real-IP` or the rightmost/trusted `X-Forwarded-For`
   entry (configurable proxy-hop count), and fall back to the direct peer when the
@@ -277,7 +436,17 @@ sanitizer that isn't called) is equivalent to no check.
   admin-config reads. Use one shared redaction-decision helper + field-stripper;
   gate authz-model reads behind the same admin check as their writes; for an
   unauthenticated public surface fail closed to the derived URL and never emit a
-  stored internal override.
+  stored internal override. **This applies to per-caller LIST PRUNING, not just
+  field redaction:** a nested collection whose visibility is scoped per user
+  (e.g. a server's `tool_list`, filtered by the caller's tool allowlist) must be
+  pruned by the SAME shared filter on every endpoint that returns it — the
+  listing, the single-item GET, the detail/`server.json`/catalog/search
+  projections. The single-item GET is the one most often missed after the list
+  endpoint is fixed (this was the `get_server` / `get_server_details` tool-name
+  leak that survived the catalog fix). Keep any derived count (`num_tools`)
+  consistent with the pruned list so the count can't become an enumeration
+  oracle. Fail closed (empty) on a missing/empty allowlist; admin/wildcard pass
+  through.
 - **Redact the DERIVED field, not just the raw source field.** Nulling
   `proxy_pass_url`/`mcp_endpoint` on a response is not enough if a *computed*
   field (a "connect URL", `endpoint_url`, `transport.url`) is built from that
@@ -382,7 +551,16 @@ sanitizer that isn't called) is equivalent to no check.
   request — that's a self-DoS). Internal-service actions must be attributable to a
   specific actor (per-instance/per-purpose `sub`), not a shared service identity.
   Tamper-evidence (append-only / HMAC chain) is best served by an immutable
-  external store — infra, deferrable.
+  external store — infra, deferrable. **Run the durable-sink guard in EVERY
+  process that initializes an audit logger, not just the main app's startup.** A
+  multi-process deployment (registry + auth-server) can have a second process
+  that builds its own audit sink lazily (e.g. the auth-server token-mint logger)
+  — if that path swallows the sink-init exception and degrades to a
+  drop-everything logger, the most forensically critical records (token issuance)
+  vanish silently while the main process looks healthy. Call the same
+  fail-closed guard where each logger is constructed, re-raise past any generic
+  `except`, and prime it at that process's startup so it fails to boot rather
+  than lazily on first use.
 - **Client IP for audit/attribution: derive from a non-spoofable source, and
   scope the ASGI proxy-header trust to the real peer.** The left-most
   `X-Forwarded-For` entry is fully client-controlled — never use it. Resolve via

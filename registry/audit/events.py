@@ -9,7 +9,7 @@ later without changing the call sites.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -35,4 +35,4 @@ class ToolFilterAuditEvent(BaseModel):
     kept_count: int = Field(..., ge=0)
     pruned_tool_names: list[str]
     user_scopes: list[str]
-    ts: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    ts: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))

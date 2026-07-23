@@ -124,6 +124,14 @@ export class RegistryAuthStack extends cdk.Stack {
       description: 'Keycloak ALB DNS name',
     });
 
+    // Preserve the legacy auto-generated cross-stack export so removing the
+    // last consumer (Registry-Service now uses CloudFront) does not leave
+    // orphan CFN references. Safe to delete once no downstream stack in any
+    // deployed environment imports this export.
+    this.exportValue(this.keycloakAlbDns, {
+      name: 'Registry-Auth:ExportsOutputFnGetAttKeycloakServiceAlb59272156DNSName688E02BC',
+    });
+
     new cdk.CfnOutput(this, 'KeycloakAdminConsole', {
       value: `${this.keycloakUrl}/admin`,
       description: 'Keycloak admin console URL',

@@ -142,35 +142,77 @@ resource "aws_iam_policy" "ecs_exec_task_execution" {
 }
 
 # IAM policy for Amazon Bedrock AgentCore access (registry federation)
+#
+# Least-privilege: the registry federation client is READ-ONLY against the
+# bedrock-agentcore-control plane -- it only lists registries, lists records,
+# and fetches record details (see registry/services/federation/agentcore_client.py).
+# It never creates/updates/deletes AgentCore resources, so the action set is
+# restricted to those three read operations.
+#
+# The read grant is split into two statements because the actions differ in
+# their IAM resource-level support (per the AWS Service Authorization Reference):
+#   - ListRegistries has NO resource type, so IAM only accepts it on
+#     Resource = "*". Scoping it to a registry ARN silently makes it a no-op
+#     (the action never matches) and boto3 gets AccessDenied at runtime.
+#   - ListRegistryRecords (resource type "registry") and GetRegistryRecord
+#     (resource type "registry-record") DO support resource-level permissions,
+#     so they are scoped to registries in the deploying account. Region is
+#     wildcarded so per-registry region overrides keep working; the record ARN
+#     (registry/<id>/record/<id>) is a child of the registry/* prefix.
+#
+# Cross-account federation uses sts:AssumeRole into caller-supplied role ARNs.
+# That grant is only emitted when specific role ARNs are configured
+# (var.aws_registry_federation_assume_role_arns); an empty list -> no
+# sts:AssumeRole statement at all (fail closed, no wildcard cross-account trust).
 resource "aws_iam_policy" "bedrock_agentcore_access" {
   count       = var.aws_registry_federation_enabled ? 1 : 0
   name_prefix = "${local.name_prefix}-bedrock-agentcore-"
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "BedrockAgentCoreFullAccess"
-        Effect = "Allow"
-        Action = [
-          "bedrock-agentcore:*"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid    = "StsAssumeRoleForCrossAccount"
-        Effect = "Allow"
-        Action = [
-          "sts:AssumeRole"
-        ]
-        Resource = "*"
-        Condition = {
-          StringLike = {
-            "iam:ResourceTag/Purpose" = "agentcore-federation"
+    Statement = concat(
+      [
+        {
+          Sid    = "BedrockAgentCoreListRegistries"
+          Effect = "Allow"
+          Action = [
+            "bedrock-agentcore:ListRegistries"
+          ]
+          # ListRegistries has no IAM resource type; it must be granted on "*".
+          # This is not a privilege-creep wildcard -- it is the only Resource
+          # value AWS accepts for this single read/list action.
+          Resource = "*"
+        },
+        {
+          Sid    = "BedrockAgentCoreReadRecords"
+          Effect = "Allow"
+          Action = [
+            "bedrock-agentcore:ListRegistryRecords",
+            "bedrock-agentcore:GetRegistryRecord"
+          ]
+          # Scope to registries (and their child records) in the deploying
+          # account. registry/* also covers registry/<id>/record/<id>.
+          Resource = "arn:${data.aws_partition.current.partition}:bedrock-agentcore:*:${data.aws_caller_identity.current.account_id}:registry/*"
+        }
+      ],
+      length(var.aws_registry_federation_assume_role_arns) > 0 ? [
+        {
+          Sid    = "StsAssumeRoleForCrossAccount"
+          Effect = "Allow"
+          Action = [
+            "sts:AssumeRole"
+          ]
+          # Only the explicitly configured cross-account federation roles.
+          Resource = var.aws_registry_federation_assume_role_arns
+          # Defense-in-depth: the target role must also carry the federation tag.
+          Condition = {
+            StringLike = {
+              "iam:ResourceTag/Purpose" = "agentcore-federation"
+            }
           }
         }
-      }
-    ]
+      ] : []
+    )
   })
 
   tags = local.common_tags

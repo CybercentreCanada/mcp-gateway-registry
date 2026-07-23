@@ -7,6 +7,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { fetchAllPages } from '../utils/fetchAllPages';
 
 
 export interface ServerInfo {
@@ -20,16 +21,6 @@ export interface ToolInfo {
   name: string;
   description: string;
   serverPath: string;
-}
-
-interface ServerListResponse {
-  servers: Array<{
-    path: string;
-    server_name?: string;
-    name?: string;
-    description?: string;
-    [key: string]: unknown;
-  }>;
 }
 
 interface VirtualServerListResponse {
@@ -83,14 +74,22 @@ export function useServerList(): UseServerListReturn {
     setError(null);
 
     try {
-      // Fetch both regular servers and virtual servers in parallel
-      const [serversResponse, virtualServersResponse] = await Promise.all([
-        axios.get<ServerListResponse>('/api/servers?limit=500'),
+      // Issue #880: page through /api/servers (not a single hard-capped page).
+      const [rawServers, virtualServersResponse] = await Promise.all([
+        fetchAllPages<{
+          path: string;
+          server_name?: string;
+          name?: string;
+          description?: string;
+        }>({
+          url: '/api/servers',
+          itemsKey: 'servers',
+        }),
         axios.get<VirtualServerListResponse>('/api/virtual-servers'),
       ]);
 
       // Map regular MCP servers
-      const mcpServers: ServerInfo[] = (serversResponse.data.servers || []).map((s) => ({
+      const mcpServers: ServerInfo[] = rawServers.map((s) => ({
         path: s.path,
         name: s.server_name || s.name || s.path,
         description: s.description || '',

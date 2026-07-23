@@ -21,6 +21,17 @@ _GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 
+# Last-line-of-defense reject set for server-scope writes. A server_path that
+# normalizes to one of these collides with the cross-server wildcard sentinel
+# and would grant access to every server. The registration guard
+# registry.utils.validate_server_path already rejects these paths; this mirror
+# ensures a caller that bypasses that guard still cannot inject a wildcard row.
+#
+# MUST stay in sync with registry.utils.url_guard._RESERVED_SERVER_PATH_NAMES
+# and registry.auth.access_resolver._WILDCARD_VALUES. Mirrored locally rather
+# than imported to keep this repository layer independent of the util layer.
+_RESERVED_SERVER_PATH_NAMES: frozenset[str] = frozenset({"all", "*"})
+
 
 def _looks_like_guid(
     value: str,
@@ -106,13 +117,17 @@ def _flatten_server_access(
 ) -> list[dict[str, Any]]:
     """Flatten a scope document's ``server_access`` into a flat rule list.
 
-    Handles two on-disk formats:
-    1. New format: ``{"scope_name": "...", "access_rules": [...]}``
-    2. Old/direct format: ``{"server": "...", "methods": [...], "tools": [...]}``
+    Handles three on-disk formats:
+    1. Grouped format: ``{"scope_name": "...", "access_rules": [...]}`` (the inner
+       rules are spliced in as-is; they may be server or agent rules).
+    2. Direct server rule: ``{"server": "...", "methods": [...], "tools": [...]}``.
+    3. Direct agent rule: ``{"agent": "...", "actions": [...]}`` -- the per-agent
+       shape mirrors the server rule (``agent`` is the identifier, ``actions`` its
+       siblings), consumed by ``validate_a2a_agent_access``.
 
-    Entries that are neither (e.g. agent-permission blocks) are skipped.
-    Shared by ``get_server_scopes`` and ``get_server_scopes_bulk`` so the
-    single and batch paths produce byte-identical rule lists.
+    An entry that matches none of these is skipped. Shared by
+    ``get_server_scopes`` and ``get_server_scopes_bulk`` so the single and batch
+    paths produce byte-identical rule lists.
     """
     all_rules: list[dict[str, Any]] = []
     for scope_entry in server_access:
@@ -120,7 +135,44 @@ def _flatten_server_access(
             all_rules.extend(scope_entry.get("access_rules", []))
         elif "server" in scope_entry:
             all_rules.append(scope_entry)
+        elif "agent" in scope_entry:
+            all_rules.append(scope_entry)
     return all_rules
+
+
+def _server_access_has_reserved_wildcard(
+    server_access: list[dict[str, Any]] | None,
+) -> bool:
+    """Return True if any rule's ``server`` value is a reserved wildcard name.
+
+    ``import_group`` writes ``server_access`` straight to the collection with
+    ``replace_one`` and never routes through :meth:`add_server_scope`, so its
+    sink guard does not apply. This scans the imported rules (in both the
+    grouped ``access_rules`` shape and the direct ``server`` rule shape) so a
+    group import cannot inject a ``server: "all"`` / ``server: "*"`` rule that
+    the resolver would promote to a cross-server wildcard. The compare
+    normalizes the same way the resolver's write path does (``lstrip("/")`` +
+    trailing-slash strip + case-fold).
+
+    Args:
+        server_access: The ``server_access`` list from a group import.
+
+    Returns:
+        True if any server rule collides with a reserved wildcard name.
+    """
+    for rule in _flatten_server_access(server_access or []):
+        if not isinstance(rule, dict):
+            continue
+        server_name = rule.get("server")
+        if not server_name:
+            continue
+        # Coerce with str() exactly as the resolver does
+        # (access_resolver.py: `str(server_name) in _WILDCARD_VALUES`) so the
+        # scan cannot be blind to a non-string value the resolver would still
+        # promote to a wildcard.
+        if str(server_name).strip("/").lower() in _RESERVED_SERVER_PATH_NAMES:
+            return True
+    return False
 
 
 def _backfill_is_idp_managed(
@@ -416,6 +468,20 @@ class DocumentDBScopeRepository(ScopeRepositoryBase):
         try:
             collection = await self._get_collection()
             server_name = server_path.lstrip("/")
+
+            # Last line of defense against the reserved-wildcard escalation:
+            # refuse to write a scope row whose server name collides with the
+            # cross-server wildcard sentinel, even if a caller bypassed
+            # validate_server_path. Fail closed (return False + log, per this
+            # method's error convention).
+            if server_name.rstrip("/").lower() in _RESERVED_SERVER_PATH_NAMES:
+                logger.error(
+                    "Refusing to add server scope for reserved wildcard name "
+                    "'%s' (from path '%s'): would grant cross-server access",
+                    server_name,
+                    server_path,
+                )
+                return False
 
             server_entry = {"server": server_name, "methods": methods, "tools": tools}
 
@@ -886,6 +952,20 @@ class DocumentDBScopeRepository(ScopeRepositoryBase):
                 logger.error(
                     f"Refusing to import privileged group '{group_name}' "
                     f"without allow_privileged=True (mappings={group_mappings})"
+                )
+                return False
+
+            # Reserved-wildcard sink guard for the import path. Unlike
+            # add_server_scope, import_group writes server_access directly, so
+            # it needs its own check. A server rule named "all"/"*" is never
+            # legitimate (it would grant cross-server access via the resolver's
+            # wildcard promotion), so this is refused unconditionally -- an
+            # admin cannot opt into it either. Fail closed (return False + log).
+            if _server_access_has_reserved_wildcard(server_access):
+                logger.error(
+                    f"Refusing to import group '{group_name}': server_access "
+                    "contains a reserved wildcard server name ('all'/'*') that "
+                    "would grant cross-server access"
                 )
                 return False
 

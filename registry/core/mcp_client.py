@@ -9,6 +9,7 @@ import asyncio
 import logging
 import re
 from typing import (
+    Any,
     TypedDict,
 )
 
@@ -105,12 +106,22 @@ def normalize_sse_endpoint_url(endpoint_url: str) -> str:
 import httpx
 
 
-def _build_headers_for_server(server_info: dict = None) -> dict[str, str]:
+def _build_headers_for_server(
+    server_info: dict = None,
+    destination_url: str | None = None,
+) -> dict[str, str]:
     """
     Build HTTP headers for server requests by merging server-specific headers.
 
     Args:
         server_info: Server configuration dictionary
+        destination_url: The URL the resulting headers will be sent to. When any
+            encrypted secret (custom headers or an auth credential) would be
+            attached, this destination is re-validated through the shared SSRF
+            guard before decryption. If it is missing or fails validation, the
+            decrypted secrets are NOT attached (fail closed) so a mutated /
+            unvalidated backend can never receive them. Non-secret headers
+            (Accept/Content-Type and plaintext server headers) are unaffected.
 
     Returns:
         Headers dictionary with server-specific headers
@@ -134,6 +145,28 @@ def _build_headers_for_server(server_info: dict = None) -> dict[str, str]:
                     logger.debug(
                         f"Added server headers to MCP client: {redact_headers(header_dict)}"
                     )
+
+        # Gate every decrypted secret on a fresh SSRF re-validation of the exact
+        # destination the headers will be sent to. Callers validate before
+        # connecting, but self-guarding here means a future caller that forgets
+        # cannot leak a decrypted credential to a private/metadata address. If we
+        # have a secret to attach but no validated destination, fail closed and
+        # attach no secret.
+        _has_secret = bool(
+            server_info.get("custom_headers_encrypted")
+            or (
+                server_info.get("auth_scheme", "none") != "none"
+                and server_info.get("auth_credential_encrypted")
+            )
+        )
+        _destination_safe = bool(destination_url) and _assert_mcp_url_fetchable(destination_url)
+        if _has_secret and not _destination_safe:
+            logger.warning(
+                "Not attaching decrypted headers/credential for '%s': destination "
+                "missing or failed SSRF re-validation.",
+                server_info.get("service_path", "unknown"),
+            )
+            return headers
 
         # Custom headers go first; auth_scheme below overwrites name collisions
         encrypted_custom = server_info.get("custom_headers_encrypted")
@@ -346,8 +379,9 @@ async def _get_tools_streamable_http(base_url: str, server_info: dict = None) ->
     if not _assert_mcp_url_fetchable(explicit_endpoint or base_url):
         return None
 
-    # Build headers for the server
-    headers = _build_headers_for_server(server_info)
+    # Build headers for the server (destination re-validated inside before any
+    # decrypted secret is attached).
+    headers = _build_headers_for_server(server_info, destination_url=explicit_endpoint or base_url)
 
     # If explicit endpoint is provided, use it directly (single attempt)
     if explicit_endpoint:
@@ -469,12 +503,17 @@ async def _get_tools_sse(base_url: str, server_info: dict = None) -> list[dict] 
     secure_prefix = "s" if sse_url.startswith("https://") else ""
     mcp_server_url = f"http{secure_prefix}://{sse_url[len(f'http{secure_prefix}://') :]}"
 
-    # Fail closed on SSRF BEFORE decrypting/building credential headers.
+    # Fail closed on SSRF BEFORE decrypting/building credential headers. This
+    # validates the ACTUAL connection target (mcp_server_url), whose host is
+    # taken verbatim from the explicit sse_endpoint when one is set, so an
+    # sse_endpoint pointing at a private/metadata/loopback address is rejected
+    # before any credential is built or attached.
     if not _assert_mcp_url_fetchable(mcp_server_url):
         return None
 
-    # Build headers for the server
-    headers = _build_headers_for_server(server_info)
+    # Build headers for the server (destination re-validated inside before any
+    # decrypted secret is attached).
+    headers = _build_headers_for_server(server_info, destination_url=mcp_server_url)
 
     try:
         # Monkey patch httpx to fix mount path issues (legacy SSE support)
@@ -487,7 +526,7 @@ async def _get_tools_sse(base_url: str, server_info: dict = None) -> list[dict] 
                 url = normalize_sse_endpoint_url_for_request(str(url))
             return await original_request(self, method, url, **kwargs)
 
-        httpx.AsyncClient.request = patched_request
+        httpx.AsyncClient.request = patched_request  # type: ignore[method-assign]  # legacy SSE monkeypatch
 
         try:
             async with sse_client(mcp_server_url, headers=headers) as (read, write):
@@ -497,7 +536,7 @@ async def _get_tools_sse(base_url: str, server_info: dict = None) -> list[dict] 
 
                     return _extract_tool_details(tools_response)
         finally:
-            httpx.AsyncClient.request = original_request
+            httpx.AsyncClient.request = original_request  # type: ignore[method-assign]  # restore monkeypatch
 
     except TimeoutError:
         logger.error(f"MCP Check Error: Timeout during SSE session with {base_url}.")
@@ -509,7 +548,7 @@ async def _get_tools_sse(base_url: str, server_info: dict = None) -> list[dict] 
 
 def _extract_tool_details(tools_response) -> list[dict]:
     """Extract tool details from MCP tools response."""
-    tool_details_list = []
+    tool_details_list: list[dict[str, Any]] = []
 
     if tools_response and hasattr(tools_response, "tools"):
         for tool in tools_response.tools:
@@ -530,9 +569,9 @@ def _extract_tool_details(tools_response) -> list[dict]:
             if tool_desc:
                 tool_desc = tool_desc.strip()
                 lines = tool_desc.split("\n")
-                main_desc_lines = []
+                main_desc_lines: list[str] = []
                 current_section = "main"
-                section_content = []
+                section_content: list[str] = []
 
                 for line in lines:
                     stripped_line = line.strip()
@@ -655,11 +694,17 @@ async def get_mcp_connection_result(
 
     # Determine the MCP endpoint URL
     explicit_endpoint = server_info.get("mcp_endpoint") if server_info else None
+    explicit_sse_endpoint = server_info.get("sse_endpoint") if server_info else None
 
     # Fail closed on SSRF BEFORE any transport probe or credential build: a
     # target that resolves to a private/metadata address must never receive the
-    # server's decrypted backend credentials.
+    # server's decrypted backend credentials. Validate BOTH override endpoint
+    # fields (mcp_endpoint and sse_endpoint) here because either one can be the
+    # actual connection target below depending on the negotiated transport; the
+    # SDK client is unpinnable, so this is the fetch-time re-validation.
     if not _assert_mcp_url_fetchable(explicit_endpoint or base_url):
+        return None
+    if explicit_sse_endpoint and not _assert_mcp_url_fetchable(explicit_sse_endpoint):
         return None
 
     # Use transport-aware detection
@@ -667,8 +712,9 @@ async def get_mcp_connection_result(
 
     logger.info(f"Getting MCP connection result from {base_url} using {transport} transport...")
 
-    # Build headers for the server
-    headers = _build_headers_for_server(server_info)
+    # Build headers for the server (destination re-validated inside before any
+    # decrypted secret is attached).
+    headers = _build_headers_for_server(server_info, destination_url=explicit_endpoint or base_url)
 
     if explicit_endpoint:
         mcp_url = explicit_endpoint
@@ -740,7 +786,7 @@ async def get_mcp_connection_result(
                     tools = _extract_tool_details(tools_response)
 
                     # Extract server info from initialize result
-                    mcp_server_info: MCPServerInfo = {}
+                    mcp_server_info = MCPServerInfo()
                     if (
                         init_result
                         and hasattr(init_result, "serverInfo")

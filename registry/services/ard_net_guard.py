@@ -31,12 +31,18 @@ logger = logging.getLogger(__name__)
 # ``is_loopback`` / ``is_link_local`` / ``is_reserved`` / ``is_multicast`` cover
 # most of these already; the explicit list documents intent and guards the cloud
 # metadata endpoint (169.254.169.254) and IPv6 unique-local / link-local ranges.
+#
+# 100.64.0.0/10 is carrier-grade NAT / shared address space (RFC 6598). It is
+# pinned here explicitly rather than relying on ``is_private``, which only
+# classifies it as private on newer Python runtimes -- a downgrade or semantics
+# change would otherwise silently re-open it as an SSRF pivot.
 _BLOCKED_NETS: list[ipaddress._BaseNetwork] = [
     ipaddress.ip_network(n)
     for n in (
         "10.0.0.0/8",
         "172.16.0.0/12",
         "192.168.0.0/16",
+        "100.64.0.0/10",
         "127.0.0.0/8",
         "169.254.0.0/16",
         "::1/128",
@@ -46,7 +52,7 @@ _BLOCKED_NETS: list[ipaddress._BaseNetwork] = [
 ]
 
 
-def _is_blocked_ip(ip: ipaddress._BaseAddress) -> bool:
+def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if an IP is private/loopback/link-local/reserved/blocked.
 
     IPv4-mapped IPv6 addresses (``::ffff:10.0.0.1``) are unwrapped to their
