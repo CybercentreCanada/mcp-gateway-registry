@@ -389,7 +389,9 @@ class TestOktaAuthorizationServerMetadata:
         metadata = provider.authorization_server_metadata()
 
         assert metadata["issuer"] == "https://dev-123456.okta.com"
-        assert metadata["authorization_endpoint"] == "https://dev-123456.okta.com/oauth2/v1/authorize"
+        assert (
+            metadata["authorization_endpoint"] == "https://dev-123456.okta.com/oauth2/v1/authorize"
+        )
         assert metadata["token_endpoint"] == "https://dev-123456.okta.com/oauth2/v1/token"
         assert metadata["jwks_uri"] == "https://dev-123456.okta.com/oauth2/v1/keys"
 
@@ -413,6 +415,5 @@ class TestOktaAuthorizationServerMetadata:
             == "https://dev-123456.okta.com/oauth2/custom-as-1/v1/authorize"
         )
         assert (
-            metadata["token_endpoint"]
-            == "https://dev-123456.okta.com/oauth2/custom-as-1/v1/token"
+            metadata["token_endpoint"] == "https://dev-123456.okta.com/oauth2/custom-as-1/v1/token"
         )

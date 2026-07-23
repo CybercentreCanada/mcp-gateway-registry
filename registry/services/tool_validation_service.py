@@ -6,6 +6,7 @@ Links allowed_tools to MCP servers in the registry.
 
 import logging
 import time
+from typing import Any
 
 from ..repositories.factory import get_server_repository
 from ..repositories.interfaces import ServerRepositoryBase
@@ -164,7 +165,7 @@ class ToolValidationService:
 
         result = []
         for tool_ref in tool_refs:
-            tool_info = {
+            tool_info: dict[str, Any] = {
                 "tool_name": tool_ref.tool_name,
                 "capabilities": tool_ref.capabilities,
                 "servers": [],

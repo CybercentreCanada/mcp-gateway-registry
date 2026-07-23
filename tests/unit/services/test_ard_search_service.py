@@ -72,8 +72,10 @@ class TestScoreRescale:
         from registry.schemas.ard_models import ArdCatalogEntry
 
         entry = ArdCatalogEntry(
-            identifier="urn:air:x:server:y", display_name="Y",
-            type="application/mcp-server-card+json", url="http://x",
+            identifier="urn:air:x:server:y",
+            display_name="Y",
+            type="application/mcp-server-card+json",
+            url="http://x",
         )
         assert s._to_result(entry, 0.923, "http://src").score == 92
         assert s._to_result(entry, 0.0, "http://src").score == 0
@@ -83,9 +85,7 @@ class TestScoreRescale:
 
 class TestParseFilterPairs:
     def test_repeated_key_accumulates(self):
-        assert s._parse_filter_pairs(["type=server", "type=agent"]) == {
-            "type": ["server", "agent"]
-        }
+        assert s._parse_filter_pairs(["type=server", "type=agent"]) == {"type": ["server", "agent"]}
 
     def test_single(self):
         assert s._parse_filter_pairs(["tags=finance"]) == {"tags": "finance"}
@@ -102,10 +102,20 @@ class TestSearchAndScopeAccessScoping:
         # Two server hits; the restricted user can access only one.
         raw = {
             "servers": [
-                {"path": "/allowed/", "server_name": "Allowed", "tags": [],
-                 "relevance_score": 0.9, "description": "a"},
-                {"path": "/denied/", "server_name": "Denied", "tags": [],
-                 "relevance_score": 0.8, "description": "b"},
+                {
+                    "path": "/allowed/",
+                    "server_name": "Allowed",
+                    "tags": [],
+                    "relevance_score": 0.9,
+                    "description": "a",
+                },
+                {
+                    "path": "/denied/",
+                    "server_name": "Denied",
+                    "tags": [],
+                    "relevance_score": 0.8,
+                    "description": "b",
+                },
             ],
             "agents": [],
             "skills": [],

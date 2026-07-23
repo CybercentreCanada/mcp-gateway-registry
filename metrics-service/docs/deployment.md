@@ -29,7 +29,7 @@ The metrics service can be deployed in several ways:
 ### System Requirements
 
 - **CPU**: 1 core minimum, 2+ cores recommended
-- **Memory**: 512MB minimum, 1GB+ recommended  
+- **Memory**: 512MB minimum, 1GB+ recommended
 - **Storage**: 10GB minimum for database growth
 - **Network**: HTTP/HTTPS access on configured ports
 
@@ -227,7 +227,7 @@ upstream metrics_backend {
 server {
     listen 80;
     server_name metrics.yourdomain.com;
-    
+
     # Redirect HTTP to HTTPS
     return 301 https://$server_name$request_uri;
 }
@@ -235,24 +235,24 @@ server {
 server {
     listen 443 ssl http2;
     server_name metrics.yourdomain.com;
-    
+
     # SSL Configuration
     ssl_certificate /etc/ssl/certs/metrics.crt;
     ssl_certificate_key /etc/ssl/private/metrics.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512;
     ssl_prefer_server_ciphers off;
-    
+
     # Security Headers
     add_header X-Frame-Options DENY;
     add_header X-Content-Type-Options nosniff;
     add_header X-XSS-Protection "1; mode=block";
     add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload";
-    
+
     # Rate limiting
     limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
     limit_req zone=api burst=20 nodelay;
-    
+
     # Main API
     location / {
         proxy_pass http://metrics_backend;
@@ -260,18 +260,18 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        
+
         # Timeouts
         proxy_connect_timeout 30s;
         proxy_send_timeout 30s;
         proxy_read_timeout 30s;
-        
+
         # Buffer settings
         proxy_buffering on;
         proxy_buffer_size 4k;
         proxy_buffers 8 4k;
     }
-    
+
     # Prometheus metrics (separate location for monitoring)
     location /prometheus {
         proxy_pass http://127.0.0.1:9465/metrics;
@@ -280,7 +280,7 @@ server {
         allow 192.168.0.0/16;  # Private networks
         deny all;
     }
-    
+
     # Health check (no auth required)
     location /health {
         proxy_pass http://metrics_backend/health;
@@ -300,25 +300,25 @@ server {
 
 <VirtualHost *:443>
     ServerName metrics.yourdomain.com
-    
+
     # SSL Configuration
     SSLEngine on
     SSLCertificateFile /etc/ssl/certs/metrics.crt
     SSLCertificateKeyFile /etc/ssl/private/metrics.key
     SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1
     SSLCipherSuite ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384
-    
+
     # Security Headers
     Header always set X-Frame-Options DENY
     Header always set X-Content-Type-Options nosniff
     Header always set X-XSS-Protection "1; mode=block"
     Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
-    
+
     # Proxy Configuration
     ProxyPreserveHost On
     ProxyPass /health http://127.0.0.1:8890/health
     ProxyPassReverse /health http://127.0.0.1:8890/health
-    
+
     ProxyPass / http://127.0.0.1:8890/
     ProxyPassReverse / http://127.0.0.1:8890/
 </VirtualHost>
@@ -338,9 +338,9 @@ services:
     volumes:
       - metrics-db-data:/var/lib/sqlite
     restart: unless-stopped
-    
+
   metrics-service:
-    build: 
+    build:
       context: .
       target: production
     ports:
@@ -363,7 +363,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-      
+
   nginx:
     image: nginx:alpine
     ports:
@@ -788,7 +788,7 @@ scrape_configs:
       },
       {
         "title": "Error Rate",
-        "type": "graph", 
+        "type": "graph",
         "targets": [
           {
             "expr": "rate(http_requests_total{status=~\"4..|5..\"}[5m])",
@@ -825,7 +825,7 @@ groups:
           severity: critical
         annotations:
           summary: "Metrics service is down"
-          
+
       - alert: HighErrorRate
         expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
         for: 5m
@@ -833,7 +833,7 @@ groups:
           severity: warning
         annotations:
           summary: "High error rate detected"
-          
+
       - alert: RateLimitExhaustion
         expr: rate_limit_available_tokens < 10
         for: 1m
@@ -935,7 +935,7 @@ filebeat.inputs:
 
 output.elasticsearch:
   hosts: ["elasticsearch:9200"]
-  
+
 logging.level: info
 ```
 

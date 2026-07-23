@@ -116,8 +116,10 @@ resource "aws_iam_role_policy" "rotation_lambda" {
         Sid    = "DocumentDBAccess"
         Effect = "Allow"
         Action = [
-          "docdb:DescribeDBClusters",
-          "docdb:ModifyDBCluster"
+          # Amazon DocumentDB shares the RDS control-plane API; boto3 docdb
+          # calls are authorized as rds:* actions against the DocDB cluster ARN.
+          "rds:DescribeDBClusters",
+          "rds:ModifyDBCluster"
         ]
         Resource = aws_docdb_cluster.registry[0].arn
       }] : [],

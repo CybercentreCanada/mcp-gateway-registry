@@ -9,12 +9,73 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Optional, Union
 
-from .models import RegistryApiAccessRecord, TokenMintAuditRecord
+from .models import MCPServerAccessRecord, RegistryApiAccessRecord, TokenMintAuditRecord
 
 if TYPE_CHECKING:
     from ..repositories.audit_repository import AuditRepositoryBase
 
 logger = logging.getLogger(__name__)
+
+
+class NonDurableAuditError(RuntimeError):
+    """Raised when audit logging would run without a durable sink and the
+    deployment requires a durable audit trail.
+
+    Fail-closed guard for the repudiation threat: best-effort JSON log lines are
+    not a dependable audit trail (lost on restart, not queryable, rotated away).
+    """
+
+
+def enforce_durable_audit_sink(
+    durable_sink_available: bool,
+    require_durable: bool,
+) -> None:
+    """Enforce the durable-audit-sink policy, failing closed by default.
+
+    Called during application startup after resolving whether a durable audit
+    sink (MongoDB/DocumentDB) is actually available. When no durable sink is
+    available:
+
+    - if ``require_durable`` is True (the default deployment posture), raise
+      :class:`NonDurableAuditError` so the application refuses to start rather
+      than silently degrading to a non-durable audit trail;
+    - if ``require_durable`` is False (explicit dev opt-out), emit a loud
+      warning and allow startup to continue with best-effort log lines.
+
+    Args:
+        durable_sink_available: Whether a durable audit sink is available and
+            wired up.
+        require_durable: Whether the deployment requires a durable audit trail
+            (``AUDIT_LOG_REQUIRE_DURABLE``).
+
+    Raises:
+        NonDurableAuditError: If no durable sink is available and
+            ``require_durable`` is True.
+    """
+    if durable_sink_available:
+        return
+
+    if require_durable:
+        logger.error(
+            "Audit logging is enabled but no durable audit sink is available "
+            "(MongoDB disabled or unreachable). Refusing to start with a "
+            "non-durable audit trail. Provision the audit datastore, or set "
+            "AUDIT_LOG_REQUIRE_DURABLE=false to explicitly accept a "
+            "non-durable (best-effort log-line) audit trail."
+        )
+        raise NonDurableAuditError(
+            "Non-durable audit trail refused: durable audit sink unavailable "
+            "and AUDIT_LOG_REQUIRE_DURABLE is enabled. Provision the audit "
+            "datastore or explicitly set AUDIT_LOG_REQUIRE_DURABLE=false."
+        )
+
+    logger.warning(
+        "Audit logging is running WITHOUT a durable sink "
+        "(AUDIT_LOG_REQUIRE_DURABLE=false). Audit records are best-effort log "
+        "lines only and may be lost; this is unsafe for any repudiation-"
+        "sensitive deployment. Enable MongoDB audit storage for a durable "
+        "audit trail."
+    )
 
 
 class AuditLogger:
@@ -68,14 +129,23 @@ class AuditLogger:
         record: Union[RegistryApiAccessRecord, "MCPServerAccessRecord", TokenMintAuditRecord],
     ) -> None:
         """
-        Write an audit record to MongoDB.
+        Write an audit record to the durable store (MongoDB).
 
-        This method is thread-safe. If MongoDB is not enabled or not
-        available, the event is silently dropped to avoid impacting
-        request processing.
+        This method is thread-safe. If a durable sink is not available (audit
+        disabled or MongoDB not wired up) the event is dropped — startup already
+        fails closed on a missing durable sink when AUDIT_LOG_REQUIRE_DURABLE is
+        set, so reaching this path means an operator explicitly opted into a
+        non-durable trail.
+
+        A durable-write failure at request time (transient MongoDB
+        unavailability, etc.) does not fail the request — failing every API call
+        on an audit blip would be a self-inflicted denial of service. Instead the
+        dropped record is logged as a distinct CRITICAL event so the loss itself
+        is loud and alertable (a durable audit trail must never lose a record
+        silently). See the audit-logging docs for the retry/DLQ follow-up.
 
         Args:
-            record: The audit record to log (RegistryApiAccessRecord or MCPServerAccessRecord)
+            record: The audit record to log.
         """
         if not self.mongodb_enabled or not self._audit_repository:
             return
@@ -84,8 +154,16 @@ class AuditLogger:
             try:
                 await self._audit_repository.insert(record)
             except Exception as e:
-                logger.error(f"Failed to write audit event to MongoDB: {e}")
-                # Don't raise - audit logging should not break request processing
+                # Never raise (would DoS the request path), but make the dropped
+                # record loud and alertable rather than a quiet error line. Log
+                # only identifying context, never the full record (avoids
+                # leaking any sensitive field the record may carry).
+                logger.critical(
+                    "AUDIT RECORD DROPPED: durable write failed (log_type=%s request_id=%s): %s",
+                    getattr(record, "log_type", "unknown"),
+                    getattr(record, "request_id", "unknown"),
+                    e,
+                )
 
     async def close(self) -> None:
         """

@@ -178,6 +178,40 @@ health_check_total = _meter.create_counter(
 
 
 # =============================================================================
+# Rate limiting (issue #295)
+#
+# Bounded labels only: axis (caller/target), entity_type (small allowlist),
+# window_seconds (distinct configured windows), backend/op. NEVER the subject
+# name (user/client/server/tool) -- that is unbounded. Per-entity-name
+# attribution lives in the WARNING log and the /api/rate-limits/status endpoint.
+# =============================================================================
+
+rate_limit_throttled_total = _meter.create_counter(
+    name="mcpgw_rate_limit_throttled_total",
+    description="Times an axis entity was throttled (a gate denied a request)",
+    unit="1",
+)
+
+rate_limit_checks_total = _meter.create_counter(
+    name="mcpgw_rate_limit_checks_total",
+    description="Total rate-limit gate checks (denominator for a throttle rate)",
+    unit="1",
+)
+
+rate_limit_errors_total = _meter.create_counter(
+    name="mcpgw_rate_limit_errors_total",
+    description="Rate-limit backend errors (fail-open events)",
+    unit="1",
+)
+
+rate_limit_backend_duration_ms = _meter.create_histogram(
+    name="mcpgw_rate_limit_backend_duration",
+    description="Per-op latency of the rate-limit counter-store round trip",
+    unit="ms",
+)
+
+
+# =============================================================================
 # Path-3 in-process metrics
 #
 # Migrated from ``prometheus_client.Counter`` / ``Gauge`` declarations across

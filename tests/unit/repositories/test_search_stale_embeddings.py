@@ -40,7 +40,9 @@ class TestFindStaleEmbeddings:
         mock_db.__getitem__ = MagicMock(return_value=mock_source_col)
 
         with (
-            patch.object(repo, "_get_collection", new_callable=AsyncMock, return_value=mock_embeddings_col),
+            patch.object(
+                repo, "_get_collection", new_callable=AsyncMock, return_value=mock_embeddings_col
+            ),
             patch(
                 "registry.repositories.documentdb.search_repository.get_documentdb_client",
                 new_callable=AsyncMock,

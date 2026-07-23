@@ -73,6 +73,12 @@ registry:
     databaseMinAcu: 0.5
     databaseMaxAcu: 2
     logLevel: INFO
+    # domain / rootDomain: only used when enableRoute53Dns=true and
+    # useRegionalDomains=false. When CloudFront is enabled without Route53,
+    # KC_HOSTNAME is set to the CloudFront distribution's own domain
+    # (materialized in-stack, no cross-stack lookup needed).
+    domain: ""
+    rootDomain: ""
 
   # Container images (leave empty to use defaults or set to ECR URIs)
   images:
@@ -118,6 +124,10 @@ registry:
     registryId: ""
     staticTokenAuthEnabled: false
     awsRegistryFederationEnabled: false
+    # Cross-account federation role ARNs the registry task may assume.
+    # Empty disables cross-account access (fail closed); only same-account
+    # federation works. Each entry: arn:aws:iam::<account-id>:role/<name>.
+    awsRegistryFederationAssumeRoleArns: []
 
   # Audit logging
   audit:
@@ -167,8 +177,12 @@ registry:
     contactUrl: ""
 
   # CloudFront
+  # NOTE: at least one of `enableRoute53Dns` or `cloudfront.enabled` must be
+  # true. Keycloak's sslRequired=external policy blocks admin ops over plain
+  # HTTP, so a public HTTPS front is required (custom domain + ACM, or a
+  # CloudFront-issued `*.cloudfront.net` cert).
   cloudfront:
-    enabled: false
+    enabled: true
     prefixListName: ""
 
   # Session

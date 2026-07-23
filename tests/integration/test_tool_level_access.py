@@ -23,7 +23,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-
 # =============================================================================
 # PERSONAS
 # =============================================================================
@@ -128,9 +127,7 @@ def finance_server_info() -> dict[str, Any]:
 
 
 @pytest.fixture
-def all_servers_map(
-    current_time_server_info, finance_server_info
-) -> dict[str, dict[str, Any]]:
+def all_servers_map(current_time_server_info, finance_server_info) -> dict[str, dict[str, Any]]:
     """Map of path -> server_info used by get_all_servers mocks."""
     return {
         "/current_time/": current_time_server_info,
@@ -236,9 +233,7 @@ class TestGetToolsAllEndpoint:
     """Exercises the special `/all` branch of GET /tools/{service_path}."""
 
     @pytest.mark.asyncio
-    async def test_get_tools_all_prunes_per_server_and_skips_empty_servers(
-        self, all_servers_map
-    ):
+    async def test_get_tools_all_prunes_per_server_and_skips_empty_servers(self, all_servers_map):
         """Restricted user: only allowed tools appear; fully-filtered servers are skipped."""
         from registry.api.server_routes import get_service_tools
 
@@ -313,9 +308,7 @@ class TestGetServersEndpointFilter:
     cached `tool_list`) to lock in the behaviour from the caller's view.
     """
 
-    def test_get_servers_admin_sees_all_tools_and_num_tools_matches(
-        self, current_time_server_info
-    ):
+    def test_get_servers_admin_sees_all_tools_and_num_tools_matches(self, current_time_server_info):
         """Admin sees the full tool_list; num_tools equals the list length."""
         from registry.auth.tool_filter import filter_tools_for_user
 
@@ -353,9 +346,7 @@ class TestGetServersEndpointFilter:
         assert len(filtered) == 1
         assert filtered[0]["name"] == "current_time_by_timezone"
 
-    def test_get_servers_empty_allowlist_returns_zero_tools(
-        self, current_time_server_info
-    ):
+    def test_get_servers_empty_allowlist_returns_zero_tools(self, current_time_server_info):
         """Empty allowlist user sees num_tools==0 on an otherwise accessible server."""
         from registry.auth.tool_filter import filter_tools_for_user
 
@@ -383,9 +374,7 @@ class TestSemanticSearchFilter:
     calls rather than booting the search repo machinery.
     """
 
-    def test_semantic_search_per_server_matching_tools_pruned(
-        self, current_time_server_info
-    ):
+    def test_semantic_search_per_server_matching_tools_pruned(self, current_time_server_info):
         """matching_tools from search is pruned to the user's allowlist."""
         from registry.auth.tool_filter import filter_tools_for_user
 
@@ -447,9 +436,7 @@ class TestSemanticSearchFilter:
         kept = [
             tool
             for tool in raw_tools
-            if tool_allowed_for_user(
-                tool["server_name"], tool["tool_name"], RESTRICTED_CONTEXT
-            )
+            if tool_allowed_for_user(tool["server_name"], tool["tool_name"], RESTRICTED_CONTEXT)
         ]
 
         # Assert
@@ -483,14 +470,10 @@ class TestSemanticSearchFilter:
         )
 
         # Assert
-        assert [t["tool_name"] for t in allowed_vs_matching] == [
-            "current_time_by_timezone"
-        ]
+        assert [t["tool_name"] for t in allowed_vs_matching] == ["current_time_by_timezone"]
         assert len(allowed_vs_full) == 1
 
-    def test_semantic_search_admin_no_filtering_applied(
-        self, current_time_server_info
-    ):
+    def test_semantic_search_admin_no_filtering_applied(self, current_time_server_info):
         """Admin requests leave all search entries intact."""
         from registry.auth.tool_filter import filter_tools_for_user, tool_allowed_for_user
 

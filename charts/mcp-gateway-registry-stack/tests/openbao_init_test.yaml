@@ -107,6 +107,8 @@ tests:
           path: spec.template.spec.containers[0].command[2]
           pattern: 'kubernetes\.io/service-account-token'
       # ...and feeds it into auth/kubernetes/config as token_reviewer_jwt.
+      # Pattern matches both the original shell/jq implementation and the
+      # pure-Python stdlib rewrite used in air-gapped clusters.
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
-          pattern: 'token_reviewer_jwt:\$rjwt'
+          pattern: 'token_reviewer_jwt.*reviewer_jwt'

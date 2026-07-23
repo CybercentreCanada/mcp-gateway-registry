@@ -44,7 +44,10 @@ class AnthropicFederationClient(BaseFederationClient):
         self.api_version = api_version
 
     def fetch_server(
-        self, server_name: str, server_config: AnthropicServerConfig | None = None
+        self,
+        server_name: str,
+        server_config: AnthropicServerConfig | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any] | None:
         """
         Fetch a single server from Anthropic Registry.
@@ -76,7 +79,11 @@ class AnthropicFederationClient(BaseFederationClient):
         # Transform response to internal format
         return self._transform_server_response(response, server_name, server_config)
 
-    def fetch_all_servers(
+    # Anthropic federation intentionally consumes rich server configs rather than
+    # bare names; this client is only ever invoked on the concrete type, never
+    # polymorphically through BaseFederationClient, so the deliberate parameter
+    # divergence is safe.
+    def fetch_all_servers(  # type: ignore[override]
         self, server_configs: list[AnthropicServerConfig]
     ) -> list[dict[str, Any]]:
         """

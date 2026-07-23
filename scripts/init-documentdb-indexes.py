@@ -592,14 +592,12 @@ async def _create_audit_events_indexes(
     # Compound index for token_mint flat-field queries (resource_type/resource_id at
     # the top level, not nested under action.*). Required because the existing
     # action.resource_type index does not cover TokenMintAuditRecord's flat layout.
-    token_mint_index_name = "log_type_resource_type_resource_id_timestamp_idx"
+    token_mint_index_name = "log_type_resource_type_resource_id_timestamp_idx"  # nosec B105 - MongoDB index name, not a secret
 
     if recreate:
         try:
             await collection.drop_index(token_mint_index_name)
-            logger.info(
-                f"Dropped existing index '{token_mint_index_name}' from {collection_name}"
-            )
+            logger.info(f"Dropped existing index '{token_mint_index_name}' from {collection_name}")
         except Exception as e:
             logger.debug(f"No existing index '{token_mint_index_name}' to drop: {e}")
 
@@ -610,9 +608,7 @@ async def _create_audit_events_indexes(
         )
         logger.info(f"Created index '{token_mint_index_name}' on {collection_name}")
     except Exception as e:
-        logger.error(
-            f"Failed to create index '{token_mint_index_name}' on {collection_name}: {e}"
-        )
+        logger.error(f"Failed to create index '{token_mint_index_name}' on {collection_name}: {e}")
 
     # TTL index for automatic expiration
     # Default 7 days (604800 seconds), configurable via AUDIT_LOG_MONGODB_TTL_DAYS

@@ -14,6 +14,7 @@ import re
 import subprocess  # nosec B404
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ..core.config import settings
 from ..core.endpoint_utils import get_endpoint_url
@@ -114,7 +115,7 @@ def _organize_findings_by_analyzer(tool_results: list) -> dict:
     Returns:
         Dictionary organized by analyzer name with findings
     """
-    organized_results = {}
+    organized_results: dict[str, Any] = {}
 
     for tool_result in tool_results:
         findings_dict = tool_result.get("findings", {})
@@ -202,6 +203,7 @@ class SecurityScannerService:
         # in depth against stored data predating validation, and a live
         # resolve catches a host that has since been pointed at an internal
         # address). Raises UrlValidationError -> surfaced by the caller.
+        from ..exceptions import UrlValidationError
         from ..utils.url_guard import PROXY_PROFILE, validate_url
 
         validate_url(server_url, profile=PROXY_PROFILE)
@@ -225,6 +227,19 @@ class SecurityScannerService:
         logger.info(f"Starting security scan for {server_url} with analyzers: {analyzers}")
 
         try:
+            # Re-validate the FINAL resolved URL before spawning the scanner.
+            # get_endpoint_url() may return an operator-supplied mcp_endpoint
+            # verbatim, which is a different host/URL than the proxy_pass_url
+            # validated above. The scanner runs in an external subprocess that
+            # the pinned guarded client cannot protect, so this is the only
+            # place we can block an mcp_endpoint that points at a
+            # private/metadata/loopback address (or that has since been rebound
+            # there). resolve=True forces a live DNS lookup so a rebind is
+            # caught at fetch time. Fail closed: a validation failure is treated
+            # like any other scan failure below (recorded as unsafe, subprocess
+            # never spawned).
+            validate_url(server_url, profile=PROXY_PROFILE)
+
             # Run the scan in a thread pool to avoid blocking
             raw_output = await asyncio.to_thread(
                 self._run_mcp_scanner,
@@ -270,6 +285,7 @@ class SecurityScannerService:
             subprocess.CalledProcessError,
             ValueError,
             RuntimeError,
+            UrlValidationError,
         ) as e:
             logger.error(f"Security scan failed for {server_url}: {e}")
 

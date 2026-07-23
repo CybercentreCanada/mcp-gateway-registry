@@ -5,6 +5,7 @@ Tests the NginxConfigService for configuration generation and reload.
 """
 
 import asyncio
+import re
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 from urllib.parse import urlparse
 
@@ -505,6 +506,144 @@ server {
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_a2a_blocks_emitted_when_flag_enabled(
+    nginx_service, sample_servers, mock_health_service, mock_atomic_write
+):
+    """A2A location blocks are rendered when the reverse-proxy flag is on."""
+    template_content = "server {\n    listen 80;\n{{AGENT_LOCATION_BLOCKS}}\n}\n"
+
+    with patch("registry.core.nginx_service.settings") as mock_settings:
+        mock_settings.nginx_updates_enabled = True
+        mock_settings.a2a_reverse_proxy_enabled = True
+        mock_settings.a2a_reverse_proxy_effective = True
+        mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
+        mock_settings.auth_server_url = "http://auth-server:8888"
+        with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
+            with patch("builtins.open", mock_open(read_data=template_content)):
+                with patch("registry.health.service.health_service", mock_health_service):
+                    with patch.object(
+                        nginx_service, "get_additional_server_names", return_value=""
+                    ):
+                        with patch.object(nginx_service, "reload_nginx", return_value=True):
+                            with patch.object(
+                                nginx_service,
+                                "_generate_agent_location_blocks",
+                                new=AsyncMock(return_value="# A2A_BLOCK_SENTINEL"),
+                            ) as gen:
+                                result = await nginx_service.generate_config_async(sample_servers)
+
+    assert result is True
+    gen.assert_awaited_once()
+    written = mock_atomic_write.call_args_list[-1][0][1]
+    assert "# A2A_BLOCK_SENTINEL" in written
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a2a_blocks_skipped_when_flag_disabled(
+    nginx_service, sample_servers, mock_health_service, mock_atomic_write
+):
+    """No A2A blocks are generated when the reverse-proxy flag is off (default)."""
+    template_content = "server {\n    listen 80;\n{{AGENT_LOCATION_BLOCKS}}\n}\n"
+
+    with patch("registry.core.nginx_service.settings") as mock_settings:
+        mock_settings.nginx_updates_enabled = True
+        mock_settings.a2a_reverse_proxy_enabled = False
+        mock_settings.a2a_reverse_proxy_effective = False
+        mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
+        mock_settings.auth_server_url = "http://auth-server:8888"
+        with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
+            with patch("builtins.open", mock_open(read_data=template_content)):
+                with patch("registry.health.service.health_service", mock_health_service):
+                    with patch.object(
+                        nginx_service, "get_additional_server_names", return_value=""
+                    ):
+                        with patch.object(nginx_service, "reload_nginx", return_value=True):
+                            with patch.object(
+                                nginx_service,
+                                "_generate_agent_location_blocks",
+                                new=AsyncMock(return_value="# A2A_BLOCK_SENTINEL"),
+                            ) as gen:
+                                result = await nginx_service.generate_config_async(sample_servers)
+
+    assert result is True
+    gen.assert_not_awaited()
+    written = mock_atomic_write.call_args_list[-1][0][1]
+    assert "# A2A_BLOCK_SENTINEL" not in written
+    assert "{{AGENT_LOCATION_BLOCKS}}" not in written
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_enabling_agent_changes_rendered_config_hash(
+    nginx_service, sample_servers, mock_health_service, mock_atomic_write
+):
+    """Enabling a healthy A2A agent changes the rendered config and its hash.
+
+    Exercises the real render-to-hash path: the agent generator is NOT mocked,
+    so the scheduler's hash-based change detection would see a new hash and
+    trigger an nginx reload once an agent becomes eligible for proxying.
+    """
+    import hashlib
+    from types import SimpleNamespace
+
+    template_content = "server {\n    listen 80;\n{{AGENT_LOCATION_BLOCKS}}\n}\n"
+    healthy_agent = SimpleNamespace(
+        path="/flight-booking-agent",
+        url="https://flight-booking.dev.example.com",
+        name="Flight Booking Agent",
+        supported_protocol="a2a",
+        health_status="healthy",
+    )
+
+    async def _render(enabled_paths, agent_info):
+        with patch("registry.core.nginx_service.settings") as mock_settings:
+            mock_settings.nginx_updates_enabled = True
+            mock_settings.a2a_reverse_proxy_enabled = True
+            mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
+            mock_settings.auth_server_url = "http://auth-server:8888"
+            with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
+                with patch("builtins.open", mock_open(read_data=template_content)):
+                    with patch("registry.health.service.health_service", mock_health_service):
+                        with patch.object(
+                            nginx_service, "get_additional_server_names", return_value=""
+                        ):
+                            with patch.object(nginx_service, "reload_nginx", return_value=True):
+                                with (
+                                    patch(
+                                        "registry.services.agent_service.agent_service"
+                                    ) as mock_agent_svc,
+                                    # The backend DNS resolvability guard is an
+                                    # environmental dependency; stub it True so the
+                                    # test exercises the render path deterministically.
+                                    patch.object(
+                                        type(nginx_service),
+                                        "_agent_backend_resolves",
+                                        AsyncMock(return_value=True),
+                                    ),
+                                ):
+                                    mock_agent_svc.get_enabled_agents = AsyncMock(
+                                        return_value=enabled_paths
+                                    )
+                                    mock_agent_svc.get_agent_info = AsyncMock(
+                                        return_value=agent_info
+                                    )
+                                    await nginx_service.generate_config_async(sample_servers)
+        return mock_atomic_write.call_args_list[-1][0][1]
+
+    without_agent = await _render([], None)
+    with_agent = await _render(["/flight-booking-agent"], healthy_agent)
+
+    assert "/agent/flight-booking-agent/" not in without_agent
+    assert "/agent/flight-booking-agent/" in with_agent
+    assert (
+        hashlib.sha256(without_agent.encode()).hexdigest()
+        != hashlib.sha256(with_agent.encode()).hexdigest()
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_generate_config_async_template_not_found(nginx_service, sample_servers):
     """Test configuration generation when template is not found."""
     with patch.object(nginx_service.nginx_template_path, "exists", return_value=False):
@@ -787,6 +926,12 @@ def test_create_location_block_streamable_http(nginx_service):
     # capture + forward the /validate-minted internal token.
     assert "auth_request_set $auth_internal_token $upstream_http_x_internal_token" in block
     assert "proxy_set_header X-Internal-Token $auth_internal_token" in block
+    # Rate-limit passthrough (issue #295): capture the throttle marker + headers so
+    # @forbidden_error can rewrite a throttle-403 into a real 429 + Retry-After.
+    assert "auth_request_set $rl_throttled $upstream_http_x_ratelimit_throttled" in block
+    assert "auth_request_set $rl_limit $upstream_http_x_ratelimit_limit" in block
+    assert "auth_request_set $rl_reset $upstream_http_x_ratelimit_reset" in block
+    assert "auth_request_set $rl_retry $upstream_http_retry_after" in block
     assert "proxy_buffering off" in block
     assert "auth_request /validate" in block
     # Upstream timeouts derived from MCP_PROXY_TIMEOUT so long-running MCP tool
@@ -1545,6 +1690,27 @@ def test_generated_protected_api_block_carries_internal_token():
     assert "proxy_set_header X-Internal-Token-Registry $auth_internal_token_registry;" in src
 
 
+def test_unprotected_api_block_still_rate_limited():
+    """When auth_request is bypassed (NGINX_DISABLE_API_AUTH_REQUEST=true), the
+    replacement /api/ block must STILL carry the inbound rate limits — /api/ is
+    the highest-volume surface and dropping the edge/registration caps here would
+    reopen the flood path the limits exist to close.
+    """
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[3] / "registry" / "core" / "nginx_service.py"
+    ).read_text()
+    # Isolate the unprotected replacement block so we assert on IT, not the
+    # protected block elsewhere in the file.
+    marker = "unprotected_api_block = "
+    assert marker in src
+    unprotected = src[src.index(marker) : src.index('"""', src.index(marker) + len(marker) + 4) + 3]
+    assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in unprotected
+    assert "limit_req zone=mcp_gateway_register burst=10 nodelay;" in unprotected
+    assert "limit_conn mcp_gateway_conn 100;" in unprotected
+
+
 @pytest.mark.unit
 class TestResolveMcpProxyReadTimeout:
     """Tests for the nginx MCP proxy_read_timeout derivation helper.
@@ -1854,3 +2020,203 @@ async def test_scheduler_rejects_invalid_config_and_keeps_last_good(monkeypatch,
     assert scheduler._last_config_hash == ""
     reload_mock.assert_not_called()
     assert scheduler._dirty is True
+
+
+# =============================================================================
+# Inbound rate limiting (DoS protection for the shared /validate subrequest)
+# =============================================================================
+
+from pathlib import Path  # noqa: E402
+
+_DOCKER_DIR = Path(__file__).resolve().parents[3] / "docker"
+_HTTP_ONLY_CONF = _DOCKER_DIR / "nginx_rev_proxy_http_only.conf"
+_HTTP_AND_HTTPS_CONF = _DOCKER_DIR / "nginx_rev_proxy_http_and_https.conf"
+
+
+@pytest.mark.unit
+def test_generated_mcp_proxy_block_is_rate_limited(nginx_service):
+    """Generated /mcp-proxy/ location blocks must carry the inbound edge limits.
+
+    Every MCP request fans out to the shared /validate auth subrequest; without
+    an inbound limit_req/limit_conn a flood on one server's path exhausts
+    /validate for all servers.
+    """
+    for transport in ("streamable-http", "sse", "direct"):
+        block = nginx_service._create_location_block(
+            "/test", "http://localhost:8000/mcp", transport
+        )
+        assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in block, transport
+        assert "limit_conn mcp_gateway_conn 100;" in block, transport
+        # The limit must sit inside the location, before auth_request (so the
+        # fan-out is bounded), never on the /validate subrequest itself.
+        assert block.index("limit_req") < block.index("auth_request /validate")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_generated_virtual_server_block_is_rate_limited(nginx_service):
+    """Client-facing virtual-server blocks must also carry the inbound limits."""
+
+    class _VS:
+        path = "/virtual/dev-essentials"
+        server_name = "Dev Essentials"
+
+    repo = MagicMock()
+    repo.list_enabled = AsyncMock(return_value=[_VS()])
+    with patch(
+        "registry.repositories.factory.get_virtual_server_repository",
+        return_value=repo,
+    ):
+        blocks = await nginx_service._generate_virtual_server_blocks()
+
+    assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in blocks
+    assert "limit_conn mcp_gateway_conn 100;" in blocks
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_declares_rate_limit_zones(conf_path):
+    """Both nginx conf templates must declare the rate-limit zones at http scope."""
+    text = conf_path.read_text()
+    assert "limit_req_zone $binary_remote_addr zone=mcp_gateway_edge:10m rate=50r/s;" in text
+    assert (
+        "limit_req_zone $mcp_gateway_register_key zone=mcp_gateway_register:10m rate=5r/s;" in text
+    )
+    assert "limit_conn_zone $binary_remote_addr zone=mcp_gateway_conn:10m;" in text
+    # Registration classifier map + fail-safe empty default (skip when non-register).
+    assert "map $uri $mcp_gateway_register_key {" in text
+    assert re.search(r'default\s+"";', text)
+    # Registration patterns must allow an optional trailing slash so a request to
+    # /api/register/ cannot bypass the stricter registration cap (only the generous
+    # edge limit would apply). Match must be anchored to the register path suffix.
+    for register_path in ("register", "servers/register", "internal/register"):
+        assert f'"~*/api/{register_path}/?$"' in text, (
+            f"register classifier for /api/{register_path} must accept an optional "
+            "trailing slash to prevent a trailing-slash throttle bypass"
+        )
+    # 429 status so clients back off.
+    assert "limit_req_status 429;" in text
+    assert "limit_conn_status 429;" in text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_applies_edge_limit_on_general_api_location(conf_path):
+    """The general /api/ location (covers registration) must carry both limits."""
+    text = conf_path.read_text()
+    # Locate the general /api/ location body and assert the limits are inside it.
+    marker = "location {{ROOT_PATH}}/api/ {"
+    assert marker in text
+    idx = text.index(marker)
+    body = text[idx : idx + 800]
+    assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in body
+    # Registration endpoints (/api/register, /api/servers/register,
+    # /api/internal/register) fall through this location and get the tighter cap.
+    assert "limit_req zone=mcp_gateway_register burst=10 nodelay;" in body
+    assert "limit_conn mcp_gateway_conn 100;" in body
+
+
+def _assert_all_locations_rate_limited(
+    text: str,
+    marker: str,
+    expected_count: int,
+) -> None:
+    """Assert every occurrence of a location marker carries the edge limits.
+
+    Uses an EXACT expected count (not ``>= 1``) so that deleting one of the
+    duplicated server blocks in the http+https template — which has two listeners
+    (:8080 and :8443) — fails the test instead of silently passing on the survivor.
+    """
+    assert text.count(marker) == expected_count, (
+        f"expected {expected_count} occurrence(s) of {marker!r}, found {text.count(marker)}"
+    )
+    start = 0
+    seen = 0
+    while True:
+        idx = text.find(marker, start)
+        if idx == -1:
+            break
+        seen += 1
+        body = text[idx : idx + 800]
+        assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in body, (
+            f"{marker!r} occurrence {seen} is missing the edge rate limit"
+        )
+        assert "limit_conn mcp_gateway_conn 100;" in body, (
+            f"{marker!r} occurrence {seen} is missing the connection limit"
+        )
+        start = idx + len(marker)
+    assert seen == expected_count
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conf_path", "expected_count"),
+    [(_HTTP_ONLY_CONF, 1), (_HTTP_AND_HTTPS_CONF, 2)],
+)
+def test_conf_rate_limits_exact_match_auth_me_location(conf_path, expected_count):
+    """The exact-match /api/auth/me location fans out to /validate too.
+
+    Being an exact match it does NOT fall through to the rate-limited /api/
+    prefix, so every instance must carry its own edge limit. The http+https
+    template renders it twice (one per listener); assert the exact count so a
+    dropped instance is caught.
+    """
+    _assert_all_locations_rate_limited(
+        conf_path.read_text(),
+        "location = {{ROOT_PATH}}/api/auth/me {",
+        expected_count,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conf_path", "expected_count"),
+    [(_HTTP_ONLY_CONF, 1), (_HTTP_AND_HTTPS_CONF, 2)],
+)
+def test_conf_rate_limits_ard_location(conf_path, expected_count):
+    """The ^~ /api/ard/ location has its own auth_request /validate fan-out.
+
+    It uses ^~ priority over the general /api/ prefix, so it does not inherit the
+    /api/ limits and must carry its own.
+    """
+    _assert_all_locations_rate_limited(
+        conf_path.read_text(),
+        "location ^~ {{ROOT_PATH}}/api/ard/ {",
+        expected_count,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conf_path", "expected_count"),
+    [(_HTTP_ONLY_CONF, 1), (_HTTP_AND_HTTPS_CONF, 2)],
+)
+def test_conf_rate_limits_anthropic_api_location(conf_path, expected_count):
+    """The Anthropic-API version location fans out to /validate and must be capped."""
+    _assert_all_locations_rate_limited(
+        conf_path.read_text(),
+        "location {{ROOT_PATH}}/{{ANTHROPIC_API_VERSION}}/ {",
+        expected_count,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_does_not_rate_limit_validate_subrequest(conf_path):
+    """The internal /validate subrequest must NOT be rate-limited directly.
+
+    Limiting the fan-out target would throttle legitimate authenticated traffic;
+    the bound belongs on the inbound edge locations instead.
+    """
+    text = conf_path.read_text()
+    marker = "location = /validate {"
+    assert marker in text
+    idx = text.index(marker)
+    # /validate body ends at the next top-level 4-space-indented closing brace;
+    # grab a generous window and assert no limit_req/limit_conn inside it.
+    body = text[idx : idx + 1600]
+    # Trim at the block's closing to avoid spilling into the next location.
+    end = body.find("\n    }")
+    body = body[: end if end != -1 else len(body)]
+    assert "limit_req" not in body
+    assert "limit_conn" not in body

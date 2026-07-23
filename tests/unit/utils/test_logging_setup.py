@@ -152,7 +152,9 @@ class TestJsonlFormatter:
         from registry.utils.logging_setup import JsonlFormatter
 
         formatter = JsonlFormatter(service_name="registry")
-        rec = self._make_record(name="registry.core.config", msg="Starting on port %d", args=(8000,))
+        rec = self._make_record(
+            name="registry.core.config", msg="Starting on port %d", args=(8000,)
+        )
         out = formatter.format(rec)
         payload = json.loads(out)
 

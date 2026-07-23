@@ -599,11 +599,13 @@ async def get_tool_catalog(
     and available versions.
     """
     service = get_tool_catalog_service()
-    # Admin users bypass scope filtering (consistent with /api/servers)
-    user_scopes = None if user_context.get("is_admin") else user_context.get("scopes", [])
+    # The service enforces the canonical scope-based server-access check
+    # (user_can_access_server_from_doc) so the catalog only exposes tools
+    # from servers this caller may access. Admin / wildcard grants are
+    # handled inside that helper, matching /api/servers.
     catalog = await service.get_tool_catalog(
         server_path_filter=server_path,
-        user_scopes=user_scopes,
+        user_context=user_context,
     )
 
     # Group by server for convenience

@@ -753,9 +753,7 @@ class TestNginxTrigger:
         mock_search_repo.remove_entity = AsyncMock(return_value=True)
 
         with (
-            patch.object(
-                service, "_trigger_nginx_reload", new_callable=AsyncMock
-            ) as mock_reload,
+            patch.object(service, "_trigger_nginx_reload", new_callable=AsyncMock) as mock_reload,
             patch(
                 "registry.services.virtual_server_service.get_search_repository",
                 return_value=mock_search_repo,
@@ -825,9 +823,14 @@ class TestToolCatalogService:
             svc = ToolCatalogService()
             return svc
 
+    @pytest.fixture
+    def admin_context(self):
+        """A user context with administrator privileges (sees all servers)."""
+        return {"is_admin": True, "accessible_servers": [], "username": "admin", "groups": []}
+
     @pytest.mark.asyncio
     async def test_catalog_aggregates_from_multiple_servers(
-        self, catalog_service, mock_server_repo
+        self, catalog_service, mock_server_repo, admin_context
     ):
         """Test that catalog aggregates tools from multiple enabled servers."""
         mock_server_repo.list_all.return_value = {
@@ -847,7 +850,7 @@ class TestToolCatalogService:
         }
         mock_server_repo.get_state.return_value = True
 
-        catalog = await catalog_service.get_tool_catalog()
+        catalog = await catalog_service.get_tool_catalog(user_context=admin_context)
 
         assert len(catalog) == 3
         tool_names = [entry.tool_name for entry in catalog]
@@ -856,7 +859,9 @@ class TestToolCatalogService:
         assert "get_ticket" in tool_names
 
     @pytest.mark.asyncio
-    async def test_catalog_filters_disabled_servers(self, catalog_service, mock_server_repo):
+    async def test_catalog_filters_disabled_servers(
+        self, catalog_service, mock_server_repo, admin_context
+    ):
         """Test that catalog excludes tools from disabled servers."""
         mock_server_repo.list_all.return_value = {
             "/github": {
@@ -875,14 +880,16 @@ class TestToolCatalogService:
         # GitHub enabled, Jira disabled
         mock_server_repo.get_state.side_effect = [True, False]
 
-        catalog = await catalog_service.get_tool_catalog()
+        catalog = await catalog_service.get_tool_catalog(user_context=admin_context)
 
         assert len(catalog) == 1
         assert catalog[0].tool_name == "search"
         assert catalog[0].server_path == "/github"
 
     @pytest.mark.asyncio
-    async def test_catalog_filters_by_server_path(self, catalog_service, mock_server_repo):
+    async def test_catalog_filters_by_server_path(
+        self, catalog_service, mock_server_repo, admin_context
+    ):
         """Test that catalog can filter by server_path."""
         mock_server_repo.list_all.return_value = {
             "/github": {
@@ -900,13 +907,17 @@ class TestToolCatalogService:
         }
         mock_server_repo.get_state.return_value = True
 
-        catalog = await catalog_service.get_tool_catalog(server_path_filter="/github")
+        catalog = await catalog_service.get_tool_catalog(
+            server_path_filter="/github", user_context=admin_context
+        )
 
         assert len(catalog) == 1
         assert catalog[0].server_path == "/github"
 
     @pytest.mark.asyncio
-    async def test_catalog_skips_version_documents(self, catalog_service, mock_server_repo):
+    async def test_catalog_skips_version_documents(
+        self, catalog_service, mock_server_repo, admin_context
+    ):
         """Test that catalog skips version documents (paths with ':')."""
         mock_server_repo.list_all.return_value = {
             "/github": {
@@ -924,22 +935,26 @@ class TestToolCatalogService:
         }
         mock_server_repo.get_state.return_value = True
 
-        catalog = await catalog_service.get_tool_catalog()
+        catalog = await catalog_service.get_tool_catalog(user_context=admin_context)
 
         assert len(catalog) == 1
         assert catalog[0].server_path == "/github"
 
     @pytest.mark.asyncio
-    async def test_catalog_empty_when_no_servers(self, catalog_service, mock_server_repo):
+    async def test_catalog_empty_when_no_servers(
+        self, catalog_service, mock_server_repo, admin_context
+    ):
         """Test that catalog returns empty list when no servers exist."""
         mock_server_repo.list_all.return_value = {}
 
-        catalog = await catalog_service.get_tool_catalog()
+        catalog = await catalog_service.get_tool_catalog(user_context=admin_context)
 
         assert catalog == []
 
     @pytest.mark.asyncio
-    async def test_catalog_includes_available_versions(self, catalog_service, mock_server_repo):
+    async def test_catalog_includes_available_versions(
+        self, catalog_service, mock_server_repo, admin_context
+    ):
         """Test that catalog entries include available versions."""
         mock_server_repo.list_all.return_value = {
             "/github": {
@@ -953,14 +968,16 @@ class TestToolCatalogService:
         }
         mock_server_repo.get_state.return_value = True
 
-        catalog = await catalog_service.get_tool_catalog()
+        catalog = await catalog_service.get_tool_catalog(user_context=admin_context)
 
         assert len(catalog) == 1
         assert "v2.0.0" in catalog[0].available_versions
         assert "v1.5.0" in catalog[0].available_versions
 
     @pytest.mark.asyncio
-    async def test_catalog_skips_tools_without_name(self, catalog_service, mock_server_repo):
+    async def test_catalog_skips_tools_without_name(
+        self, catalog_service, mock_server_repo, admin_context
+    ):
         """Test that catalog skips tool entries that have no name."""
         mock_server_repo.list_all.return_value = {
             "/github": {
@@ -974,25 +991,23 @@ class TestToolCatalogService:
         }
         mock_server_repo.get_state.return_value = True
 
-        catalog = await catalog_service.get_tool_catalog()
+        catalog = await catalog_service.get_tool_catalog(user_context=admin_context)
 
         assert len(catalog) == 1
         assert catalog[0].tool_name == "search"
 
     @pytest.mark.asyncio
-    async def test_catalog_filters_by_user_scopes(self, catalog_service, mock_server_repo):
-        """Test that catalog filters out servers the user lacks scopes for."""
+    async def test_catalog_filters_by_accessible_servers(self, catalog_service, mock_server_repo):
+        """A non-admin only sees tools from servers in their accessible_servers list."""
         mock_server_repo.list_all.return_value = {
             "/github": {
                 "server_name": "GitHub",
-                "required_scopes": ["read:repos"],
                 "tool_list": [
                     {"name": "search", "description": "Search repos"},
                 ],
             },
             "/jira": {
                 "server_name": "Jira",
-                "required_scopes": ["admin:jira"],
                 "tool_list": [
                     {"name": "get_ticket", "description": "Get ticket"},
                 ],
@@ -1006,8 +1021,16 @@ class TestToolCatalogService:
         }
         mock_server_repo.get_state.return_value = True
 
-        # User has read:repos but not admin:jira
-        catalog = await catalog_service.get_tool_catalog(user_scopes=["read:repos"])
+        # User can access github and slack (by technical name), but NOT jira.
+        # Per-server tool wildcard ({"*"}) isolates this to server-level access.
+        user_context = {
+            "is_admin": False,
+            "accessible_servers": ["github", "slack"],
+            "accessible_tools": {"github": {"*"}, "slack": {"*"}},
+            "username": "alice",
+            "groups": [],
+        }
+        catalog = await catalog_service.get_tool_catalog(user_context=user_context)
 
         assert len(catalog) == 2
         tool_names = [entry.tool_name for entry in catalog]
@@ -1016,12 +1039,40 @@ class TestToolCatalogService:
         assert "get_ticket" not in tool_names
 
     @pytest.mark.asyncio
-    async def test_catalog_no_filtering_when_scopes_none(self, catalog_service, mock_server_repo):
-        """Test that passing user_scopes=None returns all servers (no filtering)."""
+    async def test_catalog_hides_tools_from_inaccessible_server(
+        self, catalog_service, mock_server_repo
+    ):
+        """A user without scope for server X must NOT see any of X's tools.
+
+        This is the core information-disclosure guard: even though the tools
+        exist and the server is enabled, the caller has no access grant for it.
+        """
+        mock_server_repo.list_all.return_value = {
+            "/secret": {
+                "server_name": "SecretServer",
+                "tool_list": [
+                    {"name": "exfiltrate", "description": "Sensitive tool"},
+                ],
+            },
+        }
+        mock_server_repo.get_state.return_value = True
+
+        user_context = {
+            "is_admin": False,
+            "accessible_servers": ["github"],
+            "username": "bob",
+            "groups": [],
+        }
+        catalog = await catalog_service.get_tool_catalog(user_context=user_context)
+
+        assert catalog == []
+
+    @pytest.mark.asyncio
+    async def test_catalog_none_context_fails_closed(self, catalog_service, mock_server_repo):
+        """Passing user_context=None returns NOTHING (fail closed), not everything."""
         mock_server_repo.list_all.return_value = {
             "/github": {
                 "server_name": "GitHub",
-                "required_scopes": ["admin:everything"],
                 "tool_list": [
                     {"name": "search", "description": "Search repos"},
                 ],
@@ -1029,20 +1080,18 @@ class TestToolCatalogService:
         }
         mock_server_repo.get_state.return_value = True
 
-        catalog = await catalog_service.get_tool_catalog(user_scopes=None)
+        catalog = await catalog_service.get_tool_catalog(user_context=None)
 
-        assert len(catalog) == 1
-        assert catalog[0].tool_name == "search"
+        assert catalog == []
 
     @pytest.mark.asyncio
-    async def test_catalog_empty_scopes_filters_restricted_servers(
+    async def test_catalog_empty_accessible_servers_returns_nothing(
         self, catalog_service, mock_server_repo
     ):
-        """Test that user with empty scopes is filtered out from restricted servers."""
+        """A user with an empty accessible_servers list sees no tools."""
         mock_server_repo.list_all.return_value = {
             "/github": {
                 "server_name": "GitHub",
-                "required_scopes": ["read:repos"],
                 "tool_list": [
                     {"name": "search", "description": "Search repos"},
                 ],
@@ -1056,25 +1105,28 @@ class TestToolCatalogService:
         }
         mock_server_repo.get_state.return_value = True
 
-        catalog = await catalog_service.get_tool_catalog(user_scopes=[])
+        user_context = {
+            "is_admin": False,
+            "accessible_servers": [],
+            "username": "carol",
+            "groups": [],
+        }
+        catalog = await catalog_service.get_tool_catalog(user_context=user_context)
 
-        assert len(catalog) == 1
-        assert catalog[0].tool_name == "send_message"
+        assert catalog == []
 
     @pytest.mark.asyncio
-    async def test_catalog_user_with_all_scopes_sees_all(self, catalog_service, mock_server_repo):
-        """Test that user with all required scopes sees all servers."""
+    async def test_catalog_wildcard_access_sees_all(self, catalog_service, mock_server_repo):
+        """A non-admin with the 'all' server grant sees every server's tools."""
         mock_server_repo.list_all.return_value = {
             "/github": {
                 "server_name": "GitHub",
-                "required_scopes": ["read:repos"],
                 "tool_list": [
                     {"name": "search", "description": "Search repos"},
                 ],
             },
             "/jira": {
                 "server_name": "Jira",
-                "required_scopes": ["admin:jira", "read:projects"],
                 "tool_list": [
                     {"name": "get_ticket", "description": "Get ticket"},
                 ],
@@ -1082,11 +1134,94 @@ class TestToolCatalogService:
         }
         mock_server_repo.get_state.return_value = True
 
-        catalog = await catalog_service.get_tool_catalog(
-            user_scopes=["read:repos", "admin:jira", "read:projects"]
-        )
+        user_context = {
+            "is_admin": False,
+            "accessible_servers": ["all"],
+            "username": "dave",
+            "groups": [],
+        }
+        catalog = await catalog_service.get_tool_catalog(user_context=user_context)
 
         assert len(catalog) == 2
+
+    @pytest.mark.asyncio
+    async def test_catalog_admin_sees_all(self, catalog_service, mock_server_repo, admin_context):
+        """An admin sees every server's tools regardless of accessible_servers."""
+        mock_server_repo.list_all.return_value = {
+            "/github": {
+                "server_name": "GitHub",
+                "tool_list": [
+                    {"name": "search", "description": "Search repos"},
+                ],
+            },
+            "/jira": {
+                "server_name": "Jira",
+                "tool_list": [
+                    {"name": "get_ticket", "description": "Get ticket"},
+                ],
+            },
+        }
+        mock_server_repo.get_state.return_value = True
+
+        catalog = await catalog_service.get_tool_catalog(user_context=admin_context)
+
+        assert len(catalog) == 2
+
+    @pytest.mark.asyncio
+    async def test_catalog_applies_per_tool_allowlist(self, catalog_service, mock_server_repo):
+        """A caller with server access but a restricted tool set only sees allowed tools."""
+        mock_server_repo.list_all.return_value = {
+            "/github": {
+                "server_name": "GitHub",
+                "tool_list": [
+                    {"name": "search", "description": "Search repos"},
+                    {"name": "delete_repo", "description": "Delete a repo"},
+                ],
+            },
+        }
+        mock_server_repo.get_state.return_value = True
+
+        # Server access granted, but only the "search" tool is allowed.
+        user_context = {
+            "is_admin": False,
+            "accessible_servers": ["github"],
+            "accessible_tools": {"github": {"search"}},
+            "username": "erin",
+            "groups": [],
+        }
+        catalog = await catalog_service.get_tool_catalog(user_context=user_context)
+
+        tool_names = [entry.tool_name for entry in catalog]
+        assert tool_names == ["search"]
+        assert "delete_repo" not in tool_names
+
+    @pytest.mark.asyncio
+    async def test_catalog_tool_filter_fails_closed_without_allowlist(
+        self, catalog_service, mock_server_repo
+    ):
+        """Server access without any tool allowlist entry yields no tools (fail closed)."""
+        mock_server_repo.list_all.return_value = {
+            "/github": {
+                "server_name": "GitHub",
+                "tool_list": [
+                    {"name": "search", "description": "Search repos"},
+                ],
+            },
+        }
+        mock_server_repo.get_state.return_value = True
+
+        # accessible_servers grants the server, but accessible_tools has no
+        # entry for it -> per-tool filter fails closed.
+        user_context = {
+            "is_admin": False,
+            "accessible_servers": ["github"],
+            "accessible_tools": {},
+            "username": "frank",
+            "groups": [],
+        }
+        catalog = await catalog_service.get_tool_catalog(user_context=user_context)
+
+        assert catalog == []
 
 
 # --- Unit tests for nginx reload failure handling ---
@@ -1429,7 +1564,9 @@ class TestNginxReloadLock:
             await asyncio.sleep(0.01)
 
         mock_scheduler = MagicMock()
-        mock_scheduler.mark_dirty = MagicMock(side_effect=lambda: call_count.update({"mark_dirty": call_count["mark_dirty"] + 1}))
+        mock_scheduler.mark_dirty = MagicMock(
+            side_effect=lambda: call_count.update({"mark_dirty": call_count["mark_dirty"] + 1})
+        )
         mock_scheduler.flush_now = AsyncMock(side_effect=mock_flush_now)
 
         with patch(

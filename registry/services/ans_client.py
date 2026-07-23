@@ -209,7 +209,7 @@ async def _resolve_ans_id(
     # paginating through all 60k+ agents.
     try:
         after_scheme = ans_agent_id.split("//", 1)[1]  # v1.0.0.tourist-guide.agentworks.fr
-        segments = after_scheme.split(".", 3)           # ['v1', '0', '0', 'tourist-guide...']
+        segments = after_scheme.split(".", 3)  # ['v1', '0', '0', 'tourist-guide...']
         ans_host = segments[3] if len(segments) > 3 else None
     except (IndexError, ValueError):
         ans_host = None

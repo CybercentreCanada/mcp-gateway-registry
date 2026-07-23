@@ -40,7 +40,7 @@ const AuditLogsPage: React.FC<AuditLogsPageProps> = ({ embedded = false }) => {
     const params = new URLSearchParams();
     params.set('stream', filters.stream);
     params.set('format', format);
-    
+
     if (filters.from) {
       params.set('from', new Date(filters.from).toISOString());
     }
@@ -62,7 +62,7 @@ const AuditLogsPage: React.FC<AuditLogsPageProps> = ({ embedded = false }) => {
     if (filters.statusMax !== undefined) {
       params.set('status_max', filters.statusMax.toString());
     }
-    
+
     // Trigger download by opening the export URL
     window.open(`/api/audit/export?${params.toString()}`, '_blank');
   }, [filters]);

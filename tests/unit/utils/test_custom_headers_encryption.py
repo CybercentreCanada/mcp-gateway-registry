@@ -7,9 +7,9 @@ from unittest.mock import patch
 import pytest
 
 from registry.utils.credential_encryption import (
+    CUSTOM_HEADER_NAMES_FIELD,
     CUSTOM_HEADERS_ENCRYPTED_FIELD,
     CUSTOM_HEADERS_PLAINTEXT_FIELD,
-    CUSTOM_HEADER_NAMES_FIELD,
     decrypt_custom_headers,
     encrypt_credential,
     encrypt_custom_headers_in_server_dict,

@@ -54,3 +54,18 @@ PRIVILEGED_SCOPE_NAMES: frozenset[str] = frozenset(
         "mcp-servers-unrestricted/read",
     }
 )
+
+# Group-name markers that confer registry-administrator privileges by membership.
+# This is the single source of truth for "which group names mean admin" and MUST
+# agree across every layer that makes an admin decision by group membership:
+#
+# - ``auth_server.server`` uses it for the A2A admin bypass and for rejecting a
+#   token-mint request that claims a privileged group the session never held.
+# - ``auth_server.mongodb_groups_enrichment`` uses it to audit when DB group
+#   enrichment grants an admin group.
+#
+# These were previously two separate hardcoded frozensets kept aligned only by
+# comments; centralizing here means an admin-group rename is picked up by every
+# gate at once. This is a strict subset of ``PRIVILEGED_SCOPE_NAMES`` (which also
+# covers scope-shaped names); keep the two consistent for the shared entries.
+ADMIN_GROUP_MARKERS: frozenset[str] = frozenset({"mcp-registry-admin", "registry-admins"})

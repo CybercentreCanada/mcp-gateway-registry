@@ -28,7 +28,6 @@ Dependencies: `Network ← Data ← Auth ← Service`; `Network,Data ← Ops`; `
 - `observability-pipeline.ts` — AMP + Grafana + ADOT
 - `cloudfront-distribution.ts`, `waf-rules.ts`, `codebuild-pipeline.ts`
 - `secret-rotation.ts` — DocumentDB rotation Lambda (Aurora uses `secretsmanager.HostedRotation`)
-- `scopes-loader.ts` — Lambda + custom resource that upserts UI-Scope group docs into DocumentDB and copies `auth_server/scopes.yml` to EFS on every deploy. Source in [`infra/lambda/scopes-loader/`](../lambda/scopes-loader/). Bridges a gap with the upstream registry image, which only seeds `registry-admins`.
 - `registry-alarms.ts` — CloudWatch alarms (ECS CPU/memory, ALB unhealthy/5xx/latency, DocumentDB audit failures). No-op when `monitoring.enabled=false` or no `alarmEmail`/`alarmSnsTopicArn` set.
 - `_lib.ts` — `putSecureSsmParam` shared helper
 

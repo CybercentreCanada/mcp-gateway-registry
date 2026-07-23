@@ -1897,9 +1897,14 @@ class TestRunSecurityScanOnRegistrationUpdatesViaUpdateAgent:
         # tag. register_agent must NOT be called inside this helper because
         # the agent was already inserted by the caller.
         assert service_mock.update_agent.await_count == 1
-        called_path, called_card = service_mock.update_agent.await_args.args
+        called_path, called_updates = service_mock.update_agent.await_args.args
         assert called_path == path
-        assert "security-pending" in called_card.tags
+        # update_agent takes a DICT of fields to merge (it calls updates.get()).
+        # Passing an AgentCard instance raised
+        # "'AgentCard' object has no attribute 'get'". Regression: must be a dict
+        # whose tags include the security-pending marker.
+        assert isinstance(called_updates, dict)
+        assert "security-pending" in called_updates["tags"]
         assert service_mock.register_agent.await_count == 0
 
         # block_unsafe_agents was False, so the scan helper does not toggle
@@ -1985,9 +1990,9 @@ class TestRunSecurityScanOnRegistrationUpdatesViaUpdateAgent:
         assert search_repo_mock.index_agent.await_count == 1
         called_path, called_card = search_repo_mock.index_agent.await_args.args
         assert called_path == path
-        assert isinstance(
-            called_card, AgentCard
-        ), f"index_agent was called with {type(called_card).__name__}, expected AgentCard"
+        assert isinstance(called_card, AgentCard), (
+            f"index_agent was called with {type(called_card).__name__}, expected AgentCard"
+        )
 
     @pytest.mark.asyncio
     async def test_safe_scan_does_not_call_update_agent(

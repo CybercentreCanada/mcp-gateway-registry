@@ -41,9 +41,7 @@ class WWWAuthenticateMiddleware(BaseHTTPMiddleware):
         resource_metadata_url: str,
     ):
         super().__init__(app)
-        self._header_value = (
-            f'Bearer realm="mcp", resource_metadata="{resource_metadata_url}"'
-        )
+        self._header_value = f'Bearer realm="mcp", resource_metadata="{resource_metadata_url}"'
 
     async def dispatch(
         self,

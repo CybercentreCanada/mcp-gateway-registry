@@ -584,9 +584,7 @@ class TestServerPatchLifecycleStatusPermission:
             svc.get_server_info = AsyncMock(side_effect=[existing, fresh])
             svc.update_server = AsyncMock(return_value=True)
 
-            response = client.patch(
-                "/servers/test-server", json={"description": "patched"}
-            )
+            response = client.patch("/servers/test-server", json={"description": "patched"})
 
         assert response.status_code == 200
         gate.assert_not_called()

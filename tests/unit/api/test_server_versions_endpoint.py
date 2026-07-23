@@ -85,7 +85,9 @@ def mock_server_service():
     # Default: server exists (versions guard resolves it via get_server_info)
     mock_service.get_server_info = AsyncMock(return_value={"server_name": "Test Server"})
     mock_service.user_can_access_server_path = AsyncMock(return_value=True)
-    mock_service.get_server_versions = AsyncMock(return_value={"path": "/test-server", "versions": []})
+    mock_service.get_server_versions = AsyncMock(
+        return_value={"path": "/test-server", "versions": []}
+    )
     return mock_service
 
 

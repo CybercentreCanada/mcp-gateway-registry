@@ -498,8 +498,7 @@ class SyncOrchestrator:
                 # whichever is present so the token refresher can derive the
                 # OAuth2 ``scope`` value (Entra requires ``<aud>/.default``).
                 "allowed_audience": (
-                    jwt_config.get("allowedAudience")
-                    or jwt_config.get("allowedAudiences", [])
+                    jwt_config.get("allowedAudience") or jwt_config.get("allowedAudiences", [])
                 ),
                 "idp_vendor": _detect_idp_vendor(discovery_url),
             }

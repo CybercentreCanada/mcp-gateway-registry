@@ -94,6 +94,39 @@ def redact_server_backend_fields(
     return server_dict
 
 
+# Agent card backend-URL fields to strip for non-admins in with-gateway mode.
+# In A2A reverse-proxy mode the registrant's real backend is stored in
+# proxy_pass_url (the advertised ``url`` is the gateway address), so proxy_pass_url
+# is the internal field to hide -- mirroring the MCP-server redaction. Both the
+# snake_case and camelCase (by_alias dump) spellings are covered.
+_AGENT_BACKEND_URL_FIELDS: tuple[str, ...] = (
+    "proxy_pass_url",
+    "proxyPassUrl",
+)
+
+
+def redact_agent_backend_fields(
+    agent_dict: dict,
+) -> dict:
+    """Strip internal backend URL fields from an agent card dict in place.
+
+    Removes ``proxy_pass_url`` (both snake_case and camelCase spellings) so a
+    non-admin caller sees only the gateway-facing ``url``. Callers MUST gate this
+    behind :func:`should_redact_backend_urls`; this function performs no
+    authorization decision of its own. Mirrors
+    :func:`redact_server_backend_fields`.
+
+    Args:
+        agent_dict: An agent card dict to redact in place.
+
+    Returns:
+        The same dict, with backend URL fields removed.
+    """
+    for field in _AGENT_BACKEND_URL_FIELDS:
+        agent_dict.pop(field, None)
+    return agent_dict
+
+
 async def user_can_access_server(
     path: str,
     server_name: str,

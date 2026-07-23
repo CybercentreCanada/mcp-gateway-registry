@@ -58,9 +58,9 @@ _PF_USERS_TABLE_NAME = "Users"
 _PF_USERNAME_FIELD = "Username"
 # The three constants below are PingFederate Simple PCV form-field *labels*
 # (API field names), not credentials; allowlisted for the secret scanner.
-_PF_PASSWORD_FIELD = "Password"  # pragma: allowlist secret
-_PF_CONFIRM_PASSWORD_FIELD = "Confirm Password"  # pragma: allowlist secret
-_PF_RELAX_PASSWORD_FIELD = "Relax Password Requirements"  # pragma: allowlist secret
+_PF_PASSWORD_FIELD = "Password"  # nosec B105 - PingFederate form-field label, not a secret  # pragma: allowlist secret
+_PF_CONFIRM_PASSWORD_FIELD = "Confirm Password"  # nosec B105 - PingFederate form-field label, not a secret  # pragma: allowlist secret
+_PF_RELAX_PASSWORD_FIELD = "Relax Password Requirements"  # nosec B105 - PingFederate form-field label, not a secret  # pragma: allowlist secret
 
 
 def _require_admin(

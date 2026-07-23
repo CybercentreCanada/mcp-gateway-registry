@@ -2,7 +2,7 @@
   "server_name": "Real Server Fake Tools",
   "description": "A collection of fake tools with interesting names that take different parameter types",
   "path": "/realserverfaketools/",
-  "proxy_pass_url": "http://realserverfaketools-server:8002/",  
+  "proxy_pass_url": "http://realserverfaketools-server:8002/",
   "supported_transports": ["streamable-http"],
   "auth_scheme": "none",
   "tags": ["demo", "fake", "tools", "testing"],

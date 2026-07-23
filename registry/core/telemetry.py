@@ -208,9 +208,7 @@ def _probe_imds() -> str | None:
                 # Log only the exception type. Never log the URL, headers, body,
                 # or stack trace - any of those could leak sensitive content if
                 # the underlying library is later changed.
-                logger.debug(
-                    f"[telemetry] imds probe {provider} failed: {type(e).__name__}"
-                )
+                logger.debug(f"[telemetry] imds probe {provider} failed: {type(e).__name__}")
                 continue
     return None
 

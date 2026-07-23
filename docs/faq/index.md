@@ -32,6 +32,7 @@ Common questions and answers about the MCP Gateway Registry.
 ## Amazon Bedrock AgentCore
 
 - [How do I bulk-register all AgentCore Gateways and Runtimes from my AWS account?](agentcore-bulk-registration.md)
+- [How do I use a 3LO (per-user OAuth) AgentCore Gateway with the registry?](agentcore-3lo-per-user-oauth.md)
 
 ## Deployment Customization
 

@@ -206,7 +206,7 @@ class MetricsValidator:
             result.add_error(field, "Metric value is required")
             return
 
-        if not isinstance(value, (int, float)):
+        if not isinstance(value, int | float):
             result.add_error(field, f"Metric value must be numeric, got {type(value).__name__}")
             return
 
@@ -227,7 +227,7 @@ class MetricsValidator:
 
     def _validate_duration(self, duration: float, field: str, result: ValidationResult):
         """Validate duration in milliseconds."""
-        if not isinstance(duration, (int, float)):
+        if not isinstance(duration, int | float):
             result.add_error(field, f"Duration must be numeric, got {type(duration).__name__}")
             return
 
@@ -292,7 +292,7 @@ class MetricsValidator:
             )
 
         # Warn about non-string values that will be converted
-        if not isinstance(value, (str, int, float, bool)):
+        if not isinstance(value, str | int | float | bool):
             result.add_warning(
                 f"Dimension value at {field} will be converted to string: {type(value).__name__}"
             )
@@ -330,7 +330,7 @@ class MetricsValidator:
             return  # None values are allowed
 
         # Convert to string for length validation if not already serializable
-        if isinstance(value, (dict, list)):
+        if isinstance(value, dict | list):
             try:
                 import json
 

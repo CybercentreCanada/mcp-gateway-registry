@@ -85,6 +85,12 @@ def build_authorize_url(
     if cfg.use_pkce and pkce_challenge:
         params["code_challenge"] = pkce_challenge
         params["code_challenge_method"] = "S256"
+    # RFC 8707 resource indicator. Sent here on the authorize leg AND on the
+    # token/refresh legs (see exchange_code/refresh_token) -- providers like
+    # Atlassian's Rovo MCP require it on BOTH or they reject the flow. Set before
+    # extra_authorize_params so a built-in's static params still win a collision.
+    if cfg.resource:
+        params["resource"] = cfg.resource
     params.update(cfg.extra_authorize_params)
     return f"{cfg.authorize_url}?{urlencode(params)}"
 
@@ -249,6 +255,10 @@ async def exchange_code(
     }
     if cfg.use_pkce and pkce_verifier:
         form["code_verifier"] = pkce_verifier
+    # RFC 8707: the resource indicator MUST match the one sent on authorize, or a
+    # resource server like Atlassian's Rovo MCP rejects the exchange.
+    if cfg.resource:
+        form["resource"] = cfg.resource
     data, headers = _build_token_request(cfg, client_id, client_secret, form)
     payload = await _post_token(cfg, data, headers)
     return _to_stored_token(cfg, payload, client_id)
@@ -269,6 +279,10 @@ async def refresh_token(
         "grant_type": "refresh_token",
         "refresh_token": refresh_token_value,
     }
+    # RFC 8707: carry the resource indicator on refresh too so the rotated access
+    # token stays bound to the same protected resource.
+    if cfg.resource:
+        form["resource"] = cfg.resource
     data, headers = _build_token_request(cfg, client_id, client_secret, form)
     payload = await _post_token(cfg, data, headers)
     return _to_stored_token(cfg, payload, client_id, fallback_refresh=refresh_token_value)

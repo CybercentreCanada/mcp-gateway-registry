@@ -75,9 +75,7 @@ async def get_public_server(
     """
     target = leaf.strip("/")
     repo = get_server_repository()
-    records = await repo.find_with_filter(
-        {"is_enabled": True, "visibility": "public"}, limit=None
-    )
+    records = await repo.find_with_filter({"is_enabled": True, "visibility": "public"}, limit=None)
     for path, record in records.items():
         if _sanitize_name(path) == target:
             canonical, _ = to_canonical({**record, "path": path})
@@ -93,9 +91,7 @@ async def get_public_agent(
     """Public agent card for a public + enabled A2A agent."""
     target = leaf.strip("/")
     repo = get_agent_repository()
-    records = await repo.find_with_filter(
-        {"is_enabled": True, "visibility": "public"}, limit=None
-    )
+    records = await repo.find_with_filter({"is_enabled": True, "visibility": "public"}, limit=None)
     for path, record in records.items():
         if _sanitize_name(path) == target:
             return _strip_fields(record, _AGENT_SENSITIVE_FIELDS)

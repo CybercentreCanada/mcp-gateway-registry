@@ -94,7 +94,9 @@ class ArdIngestionService:
         """Ingest a single source. Never raises; failures return a failed SyncResult."""
         lock = self._lock_for(source.source_id)
         if lock.locked():
-            logger.info("ARD ingestion for source %s already in progress; skipping", source.source_id)
+            logger.info(
+                "ARD ingestion for source %s already in progress; skipping", source.source_id
+            )
             return SyncResult(
                 success=False,
                 peer_id=source.source_id,
@@ -151,10 +153,14 @@ class ArdIngestionService:
             ard_ingestion_entries_total.add(indexed, {"source_id": sid, "outcome": "indexed"})
             if rejected:
                 ard_ingestion_entries_total.add(rejected, {"source_id": sid, "outcome": "rejected"})
-                ard_trust_mismatch_total.add(rejected, {"source_id": sid, "policy": cfg.trust_enforcement})
+                ard_trust_mismatch_total.add(
+                    rejected, {"source_id": sid, "policy": cfg.trust_enforcement}
+                )
             orphaned_total = len(orphaned_servers) + len(orphaned_agents) + skills_orphaned
             if orphaned_total:
-                ard_ingestion_entries_total.add(orphaned_total, {"source_id": sid, "outcome": "orphaned"})
+                ard_ingestion_entries_total.add(
+                    orphaned_total, {"source_id": sid, "outcome": "orphaned"}
+                )
             self._state[source.source_id] = {
                 "generation": generation,
                 "last_synced_at": datetime.now(UTC).isoformat(),
@@ -171,8 +177,16 @@ class ArdIngestionService:
             logger.info(
                 "ARD ingestion source=%s gen=%d servers=%d agents=%d skills=%d rejected=%d "
                 "orphaned=%d/%d/%d elapsed_ms=%.1f",
-                source.source_id, generation, servers_stored, agents_stored, skills_stored, rejected,
-                len(orphaned_servers), len(orphaned_agents), skills_orphaned, duration * 1000,
+                source.source_id,
+                generation,
+                servers_stored,
+                agents_stored,
+                skills_stored,
+                rejected,
+                len(orphaned_servers),
+                len(orphaned_agents),
+                skills_orphaned,
+                duration * 1000,
             )
             return SyncResult(
                 success=True,
@@ -185,7 +199,9 @@ class ArdIngestionService:
                 new_generation=generation,
             )
         except Exception as e:  # noqa: BLE001 - never let one source kill the scheduler
-            logger.error("ARD ingestion failed for source %s: %s", source.source_id, e, exc_info=True)
+            logger.error(
+                "ARD ingestion failed for source %s: %s", source.source_id, e, exc_info=True
+            )
             ard_ingestion_runs_total.add(1, {"source_id": source.source_id, "status": "error"})
             failures = int(prev.get("consecutive_failures", 0)) + 1
             self._state[source.source_id] = {
@@ -222,7 +238,9 @@ class ArdIngestionService:
             trust = manifest.host.trust_manifest
             host_domain = host_identity_domain(trust.identity) if trust else None
             for entry in manifest.entries:
-                accept, reason = verify_entry_trust(entry, host_domain, source, cfg.trust_enforcement)
+                accept, reason = verify_entry_trust(
+                    entry, host_domain, source, cfg.trust_enforcement
+                )
                 if not accept:
                     rejected += 1
                     continue

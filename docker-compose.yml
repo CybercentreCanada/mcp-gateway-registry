@@ -168,6 +168,10 @@ services:
       - CODING_ASSISTANTS=${CODING_ASSISTANTS:-}
       # UI title override. Empty = deployment-mode-aware default.
       - UI_TITLE=${UI_TITLE:-}
+      # Base64-encoded HTML snippet served as /rum.js for frontend RUM. Empty disables RUM. May contain a vendor token.
+      - RUM_SNIPPET_B64=${RUM_SNIPPET_B64:-}
+      # Comma-separated host allowlist for the RUM snippet (fail-closed when set). Empty disables the check.
+      - RUM_ALLOWED_HOSTS=${RUM_ALLOWED_HOSTS:-}
       - GATEWAY_ADDITIONAL_SERVER_NAMES=${GATEWAY_ADDITIONAL_SERVER_NAMES:-}
       # Registry Card Configuration
       - REGISTRY_URL=${REGISTRY_URL:-http://localhost}
@@ -190,6 +194,17 @@ services:
       - MCP_HTTPS_REQUIRED=${MCP_HTTPS_REQUIRED:-true}
       - MCP_RESOURCE_DOCUMENTATION_URL=${MCP_RESOURCE_DOCUMENTATION_URL:-}
       - MCP_ADVERTISED_SCOPES=${MCP_ADVERTISED_SCOPES:-}
+      # A2A reverse-proxy gateway (opt-in; default off). When true, each enabled
+      # A2A agent gets nginx location blocks proxying its card + JSON-RPC through
+      # the gateway for centralized auth/metrics.
+      - A2A_REVERSE_PROXY_ENABLED=${A2A_REVERSE_PROXY_ENABLED:-false}
+      # SSRF guard bypass for internal MCP-server / A2A-agent upstreams at private
+      # IPs (e.g. docker-network hostnames). The health checker and proxy validate
+      # each upstream URL through the SSRF guard, which blocks private IPs by
+      # default. List exact hosts (least privilege) or CIDR ranges here; the cloud
+      # metadata address (169.254.169.254) is never permitted by either.
+      - SSRF_ALLOWED_HOSTS=${SSRF_ALLOWED_HOSTS:-}
+      - SSRF_ALLOWED_CIDRS=${SSRF_ALLOWED_CIDRS:-}
       - SECRET_KEY=${SECRET_KEY}
       # Per-user egress credential vault (off by default)
       - EGRESS_AUTH_ENABLED=${EGRESS_AUTH_ENABLED:-false}
@@ -358,6 +373,16 @@ services:
       - DOCUMENTDB_USE_IAM=${DOCUMENTDB_USE_IAM:-false}
       - DOCUMENTDB_REPLICA_SET=${DOCUMENTDB_REPLICA_SET:-rs0}
       - DOCUMENTDB_READ_PREFERENCE=${DOCUMENTDB_READ_PREFERENCE:-secondaryPreferred}
+      # Rate Limiting Configuration (issue #295). Off by default; the registry
+      # side hosts the admin CRUD API for definitions.
+      - RATE_LIMITING_ENABLED=${RATE_LIMITING_ENABLED:-false}
+      - RATE_LIMIT_BACKEND=${RATE_LIMIT_BACKEND:-documentdb}
+      - RATE_LIMIT_FAIL_OPEN=${RATE_LIMIT_FAIL_OPEN:-true}
+      - RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS=${RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS:-30}
+      - RATE_LIMIT_BACKEND_TIMEOUT_MS=${RATE_LIMIT_BACKEND_TIMEOUT_MS:-250}
+      # Lockout-safeguard floors (registry validates group definitions at config time).
+      - RATE_LIMIT_USER_FLOOR_PER_MIN=${RATE_LIMIT_USER_FLOOR_PER_MIN:-20}
+      - RATE_LIMIT_AGENT_FLOOR_PER_MIN=${RATE_LIMIT_AGENT_FLOOR_PER_MIN:-10}
       # Embeddings Configuration
       - EMBEDDINGS_PROVIDER=${EMBEDDINGS_PROVIDER:-sentence-transformers}
       - EMBEDDINGS_MODEL_NAME=${EMBEDDINGS_MODEL_NAME:-all-MiniLM-L6-v2}
@@ -580,6 +605,7 @@ services:
       - COGNITO_CLIENT_SECRET=${COGNITO_CLIENT_SECRET}
       - COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID}
       - COGNITO_DOMAIN=${COGNITO_DOMAIN:-auto}
+      - COGNITO_M2M_CLIENT_IDS=${COGNITO_M2M_CLIENT_IDS:-}
       - COGNITO_ENABLED=${COGNITO_ENABLED:-false}
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
@@ -671,6 +697,13 @@ services:
       - DOCUMENTDB_USE_IAM=${DOCUMENTDB_USE_IAM:-false}
       - DOCUMENTDB_REPLICA_SET=${DOCUMENTDB_REPLICA_SET:-rs0}
       - DOCUMENTDB_READ_PREFERENCE=${DOCUMENTDB_READ_PREFERENCE:-secondaryPreferred}
+      # Rate Limiting Configuration (issue #295). Off by default; enforcement
+      # runs here in the /validate hop.
+      - RATE_LIMITING_ENABLED=${RATE_LIMITING_ENABLED:-false}
+      - RATE_LIMIT_BACKEND=${RATE_LIMIT_BACKEND:-documentdb}
+      - RATE_LIMIT_FAIL_OPEN=${RATE_LIMIT_FAIL_OPEN:-true}
+      - RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS=${RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS:-30}
+      - RATE_LIMIT_BACKEND_TIMEOUT_MS=${RATE_LIMIT_BACKEND_TIMEOUT_MS:-250}
       # Registry API static token auth (IdP-independent access)
       - REGISTRY_STATIC_TOKEN_AUTH_ENABLED=${REGISTRY_STATIC_TOKEN_AUTH_ENABLED:-false}
       - REGISTRY_API_TOKEN=${REGISTRY_API_TOKEN:-}

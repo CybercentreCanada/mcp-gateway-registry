@@ -16,14 +16,18 @@ from registry.services.ard_ingestion_service import get_ard_ingestion_service
 
 def _manifest(entries, identity="https://acme.com"):
     return AICatalogManifest(
-        host=ArdHost(display_name="Acme",
-                     trust_manifest=ArdTrustManifest(identity=identity, identity_type="https")),
+        host=ArdHost(
+            display_name="Acme",
+            trust_manifest=ArdTrustManifest(identity=identity, identity_type="https"),
+        ),
         entries=entries,
     )
 
 
 def _entry(identifier, type_="application/mcp-server-card+json"):
-    return ArdCatalogEntry(identifier=identifier, display_name="X", type=type_, url="https://acme.com/x")
+    return ArdCatalogEntry(
+        identifier=identifier, display_name="X", type=type_, url="https://acme.com/x"
+    )
 
 
 _SRC = AiCatalogSourceConfig(source_id="acme", domain="acme.com")
@@ -65,7 +69,9 @@ class TestMapDocuments:
             _entry("urn:air:acme.com:skill:c", "application/ai-skill"),
             _entry("urn:air:acme.com:registry:self", "application/ai-registry+json"),
         ]
-        servers, agents, skills, _rejected = svc._map_documents([(_manifest(entries), "u")], _SRC, cfg)
+        servers, agents, skills, _rejected = svc._map_documents(
+            [(_manifest(entries), "u")], _SRC, cfg
+        )
         assert len(servers) == 1
         assert len(agents) == 1
         assert len(skills) == 1  # skill mapped to a SkillCard dict; registry entry ignored
@@ -78,8 +84,13 @@ class TestSkillStorage:
         svc = get_ard_ingestion_service()
         repo = AsyncMock()
         skills = [
-            {"path": "/skills/acme/a", "name": "acme-a", "description": "d",
-             "skill_md_url": "https://acme.com/a", "registry_name": "acme"},
+            {
+                "path": "/skills/acme/a",
+                "name": "acme-a",
+                "description": "d",
+                "skill_md_url": "https://acme.com/a",
+                "registry_name": "acme",
+            },
         ]
         with patch.object(ingest, "get_skill_repository", return_value=repo):
             stored = await svc._store_skills(skills)
@@ -89,10 +100,12 @@ class TestSkillStorage:
     async def test_reconcile_removes_orphans_for_source(self):
         svc = get_ard_ingestion_service()
         repo = AsyncMock()
-        repo.list_filtered = AsyncMock(return_value=[
-            SimpleNamespace(path="/skills/acme/keep"),
-            SimpleNamespace(path="/skills/acme/gone"),
-        ])
+        repo.list_filtered = AsyncMock(
+            return_value=[
+                SimpleNamespace(path="/skills/acme/keep"),
+                SimpleNamespace(path="/skills/acme/gone"),
+            ]
+        )
         with patch.object(ingest, "get_skill_repository", return_value=repo):
             removed = await svc._reconcile_skill_orphans("acme", {"/skills/acme/keep"})
         assert removed == 1

@@ -59,6 +59,33 @@ _DEFAULT_TIMEOUT_SECONDS: float = 15.0
 # The cloud metadata endpoint can never be reached, regardless of allowlists.
 _CLOUD_METADATA_IPS: frozenset[str] = frozenset({"169.254.169.254", "fd00:ec2::254"})
 
+# Server path names that collide with the cross-server wildcard sentinels. A
+# registration path like ``/all`` or ``/*`` normalizes (lstrip("/")) to the
+# server-scope value ``all`` / ``*``, which the scope resolver promotes to a
+# full cross-server wildcard, silently granting the registrant access to every
+# server. These names are therefore reserved and rejected at registration.
+#
+# Kept case-insensitive on match: lstrip("/") preserves case, and while the
+# current resolver compare is case-sensitive, we reject the whole family so a
+# future or operator-UI case-insensitive compare cannot reopen the escalation.
+#
+# MUST stay in sync with registry.auth.access_resolver._WILDCARD_VALUES (the
+# read-side sentinel set). Defined locally rather than imported to keep this
+# low-level util free of a dependency on the auth/repository layers.
+_RESERVED_SERVER_PATH_NAMES: frozenset[str] = frozenset({"all", "*"})
+
+# Carrier-grade NAT / shared address space (RFC 6598). Blocked explicitly rather
+# than relying on ipaddress.is_private: is_private only classifies this range as
+# private on newer Python runtimes, so depending on the runtime is fragile -- a
+# downgrade or a semantics change would silently re-open it as an SSRF pivot to
+# an internal/CGNAT host. Blocking it here pins the behavior regardless of the
+# interpreter version. It is treated exactly like the other reserved private
+# ranges: an operator CIDR allowlist can re-permit it (same as 10/8 etc.), but
+# it is denied by default.
+_CGNAT_NETS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
+    ipaddress.ip_network("100.64.0.0/10"),
+)
+
 # The gateway's own bundled registry-tools MCP server (airegistry-tools ->
 # mcpgw-server), reached over private container/service DNS (Docker Compose
 # service name, ECS Service Connect alias, Kubernetes service name). This is a
@@ -244,6 +271,9 @@ def _is_blocked_ip(
         or ip.is_reserved
         or ip.is_multicast
         or ip.is_unspecified
+        # Explicit CGNAT (RFC 6598) block so this does not depend on the Python
+        # runtime's is_private semantics for the 100.64.0.0/10 range.
+        or any(ip in net for net in _CGNAT_NETS)
     )
     if not is_dangerous:
         return False
@@ -281,7 +311,7 @@ def _resolve_public_ips(
 
     ips: list[str] = []
     for _family, _socktype, _proto, _canonname, sockaddr in addr_info:
-        ip_str = sockaddr[0]
+        ip_str = str(sockaddr[0])
         if _is_blocked_ip(ip_str, allowlist):
             raise UrlValidationError(
                 hostname,
@@ -430,17 +460,36 @@ def validate_server_path(
     control chars, backslash). Legitimate paths only use URL path characters, so
     this rejects rather than escapes. Fails closed.
 
+    The path is also turned into a scope ``server`` value (via ``lstrip("/")``),
+    so a path that normalizes to a cross-server wildcard sentinel (``all`` /
+    ``*``) is rejected: such a value would silently grant access to every server
+    in the registry (see :data:`_RESERVED_SERVER_PATH_NAMES`).
+
     Args:
         path: The server path (e.g. ``/github``).
 
     Raises:
-        UrlValidationError: If the path is empty or contains disallowed
-            nginx metacharacters.
+        UrlValidationError: If the path is empty, contains disallowed nginx
+            metacharacters, or normalizes to a reserved cross-server wildcard
+            name.
     """
     if not path or not isinstance(path, str):
         raise UrlValidationError(str(path), "server path is empty or not a string")
     if contains_nginx_metacharacters(path):
         raise UrlValidationError(path, "server path contains disallowed nginx metacharacters")
+
+    # Normalize the same way the scope layer does (add_server_scope does
+    # server_path.lstrip("/")), then also drop trailing slashes so "/all/" and
+    # "//all//" collapse to the same reserved name. Compare case-insensitively.
+    # A path that normalizes to empty (e.g. "/") is left to existing handling:
+    # an empty server name is falsy and grants no access in the resolver, so it
+    # is not part of this escalation and must stay registerable.
+    normalized = path.strip("/")
+    if normalized.lower() in _RESERVED_SERVER_PATH_NAMES:
+        raise UrlValidationError(
+            path,
+            f"server path '{normalized}' is reserved (collides with the cross-server wildcard)",
+        )
 
 
 def validate_agent_url(

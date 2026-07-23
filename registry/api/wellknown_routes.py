@@ -79,7 +79,7 @@ async def _auto_initialize_registry_card():
         else:
             adjectives = ["brave", "clever", "swift", "bright", "noble", "wise", "bold", "keen"]
             nouns = ["falcon", "dolphin", "tiger", "phoenix", "dragon", "wolf", "eagle", "lion"]
-            registry_name = f"{random.choice(adjectives)}-{random.choice(nouns)}-registry"
+            registry_name = f"{random.choice(adjectives)}-{random.choice(nouns)}-registry"  # nosec B311 - cosmetic display name, not security-sensitive
             logger.info(f"Generated random registry name: {registry_name}")
 
         # Use organization name from config (defaults to "ACME Inc.")

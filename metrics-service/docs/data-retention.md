@@ -39,7 +39,7 @@ The service comes with predefined retention policies optimized for different dat
 ```python
 # Raw metrics - shorter retention
 metrics: 90 days
-auth_metrics: 90 days  
+auth_metrics: 90 days
 discovery_metrics: 90 days
 tool_metrics: 90 days
 
@@ -151,7 +151,7 @@ Content-Type: application/json
       "records_deleted": 1250
     },
     "auth_metrics": {
-      "status": "completed", 
+      "status": "completed",
       "records_deleted": 2250
     }
   }
@@ -177,7 +177,7 @@ X-API-Key: your-api-key
     "timestamp_column": "created_at"
   },
   "metrics_hourly": {
-    "table_name": "metrics_hourly", 
+    "table_name": "metrics_hourly",
     "retention_days": 365,
     "is_active": true,
     "timestamp_column": "created_at"
@@ -216,7 +216,7 @@ Content-Type: application/json
 Get detailed statistics for all tables:
 
 ```http
-GET /admin/database/stats  
+GET /admin/database/stats
 X-API-Key: your-api-key
 ```
 
@@ -226,7 +226,7 @@ X-API-Key: your-api-key
   "metrics": {
     "record_count": 50000,
     "oldest_record": "2024-01-01T00:00:00Z",
-    "newest_record": "2024-06-15T23:59:59Z", 
+    "newest_record": "2024-06-15T23:59:59Z",
     "has_retention_policy": true,
     "retention_days": 90,
     "policy_active": true
@@ -285,15 +285,15 @@ async def retention_cleanup_task():
             await asyncio.sleep(86400)  # Run once per day (24 hours)
             logger.info("Starting scheduled data retention cleanup...")
             result = await retention_manager.cleanup_all_tables(dry_run=False)
-            
+
             total_deleted = result.get('total_records_processed', 0)
             duration = result.get('duration_seconds', 0)
-            
+
             if total_deleted > 0:
                 logger.info(f"Retention cleanup completed: {total_deleted} records deleted in {duration:.2f}s")
             else:
                 logger.info("Retention cleanup completed: no records to delete")
-                
+
         except Exception as e:
             logger.error(f"Error in retention cleanup task: {e}")
             await asyncio.sleep(3600)  # Wait an hour before retry
@@ -385,7 +385,7 @@ await retention_manager.update_policy(
 
 ```python
 await retention_manager.update_policy(
-    table_name="important_metrics", 
+    table_name="important_metrics",
     retention_days=365,
     is_active=False  # Disable cleanup
 )
@@ -539,7 +539,7 @@ curl -s -H "X-API-Key: $API_KEY" http://localhost:8890/admin/retention/preview |
   annotations:
     summary: "Database growing faster than expected"
 
-# Cleanup failures  
+# Cleanup failures
 - alert: RetentionCleanupFailed
   expr: increase(retention_cleanup_errors_total[24h]) > 0
   labels:
@@ -577,7 +577,7 @@ tail -f /var/log/metrics-service.log | grep -E "(ERROR|CRITICAL).*retention" | \
 
 #### Optimization Tips
 - **Schedule During Low Traffic**: Run cleanup during off-peak hours
-- **Batch Size Tuning**: Adjust retention periods to avoid massive single cleanups  
+- **Batch Size Tuning**: Adjust retention periods to avoid massive single cleanups
 - **Index Maintenance**: Ensure timestamp columns are indexed
 - **WAL Mode**: Use WAL mode for concurrent operations during cleanup
 
@@ -691,7 +691,7 @@ cp /backup/metrics_YYYYMMDD.db /var/lib/sqlite/metrics.db
 
 # 3. Adjust retention policies before restart
 sqlite3 /var/lib/sqlite/metrics.db "
-UPDATE retention_policies 
+UPDATE retention_policies
 SET retention_days = retention_days * 2
 WHERE table_name IN ('metrics', 'auth_metrics');
 "

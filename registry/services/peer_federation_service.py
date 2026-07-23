@@ -39,6 +39,13 @@ from .server_service import server_service
 logger = logging.getLogger(__name__)
 
 
+def _as_dict(record: Any) -> dict[str, Any]:
+    """Return a plain dict for a repository record (Pydantic model or dict)."""
+    if hasattr(record, "model_dump"):
+        return record.model_dump()
+    return record
+
+
 def _resolves_only_to_public_ips(
     endpoint: str,
 ) -> bool:
@@ -79,7 +86,8 @@ def _resolves_only_to_public_ips(
         if not addr_info:
             return False
         for _family, _socktype, _proto, _canon, sockaddr in addr_info:
-            if _is_blocked_ip(sockaddr[0], federation_allowlist):
+            ip_str = str(sockaddr[0])
+            if _is_blocked_ip(ip_str, federation_allowlist):
                 return False
         return True
     except Exception as e:
@@ -314,7 +322,7 @@ class PeerFederationService:
                 try:
                     existing_peer = await repo.get_peer(peer_id)
                     had_token_before = existing_peer and existing_peer.federation_token is not None
-                except Exception:
+                except Exception:  # nosec B110 - best-effort check of prior token state
                     pass  # Continue with update even if we can't check existing state
 
             # Update via repository (handles validation)
@@ -1106,7 +1114,7 @@ class PeerFederationService:
         # Find all local agents with sync_metadata.source_peer_id == peer_id
         all_agents = await agent_service.get_all_agents()
         for agent in all_agents:
-            agent_dict = agent.model_dump() if hasattr(agent, "model_dump") else agent
+            agent_dict = _as_dict(agent)
             sync_metadata = agent_dict.get("sync_metadata") or {}
             path = agent_dict.get("path", "")
 

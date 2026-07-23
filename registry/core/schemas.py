@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -705,7 +705,7 @@ class ServerInfo(BaseModel):
         description="Tags from external/source system (separate from local tags)",
     )
     deployment: Literal["remote", "local"] = Field(
-        default=DeploymentType.REMOTE,
+        default=cast(Literal["remote", "local"], DeploymentType.REMOTE),
         description=(
             "Deployment model: 'remote' (HTTP-reachable, registry proxies) or "
             "'local' (stdio, runs on developer's machine via launch recipe)."

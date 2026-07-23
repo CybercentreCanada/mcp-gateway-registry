@@ -137,7 +137,9 @@ async def verify_csrf_token_flexible(
     if not csrf_token:
         try:
             form_data = await request.form()
-            csrf_token = form_data.get("csrf_token")
+            form_value = form_data.get("csrf_token")
+            # A form field may be an UploadFile; only a string is a valid token.
+            csrf_token = form_value if isinstance(form_value, str) else None
         except Exception as e:
             logger.debug(f"Form body parsing failed (likely non-form request): {e}")
 

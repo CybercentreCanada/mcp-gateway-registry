@@ -89,6 +89,11 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
   // literally (Okta/Entra/Cognito), the operator sets a fixed port and we emit
   // --callback-port so the IDE does not use a random port the IdP rejects.
   const [oauthCallbackPort, setOauthCallbackPort] = useState<number | null>(null);
+  // Optional scope for the Claude Code Connect snippet (local|project|user).
+  // null/'' => omit --scope, keeping Claude Code's default (local). Operators set
+  // ide_connect_scope=user so the copied command installs the server for every
+  // project, not just the current directory.
+  const [connectScope, setConnectScope] = useState<string | null>(null);
   // Per-server override for the trailing '/mcp' transport segment on the gateway
   // URL. null = auto-detect from proxy_pass_url.
   const [appendMcpPath, setAppendMcpPath] = useState<boolean | null>(null);
@@ -123,6 +128,7 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
     setCustomHeaders([]);
     setOauthClientId('');
     setOauthCallbackPort(null);
+    setConnectScope(null);
     setAppendMcpPath(null);
     const serverPath = server.path.replace(/^\/+/, '');
     // Fetch CSRF token first, then include it as header for the GET request
@@ -142,6 +148,11 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
         setOauthClientId(resp.data.oauth_client_id ?? '');
         setOauthCallbackPort(
           typeof resp.data.oauth_callback_port === 'number' ? resp.data.oauth_callback_port : null
+        );
+        setConnectScope(
+          typeof resp.data.connect_scope === 'string' && resp.data.connect_scope
+            ? resp.data.connect_scope
+            : null
         );
         setAppendMcpPath(
           typeof resp.data.append_mcp_path === 'boolean' ? resp.data.append_mcp_path : null
@@ -580,6 +591,12 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
   const generateClaudeCodeCommand = useCallback(() => {
     const serverName = server.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
+    // Optional install scope (local|project|user). When the operator sets
+    // ide_connect_scope, emit `--scope <value>` so the copied command installs
+    // the server at the intended scope (e.g. `user` = every project) instead of
+    // Claude Code's default (local = current directory only). Empty => omitted.
+    const scopeFlag = connectScope ? ` --scope ${connectScope}` : '';
+
     // Local (stdio) servers: emit `claude mcp add` with stdio transport.
     if (isLocal) {
       const spec = buildLocalLaunchSpec();
@@ -590,7 +607,7 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
         .map(([k, v]) => `-e ${k}=${JSON.stringify(v)}`)
         .join(' ');
       const argsStr = spec.args.map(a => JSON.stringify(a)).join(' ');
-      let command = `claude mcp add ${serverName}`;
+      let command = `claude mcp add${scopeFlag} ${serverName}`;
       if (envFlags) command += ` ${envFlags}`;
       command += ` -- ${spec.command}`;
       if (argsStr) command += ` ${argsStr}`;
@@ -607,7 +624,7 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
     // A configured callback port is emitted as --callback-port so the IDE uses a
     // fixed loopback port (required for Okta/Entra/Cognito, which match the
     // redirect_uri literally including the port).
-    let command = `claude mcp add --transport http`;
+    let command = `claude mcp add${scopeFlag} --transport http`;
     if (useOAuthLogin) {
       command += ` --client-id ${oauthClientId}`;
       if (oauthCallbackPort) {
@@ -639,7 +656,7 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
     }
 
     return command;
-  }, [server.name, server.auth_scheme, server.auth_header_name, isRegistryOnly, isDCR, useOAuthLogin, egressManaged, oauthClientId, oauthCallbackPort, jwtToken, customHeaders, buildConnectUrl]);
+  }, [server.name, server.auth_scheme, server.auth_header_name, isRegistryOnly, isDCR, useOAuthLogin, egressManaged, oauthClientId, oauthCallbackPort, connectScope, jwtToken, customHeaders, buildConnectUrl]);
 
 
   const copyConfigToClipboard = useCallback(async () => {
@@ -896,6 +913,8 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
                   'so Claude Code runs the OAuth login flow — no gateway token is embedded.'}
                 {useOAuthLogin && oauthCallbackPort ? ' --callback-port pins the OAuth redirect ' +
                   'port so it matches what the identity provider has registered.' : ''}
+                {connectScope ? ` --scope ${connectScope} installs the server at the "${connectScope}" ` +
+                  'scope so it is available beyond the current directory.' : ''}
               </p>
             </div>
           ) : selectedIDE === 'codex' ? (

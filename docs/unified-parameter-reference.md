@@ -236,6 +236,7 @@ Single URL; disables itself when unset.
 | Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
 |-----------|-----------------|-----------------------|----------------------|---------|
 | Enable AWS Agent Registry federation | `AWS_REGISTRY_FEDERATION_ENABLED` | `aws_registry_federation_enabled` | `registry.awsRegistry.federationEnabled` | Overrides the `aws_registry.enabled` flag stored in MongoDB. |
+| Cross-account federation assume-role ARNs | — | `aws_registry_federation_assume_role_arns` | — | List of IAM role ARNs the registry task may `sts:AssumeRole` for cross-account AgentCore federation. Empty (default) omits the grant entirely (fail closed). ECS/IAM-only: no Docker env (the task role is an ECS construct) and no Helm value (Kubernetes uses IRSA on the service account instead of this policy). CDK equivalent: `federation.awsRegistryFederationAssumeRoleArns` in `infra/config.yaml`. |
 
 ---
 
@@ -254,6 +255,7 @@ Single URL; disables itself when unset.
 | Provider type | `AUTH_PROVIDER` | Derived from `entra_enabled` / `okta_enabled` / `auth0_enabled` flags | `global.authProvider.type` | `keycloak`, `cognito`, `entra`, `okta`, `auth0`. |
 | IDE OAuth client id | `IDE_OAUTH_CLIENT_ID` | `ide_oauth_client_id` | `registry.ideOauthClientId` | Registry-wide **default** pre-registered **public** OAuth client_id that IDEs (Cursor, Claude Code, Codex) use to start the gateway login flow. When set, a server's Connect config advertises this client_id and omits the static gateway token, so the IDE shows a login button and runs the OAuth/PKCE flow. A per-server `oauth_client_id` (see below) overrides this default. Use when anonymous Dynamic Client Registration is disabled and a fixed public client is registered instead. Empty (default) keeps the static-token Connect config. Not a secret. |
 | IDE OAuth callback port | `IDE_OAUTH_CALLBACK_PORT` | `ide_oauth_callback_port` | `registry.ideOauthCallbackPort` | Fixed loopback callback port the IDE uses for the OAuth login redirect (`http://localhost:<port>/callback`). Needed for IdPs that match the redirect_uri literally including the port (Okta, Entra, Cognito): register that exact URI on the public client and set the same port here so the Connect dialog emits `--callback-port` (Claude Code). `0` (default) lets the IDE pick a port, which is correct for Keycloak (wildcard loopback redirect). Note: Codex/Cursor cannot pin the port, so this only fully helps Claude Code. |
+| Claude Code connect scope | `IDE_CONNECT_SCOPE` | `ide_connect_scope` | `registry.ideConnectScope` | Optional install scope for the Claude Code Connect snippet: `local`, `project`, or `user`. When set, the generated `claude mcp add` command emits `--scope <value>` so the server installs at that scope — e.g. `user` makes it available in every project instead of only the current directory (Claude Code's `local` default). Empty (default) omits the flag. Invalid values are ignored (flag omitted). Only affects the displayed Claude Code snippet; no effect on Cursor/Codex configs or gateway behaviour. |
 | IdP group filter prefixes | `IDP_GROUP_FILTER_PREFIX` | `idp_group_filter_prefix` | `registry.idpGroupFilterPrefix` | Comma-separated prefixes for IAM > Groups. |
 | Login-time IdP group allowlist | `ALLOWED_IDP_GROUPS` | `allowed_idp_groups` | `registry.allowedIdpGroups` / `auth-server.allowedIdpGroups` | Comma-separated EXACT IdP group names/IDs stored in a user's session at login. Empty (default) auto-derives the allowlist from scope mappings. Fixes session bloat and per-request slowness for users with very large IdP group memberships (e.g. Entra ID with hundreds of AD groups). Read by both registry and auth-server. |
 | IdP user-to-group fallback providers | `IDP_USER_GROUP_FALLBACK_ENABLED_PROVIDERS` | `idp_user_group_fallback_enabled_providers` | `registry.idpUserGroupFallbackEnabledProviders` / `auth-server.idpUserGroupFallbackEnabledProviders` | Issue #1127. Comma-separated IdP providers (e.g. `pingfederate`) for which the registry's local `idp_user_groups` collection is consulted to populate empty JWT groups claims. Empty disables fallback for all providers. Default: `pingfederate`. Read by both registry and auth-server. |
@@ -304,6 +306,7 @@ that server's Connect dialog:
 | Client secret **(secret)** | `COGNITO_CLIENT_SECRET` | — | `auth-server.cognito.clientSecret` | — |
 | Enabled | `COGNITO_ENABLED` | — | — | — |
 | Custom domain | `COGNITO_DOMAIN` | — | `auth-server.cognito.domain` | Optional. |
+| M2M client allowlist | `COGNITO_M2M_CLIENT_IDS` | `cognito_m2m_client_ids` | `auth-server.cognito.m2mClientIds` | Comma/space-separated allowlist of Cognito app-client ids whose machine (`client_credentials`) access tokens the gateway accepts (Cognito access tokens are not audience-bound, so the `client_id` claim is checked against this list). Default-empty = fail closed. Use `*` to accept ANY M2M client in the pool without listing each (machine/no-`username` tokens only; user logins stay restricted to the web + IDE clients) — for one M2M client per agent. Only use `*` when the pool is dedicated to the gateway. Required for Cognito agent/M2M callers, e.g. per-agent rate limiting. |
 | Region | `AWS_REGION` | `aws_region` | `auth-server.cognito.region` | — |
 
 ### 12c — Microsoft Entra ID
@@ -577,6 +580,8 @@ Weights must sum to 1.0 ± 0.001 or the registry process refuses to start (valid
 |-----------|-----------------|-----------------------|----------------------|---------|
 | Audit log enabled | `AUDIT_LOG_ENABLED` | `audit_log_enabled` | — | — |
 | Audit TTL (days) | `AUDIT_LOG_MONGODB_TTL_DAYS` | `audit_log_ttl_days` | — | TTL index. |
+| Audit require durable sink | `AUDIT_LOG_REQUIRE_DURABLE` | `audit_log_require_durable` | `registry.app.auditLogRequireDurable` / `auth-server.app.auditLogRequireDurable` | Fail closed (default `true`): refuse to start if audit logging is enabled but no durable sink (MongoDB/DocumentDB) is available, instead of degrading to non-durable log lines. Set `false` only in local/dev (emits a loud warning). |
+| Audit instance id | `AUDIT_INSTANCE_ID` | — | — | Per-replica attribution label embedded in internal-token `sub` and audit records. Auto-detected per replica from `HOSTNAME` (set per-container by Docker, per-pod by Kubernetes); set explicitly only to override, so no Terraform/Helm column. |
 | App log max bytes | `APP_LOG_MAX_BYTES` | — | `registry.app.appLogMaxBytes` / `auth-server.app.appLogMaxBytes` | Rotating file size. |
 | App log backup count | `APP_LOG_BACKUP_COUNT` | — | `*.app.appLogBackupCount` | — |
 | Centralized log enabled | `APP_LOG_CENTRALIZED_ENABLED` | `app_log_centralized_enabled` | `*.app.appLogCentralizedEnabled` | Write to MongoDB. |
@@ -606,6 +611,15 @@ Weights must sum to 1.0 ± 0.001 or the registry process refuses to start (valid
 | OTLP push endpoint (standard OTel SDK var, Issue #1122) | `OTEL_EXPORTER_OTLP_ENDPOINT` | Set conditionally in `ecs-services.tf` to `http://localhost:4317` when `var.enable_observability=true` (per-task ADOT sidecar). Else empty. | Operators inject via `extraEnv` per chart, or set on the chart's configmap | Activates the OTLP push exporter when set. SDK default empty (Compose pull-only mode). |
 | OTLP push protocol (standard OTel SDK var, Issue #1122) | `OTEL_EXPORTER_OTLP_PROTOCOL` | (set in container env block) | (set via `extraEnv`) | `grpc` (default) or `http/protobuf`. Must match the receiver. |
 | Service name for trace attribution (standard OTel SDK var, Issue #1122) | `OTEL_SERVICE_NAME` | Hardcoded per service in `ecs-services.tf` (e.g., `mcp-gateway-registry`) | (set via `extraEnv` per pod) | Without this, traces are tagged `unknown_service` in your tracing backend. Set per service. |
+
+---
+
+## Group 25a — Frontend RUM (Real User Monitoring) (Issue #1471)
+
+| Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
+|-----------|-----------------|-----------------------|----------------------|---------|
+| RUM snippet **(secret)** | `RUM_SNIPPET_B64` | `registry_rum_snippet_b64` (plaintext, token-free) / `registry_rum_snippet_secret_arn` (Secrets Manager, token-bearing) | `registry.rumSnippetB64` (plaintext) or `extraEnv` + `secretKeyRef` (token-bearing) | Base64-encoded HTML snippet served as `/rum.js` and injected into the frontend `<head>` for browser Real User Monitoring (Splunk, Datadog, New Relic, Grafana Faro, etc.). Empty disables RUM (default no-op stub). Operator/deploy-time trust boundary: the value runs as JavaScript in every user's browser, so it must never be set from user input or a non-admin API. See [docs/frontend-rum.md](frontend-rum.md). |
+| RUM allowed script/beacon hosts | `RUM_ALLOWED_HOSTS` | `registry_rum_allowed_hosts` | `registry.rumAllowedHosts` | Comma-separated allowlist of hosts the RUM snippet may reference (script `src` and beacon endpoints). Startup validation fails closed (writes the empty stub, logs an error) if the decoded snippet references a host not on this list. Empty disables the check. Guardrail against misconfiguration/tampering, not a control against a trusted operator. |
 
 ---
 
@@ -776,6 +790,32 @@ These have no `.env` equivalent because they describe the infrastructure, not th
 | `<subchart>.ingress.*` | Per-subchart ingress overrides. |
 | `mongodb-kubernetes.operator.*` | MongoDB Community operator knobs. |
 | `mongodb-configure.*`, `keycloak-configure.*` | One-shot job configuration for the init jobs. |
+
+---
+
+## Group 31 — A2A Reverse-Proxy Mode
+
+| Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
+|-----------|-----------------|-----------------------|----------------------|---------|
+| Enable reverse-proxy | `A2A_REVERSE_PROXY_ENABLED` | `a2a_reverse_proxy_enabled` | `registry.app.a2aReverseProxyEnabled` | Opt-in. When `true`, each enabled agent gets nginx blocks that proxy its A2A traffic (agent card + JSON-RPC) through the gateway for centralized auth and per-agent access control. Default `false` = registry-only discovery, no proxy blocks. Also gated by `with-gateway` deployment mode; force-disabled in `registry-only`. See [A2A reverse-proxy mode](design/a2a-protocol-integration.md#reverse-proxy-mode-proxying-a2a-traffic). |
+| SSRF allowed hosts | `SSRF_ALLOWED_HOSTS` | `ssrf_allowed_hosts` | `registry.app.ssrfAllowedHosts` | Comma-separated exact hostnames or literal IPs that the gateway is permitted to proxy/health-check even though they resolve to private/internal addresses. Needed when agent backends live on internal networks (Docker service names, ECS Service Connect names, in-cluster ClusterIPs), which the SSRF guard blocks by default. Least-privilege: prefer naming hosts here over widening CIDRs. Empty = only public addresses allowed. |
+| SSRF allowed CIDRs | `SSRF_ALLOWED_CIDRS` | `ssrf_allowed_cidrs` | `registry.app.ssrfAllowedCidrs` | Comma-separated CIDR ranges to allow whole internal subnets (e.g. `172.18.0.0/16` for a Docker network, or the cluster service CIDR on EKS). Use only when you cannot enumerate hosts. Empty = no internal subnets allowed. |
+
+---
+
+## Group 32 — Rate Limiting
+
+Application-level, identity/group/target-aware request limiting enforced at the auth-server `/validate` hop. This is complementary to (not a replacement for) the coarse per-IP nginx edge limiting. Off by default; limit **definitions** are managed at runtime via the admin API (`/api/rate-limits`) or `registry_management.py rate-limit-set`, not via these parameters. Applies to both the `registry` and `auth-server` services (both must agree). See [rate limiting design](design/rate-limiting.md).
+
+| Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
+|-----------|-----------------|-----------------------|----------------------|---------|
+| Enable rate limiting | `RATE_LIMITING_ENABLED` | `rate_limiting_enabled` | `registry.app.rateLimiting.enabled` / `auth-server.app.rateLimiting.enabled` | Master switch. Default `false` = no checks (no behavior change). |
+| Counter backend | `RATE_LIMIT_BACKEND` | `rate_limit_backend` | `*.app.rateLimiting.backend` | Counter store. Only `documentdb` is implemented in v1 (no new infrastructure); the backend interface allows a future Redis. |
+| Fail open on error | `RATE_LIMIT_FAIL_OPEN` | `rate_limit_fail_open` | `*.app.rateLimiting.failOpen` | Default `true`: on a counter-store error, allow rather than deny (availability guardrail). A per-limit `fail_closed` definition overrides to deny. |
+| Definitions cache TTL | `RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS` | `rate_limit_definitions_cache_ttl_seconds` | `*.app.rateLimiting.definitionsCacheTtlSeconds` | In-process cache TTL (seconds) for definition reads; steady-state per-call cost is zero DB reads for definitions. Default `30`. |
+| Backend op timeout | `RATE_LIMIT_BACKEND_TIMEOUT_MS` | `rate_limit_backend_timeout_ms` | `*.app.rateLimiting.backendTimeoutMs` | Hard per-op timeout (ms) for each counter operation; a slow store fails fast into the fail-open/closed policy, never hanging `/validate`. Default `250`. |
+| User floor (per min) | `RATE_LIMIT_USER_FLOOR_PER_MIN` | `rate_limit_user_floor_per_min` | `registry.app.rateLimiting.userFloorPerMin` | Lockout safeguard read by the **registry** at group-definition config time: on windows `<= 60s` a group's `user_max_requests` must be `>=` this floor, else the PUT is rejected. Config-only (no API). Default `20`. |
+| Agent floor (per min) | `RATE_LIMIT_AGENT_FLOOR_PER_MIN` | `rate_limit_agent_floor_per_min` | `registry.app.rateLimiting.agentFloorPerMin` | Same as above for a group's `agent_max_requests`. Config-only (no API). Default `10`. |
 
 ---
 

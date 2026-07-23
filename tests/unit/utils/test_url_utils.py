@@ -112,15 +112,11 @@ class TestDeriveResourceUrl:
 
     def test_github_url_uses_skill_md_stripping(self):
         """GitHub URLs should fall through to the SKILL.md path-replace path."""
-        skill_md_url = (
-            "https://raw.githubusercontent.com/o/r/refs/heads/main/dir/SKILL.md"
-        )
+        skill_md_url = "https://raw.githubusercontent.com/o/r/refs/heads/main/dir/SKILL.md"
 
         result = derive_resource_url(skill_md_url, "ref/note.md")
 
-        assert result == (
-            "https://raw.githubusercontent.com/o/r/refs/heads/main/dir/ref/note.md"
-        )
+        assert result == ("https://raw.githubusercontent.com/o/r/refs/heads/main/dir/ref/note.md")
 
     def test_non_skill_md_url_falls_back_to_basename_replace(self):
         """When the URL doesn't end in /SKILL.md, replace the basename."""
@@ -143,15 +139,9 @@ class TestDeriveResourceUrl:
 
     def test_importerror_falls_back_to_skill_md_stripping(self):
         """With gitlab_url_utils absent, GitHub-style fallback still works."""
-        skill_md_url = (
-            "https://raw.githubusercontent.com/o/r/refs/heads/main/SKILL.md"
-        )
+        skill_md_url = "https://raw.githubusercontent.com/o/r/refs/heads/main/SKILL.md"
 
-        with patch.dict(
-            sys.modules, {"registry.utils.gitlab_url_utils": None}
-        ):
+        with patch.dict(sys.modules, {"registry.utils.gitlab_url_utils": None}):
             result = derive_resource_url(skill_md_url, "asset.png")
 
-        assert result == (
-            "https://raw.githubusercontent.com/o/r/refs/heads/main/asset.png"
-        )
+        assert result == ("https://raw.githubusercontent.com/o/r/refs/heads/main/asset.png")

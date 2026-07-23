@@ -253,6 +253,14 @@ class RegistryApiAccessRecord(BaseModel):
     correlation_id: str | None = Field(
         default=None, description="Correlation ID for tracing across services"
     )
+    instance_id: str | None = Field(
+        default=None,
+        description=(
+            "Identifier of the registry replica/instance that produced this "
+            "record (from AUDIT_INSTANCE_ID/HOSTNAME). Attributes the record to "
+            "a specific caller across a horizontally-scaled deployment."
+        ),
+    )
     identity: Identity = Field(description="Identity of the requester")
     request: Request = Field(description="HTTP request details")
     response: Response = Field(description="HTTP response details")

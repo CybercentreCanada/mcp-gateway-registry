@@ -24,6 +24,7 @@ The same set of variables is set across all three deployment modes; only the fil
 | App Client (web login) ID | `COGNITO_CLIENT_ID` | `cognito_client_id` | `cognito.clientId` |
 | App Client secret (web login, **secret**) | `COGNITO_CLIENT_SECRET` | `cognito_client_secret` | `cognito.clientSecret` |
 | Hosted UI domain (optional) | `COGNITO_DOMAIN` | `cognito_domain` | `cognito.domain` |
+| M2M client allowlist (optional) | `COGNITO_M2M_CLIENT_IDS` | `cognito_m2m_client_ids` | `cognito.m2mClientIds` |
 | AWS region of the User Pool | `AWS_REGION` | `AWS_REGION` (provider/region, injected automatically) | `cognito.region` |
 
 Note on the provider switch: Docker (`AUTH_PROVIDER`) and Helm (`authProvider.type`) take a provider-name string. The Terraform module has no `auth_provider` variable; you enable exactly one provider by setting its boolean `*_enabled` flag to true (leave the others false), and the module derives the `AUTH_PROVIDER` value for the containers. If you enable none, Keycloak is the default. So for Terraform, `cognito_enabled = true` is the only switch needed.
@@ -35,6 +36,27 @@ Note on the region: Cognito needs the AWS region to build the issuer and JWKS UR
 The "secret" row must be sourced from a secrets store in production (AWS Secrets Manager for Terraform, a Kubernetes Secret for Helm). Don't paste the client secret into `terraform.tfvars` or `values.yaml` checked into git.
 
 For full cross-surface parameter reference, see [docs/unified-parameter-reference.md](../unified-parameter-reference.md).
+
+### Machine-to-machine (M2M / agent) clients
+
+By default the auth-server only trusts access tokens from the **web login** client and the optional **IDE** client. To let an agent call the gateway with its own machine identity (a Cognito `client_credentials` token), you must allowlist its app-client id via `COGNITO_M2M_CLIENT_IDS` — otherwise the token is rejected at `/validate`. This is what enables Cognito **agent** callers, including per-agent rate limiting.
+
+Setup (per agent, i.e. "Pattern B — one M2M client per agent"):
+
+1. **Create a Cognito app client** for the agent with a secret, `client_credentials` enabled, and a resource-server scope (Cognito requires `client_credentials` clients to request at least one custom scope). The scope value itself does not drive authorization here (see step 3).
+2. **Allowlist the client id.** Add it to `COGNITO_M2M_CLIENT_IDS` (comma/space-separated). For many agents, set `COGNITO_M2M_CLIENT_IDS="*"` to accept **any** M2M (`client_credentials`, no-`username`) token in the pool without enumerating each — user/login tokens stay restricted to the web + IDE clients, so `*` cannot widen who may log in. Only use `*` when the pool is dedicated to the gateway.
+3. **Grant authorization via a group.** A Cognito M2M token carries no `cognito:groups`, so map the client id to registry groups by registering it in the M2M-clients store — the auth-server enriches the token's groups from there at validation time:
+
+   ```bash
+   uv run python api/registry_management.py --token-file .token --registry-url "$REG" \
+     m2m-client-create --client-id <AGENT_CLIENT_ID> --client-name my-agent \
+     --groups "public-mcp-users"
+   ```
+
+   The group's scope then grants server/tool access exactly as it does for a human user. (Do not use an admin group like `registry-admins` if you want rate limits to apply — admins bypass caller rate limits.)
+4. **Get a token** with `grant_type=client_credentials` from the pool's token endpoint (`https://<domain>.auth.<region>.amazoncognito.com/oauth2/token`) and call the gateway with it in the `X-Authorization: Bearer <token>` header.
+
+For an end-to-end walkthrough including per-agent rate limiting (create the group, add the client as a member, and watch it throttle with `caller_type=agent`), see [Rate Limiting Design](../design/rate-limiting.md).
 
 ## Mode 1: Docker Compose (BYO Cognito)
 

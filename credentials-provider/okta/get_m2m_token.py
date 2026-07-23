@@ -129,10 +129,16 @@ def _request_m2m_token(
         if response.status_code != 200:
             try:
                 error_data = response.json()
-                _err = error_data.get("error", "unknown") if isinstance(error_data, dict) else "unknown"
+                _err = (
+                    error_data.get("error", "unknown")
+                    if isinstance(error_data, dict)
+                    else "unknown"
+                )
                 logger.error(f"Okta token error (status {response.status_code}): error={_err}")
             except Exception:
-                logger.error(f"Okta token error (status {response.status_code}): non-JSON body omitted")
+                logger.error(
+                    f"Okta token error (status {response.status_code}): non-JSON body omitted"
+                )
 
         response.raise_for_status()
 
@@ -217,7 +223,7 @@ def _save_token_to_file(token_data: dict[str, str]) -> str:
     fd, temp_path = tempfile.mkstemp(
         prefix="okta_m2m_token_",
         suffix=".json",
-        dir="/tmp",
+        dir="/tmp",  # nosec B108 - mkstemp creates a unique 0600 file; /tmp is deliberate
     )
 
     try:
@@ -235,7 +241,7 @@ def _save_token_to_file(token_data: dict[str, str]) -> str:
         # Clean up on error
         try:
             os.unlink(temp_path)
-        except Exception:
+        except Exception:  # nosec B110 - best-effort cleanup of temp token file
             pass
         raise ValueError(f"Failed to save token to file: {e}")
 

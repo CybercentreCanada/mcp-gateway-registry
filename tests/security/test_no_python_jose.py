@@ -69,7 +69,15 @@ def test_python_jose_absent_from_lock(repo_root: Path, lockfile: str):
 def test_no_jose_imports_in_source(repo_root: Path):
     """No source file should import python-jose (the `jose` package)."""
     offenders: list[str] = []
-    for base in ("auth_server", "registry", "cli", "servers", "agents", "metrics-service", "scripts"):
+    for base in (
+        "auth_server",
+        "registry",
+        "cli",
+        "servers",
+        "agents",
+        "metrics-service",
+        "scripts",
+    ):
         base_dir = repo_root / base
         if not base_dir.is_dir():
             continue

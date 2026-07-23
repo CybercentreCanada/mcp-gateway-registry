@@ -186,6 +186,27 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.metrics.otelExporterOtlpEndpoint | quote }}
             {{- end }}
+            # Audit durability guard (fail closed). The auth-server owns the
+            # token-mint audit trail (who was issued which scoped token, when) --
+            # the most forensically critical records. When true (default), the
+            # auth-server refuses to start if audit logging is enabled but no
+            # durable sink (DocumentDB/MongoDB) is available, instead of silently
+            # degrading to non-durable JSON log lines. Set to false only where a
+            # non-durable audit trail is acceptable.
+            - name: AUDIT_LOG_REQUIRE_DURABLE
+              value: {{ .Values.app.auditLogRequireDurable | default true | toString | quote }}
+            # Rate Limiting (issue #295). Off by default; enforcement runs here
+            # in the /validate hop.
+            - name: RATE_LIMITING_ENABLED
+              value: {{ .Values.app.rateLimiting.enabled | default false | toString | quote }}
+            - name: RATE_LIMIT_BACKEND
+              value: {{ .Values.app.rateLimiting.backend | default "documentdb" | quote }}
+            - name: RATE_LIMIT_FAIL_OPEN
+              value: {{ .Values.app.rateLimiting.failOpen | default true | toString | quote }}
+            - name: RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS
+              value: {{ .Values.app.rateLimiting.definitionsCacheTtlSeconds | default 30 | toString | quote }}
+            - name: RATE_LIMIT_BACKEND_TIMEOUT_MS
+              value: {{ .Values.app.rateLimiting.backendTimeoutMs | default 250 | toString | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

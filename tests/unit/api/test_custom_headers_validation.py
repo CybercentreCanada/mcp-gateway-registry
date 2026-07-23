@@ -21,10 +21,12 @@ class TestParseAndValidateCustomHeaders:
         assert result == []
 
     def test_valid_headers(self):
-        raw = json.dumps([
-            {"name": "X-Tenant-Id", "value": "42"},
-            {"name": "X-Route", "value": "prod"},
-        ])
+        raw = json.dumps(
+            [
+                {"name": "X-Tenant-Id", "value": "42"},
+                {"name": "X-Route", "value": "prod"},
+            ]
+        )
         result = _parse_and_validate_custom_headers(raw)
         assert len(result) == 2
         assert result[0] == {"name": "X-Tenant-Id", "value": "42"}
@@ -62,10 +64,12 @@ class TestParseAndValidateCustomHeaders:
         assert exc_info.value.status_code == 400
 
     def test_duplicate_names_rejected(self):
-        raw = json.dumps([
-            {"name": "X-Foo", "value": "a"},
-            {"name": "x-foo", "value": "b"},
-        ])
+        raw = json.dumps(
+            [
+                {"name": "X-Foo", "value": "a"},
+                {"name": "x-foo", "value": "b"},
+            ]
+        )
         with pytest.raises(HTTPException) as exc_info:
             _parse_and_validate_custom_headers(raw)
         assert exc_info.value.status_code == 400

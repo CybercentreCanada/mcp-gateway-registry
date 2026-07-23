@@ -132,6 +132,10 @@ def _create_cognito_provider() -> CognitoProvider:
     # Public IDE client (PR #1224). Its access tokens are also accepted so the
     # IDE OAuth login flow works alongside the web client. Empty = not used.
     ide_oauth_client_id = os.environ.get("IDE_OAUTH_CLIENT_ID") or None
+    # M2M (client_credentials) app-client id allowlist. Comma/space-separated,
+    # default-empty (fail closed): a machine token whose client_id is not listed
+    # is rejected. Reuses the audience-allowlist parser (same shape).
+    m2m_client_ids = _parse_allowed_audiences("COGNITO_M2M_CLIENT_IDS")
 
     # Validate required configuration
     missing_vars = []
@@ -159,6 +163,7 @@ def _create_cognito_provider() -> CognitoProvider:
         region=region,
         domain=domain,
         ide_oauth_client_id=ide_oauth_client_id,
+        m2m_client_ids=m2m_client_ids,
     )
 
 

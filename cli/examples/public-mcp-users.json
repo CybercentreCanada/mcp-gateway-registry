@@ -43,25 +43,19 @@
       "tools": []
     },
     {
-      "agents": {
-        "actions": [
-          {
-            "action": "list_agents",
-            "resources": ["/flight-booking"]
-          },
-          {
-            "action": "get_agent",
-            "resources": ["/flight-booking"]
-          }
-        ]
-      }
+      "agent": "/flight-booking",
+      "actions": ["list_agents", "get_agent", "invoke_agent"]
+    },
+    {
+      "agent": "/flight-booking-agent",
+      "actions": ["list_agents", "get_agent", "invoke_agent"]
     }
   ],
   "group_mappings": ["public-mcp-users", "5f605d68-06bc-4208-b992-bb378eee12c5"],
   "ui_permissions": {
     "list_service": ["all"],
-    "list_agents": ["/flight-booking"],
-    "get_agent": ["/flight-booking"]
+    "list_agents": ["/flight-booking", "/flight-booking-agent"],
+    "get_agent": ["/flight-booking", "/flight-booking-agent"]
   },
   "create_in_idp": true
 }

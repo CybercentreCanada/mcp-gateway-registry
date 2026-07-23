@@ -76,7 +76,7 @@ volumes:
 networks:
   default:
     # Use the external network created by the main mcp-gateway-registry docker-compose
-    # "default" is the logical network name used within this compose file 
+    # "default" is the logical network name used within this compose file
     # "external: true" means this network already exists and should not be created
     # This allows agents to communicate with gateway/registry services on the same network
     name: mcp-gateway-registry_default

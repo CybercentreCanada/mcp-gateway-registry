@@ -14,6 +14,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53targets from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import { RegistryConfig } from '../registry-config';
 
@@ -27,8 +28,6 @@ export class RegistryAlb extends Construct {
   public readonly alb: elbv2.ApplicationLoadBalancer;
   public readonly albSg: ec2.SecurityGroup;
   public readonly registryTg: elbv2.ApplicationTargetGroup;
-  public readonly authTg: elbv2.ApplicationTargetGroup;
-  public readonly gradioTg: elbv2.ApplicationTargetGroup;
   public readonly httpListener: elbv2.ApplicationListener;
   public readonly httpsListener?: elbv2.ApplicationListener;
 
@@ -74,7 +73,10 @@ export class RegistryAlb extends Construct {
       resources: [logsBucket.bucketArn],
     }));
 
-    // SG with ingress on 80/443/8888/7860 from configured CIDRs
+    // SG with ingress on 80/443 from configured CIDRs. Auth-server (:8888) and
+    // Gradio (:7860) are NOT exposed on the ALB — external callers reach both
+    // via nginx path routes on the registry container (:8080), mirroring
+    // terraform/aws-ecs/modules/mcp-gateway/networking.tf.
     this.albSg = new ec2.SecurityGroup(this, 'Sg', {
       vpc,
       securityGroupName: `${namePrefix}-alb`,
@@ -84,7 +86,7 @@ export class RegistryAlb extends Construct {
     cdk.Tags.of(this.albSg).add('Name', `${namePrefix}-alb`);
 
     for (const cidr of config.ingressCidrBlocks) {
-      for (const port of [80, 443, 8888, 7860]) {
+      for (const port of [80, 443]) {
         this.albSg.addIngressRule(
           ec2.Peer.ipv4(cidr),
           ec2.Port.tcp(port),
@@ -117,6 +119,10 @@ export class RegistryAlb extends Construct {
       protocol: elbv2.Protocol.HTTP,
     } as const;
 
+    // Only the registry (nginx :8080) is attached to the ALB. Auth-server
+    // (:8888) and Gradio (:7860) are reached via Service Connect from within
+    // the registry container and proxied by nginx path routes for external
+    // traffic. Mirrors terraform/aws-ecs/modules/mcp-gateway/networking.tf.
     this.registryTg = new elbv2.ApplicationTargetGroup(this, 'RegistryTg', {
       targetGroupName: `${namePrefix}-registry-tg`,
       port: 8080,
@@ -127,30 +133,12 @@ export class RegistryAlb extends Construct {
       healthCheck: { ...tgHealth, port: '8080' },
     });
 
-    this.authTg = new elbv2.ApplicationTargetGroup(this, 'AuthTg', {
-      targetGroupName: `${namePrefix}-auth-tg`,
-      port: 8888,
-      protocol: elbv2.ApplicationProtocol.HTTP,
-      targetType: elbv2.TargetType.IP,
-      vpc,
-      deregistrationDelay: cdk.Duration.seconds(5),
-      healthCheck: tgHealth,
-    });
-
-    this.gradioTg = new elbv2.ApplicationTargetGroup(this, 'GradioTg', {
-      targetGroupName: `${namePrefix}-gradio-tg`,
-      port: 7860,
-      protocol: elbv2.ApplicationProtocol.HTTP,
-      targetType: elbv2.TargetType.IP,
-      vpc,
-      deregistrationDelay: cdk.Duration.seconds(5),
-      healthCheck: tgHealth,
-    });
-
-    // Auto-issue ACM cert + Route53 alias when enableRoute53Dns is true and no
-    // CloudFront fronts the ALB. Mirrors terraform/aws-ecs/registry-dns.tf.
+    // Auto-issue ACM cert + Route53 alias to ALB when enableRoute53Dns is true.
+    // Route53 A-record → ALB is created here in Mode 2 (Route53 without
+    // CloudFront). In Mode 3 the A-record is created by RegistryServiceStack
+    // and targets CloudFront instead. Mirrors terraform/aws-ecs/registry-dns.tf.
     let certificateArn = config.certificateArn;
-    if (config.enableRoute53Dns && !config.cloudfront.enabled && !certificateArn) {
+    if (config.enableRoute53Dns && !certificateArn) {
       const hostedZoneDomain = config.baseDomain;
       const registryDomain = `registry.${hostedZoneDomain}`;
       const hostedZone = route53.HostedZone.fromLookup(this, 'HostedZone', {
@@ -161,21 +149,38 @@ export class RegistryAlb extends Construct {
         validation: acm.CertificateValidation.fromDns(hostedZone),
       });
       certificateArn = cert.certificateArn;
-      new route53.ARecord(this, 'AliasRecord', {
-        zone: hostedZone,
-        recordName: registryDomain,
-        target: route53.RecordTarget.fromAlias(new route53targets.LoadBalancerTarget(this.alb)),
+
+      if (!config.cloudfront.enabled) {
+        new route53.ARecord(this, 'AliasRecord', {
+          zone: hostedZone,
+          recordName: registryDomain,
+          target: route53.RecordTarget.fromAlias(new route53targets.LoadBalancerTarget(this.alb)),
+        });
+      }
+    }
+
+    const enableHttps = certificateArn !== '';
+
+    // Mode 2: Route53 without CloudFront → HTTP redirects to HTTPS.
+    // Modes 1 & 3: HTTP forwards to registry target (CloudFront terminates TLS).
+    if (config.enableRoute53Dns && !config.cloudfront.enabled) {
+      this.httpListener = this.alb.addListener('HttpListener', {
+        port: 80,
+        protocol: elbv2.ApplicationProtocol.HTTP,
+        defaultAction: elbv2.ListenerAction.redirect({
+          port: '443',
+          protocol: 'HTTPS',
+          permanent: true,
+        }),
+      });
+    } else {
+      this.httpListener = this.alb.addListener('HttpListener', {
+        port: 80,
+        protocol: elbv2.ApplicationProtocol.HTTP,
+        defaultTargetGroups: [this.registryTg],
       });
     }
 
-    // Listeners — HTTPS only when a cert is configured.
-    this.httpListener = this.alb.addListener('HttpListener', {
-      port: 80,
-      protocol: elbv2.ApplicationProtocol.HTTP,
-      defaultTargetGroups: [this.registryTg],
-    });
-
-    const enableHttps = certificateArn !== '';
     if (enableHttps) {
       this.httpsListener = this.alb.addListener('HttpsListener', {
         port: 443,
@@ -186,22 +191,66 @@ export class RegistryAlb extends Construct {
       });
     }
 
-    this.alb.addListener('AuthListener', {
-      port: 8888,
-      protocol: enableHttps ? elbv2.ApplicationProtocol.HTTPS : elbv2.ApplicationProtocol.HTTP,
-      ...(enableHttps
-        ? {
-            sslPolicy: elbv2.SslPolicy.TLS13_RES,
-            certificates: [elbv2.ListenerCertificate.fromArn(certificateArn)],
-          }
-        : {}),
-      defaultTargetGroups: [this.authTg],
-    });
-
-    this.alb.addListener('GradioListener', {
-      port: 7860,
-      protocol: elbv2.ApplicationProtocol.HTTP,
-      defaultTargetGroups: [this.gradioTg],
-    });
+    // CloudFront prefix-list SG (kept in a separate SG to avoid the 60-rules
+    // limit — the CloudFront prefix list has ~55 entries). Mirrors
+    // terraform/aws-ecs/modules/mcp-gateway/networking.tf.
+    _attachCloudFrontPrefixListSg(this, config, vpc, this.alb, namePrefix);
   }
+}
+
+function _attachCloudFrontPrefixListSg(
+  scope: Construct,
+  config: RegistryConfig,
+  vpc: ec2.IVpc,
+  alb: elbv2.ApplicationLoadBalancer,
+  namePrefix: string,
+): void {
+  const prefixListName = config.cloudfront.prefixListName !== ''
+    ? config.cloudfront.prefixListName
+    : (config.cloudfront.enabled
+      ? 'com.amazonaws.global.cloudfront.origin-facing'
+      : '');
+  if (prefixListName === '') return;
+
+  const lookup = new cr.AwsCustomResource(scope, 'CfPrefixListLookup', {
+    onCreate: {
+      service: 'EC2',
+      action: 'describeManagedPrefixLists',
+      parameters: { Filters: [{ Name: 'prefix-list-name', Values: [prefixListName] }] },
+      physicalResourceId: cr.PhysicalResourceId.of('RegistryAlbCfPrefixListLookup'),
+    },
+    onUpdate: {
+      service: 'EC2',
+      action: 'describeManagedPrefixLists',
+      parameters: { Filters: [{ Name: 'prefix-list-name', Values: [prefixListName] }] },
+      physicalResourceId: cr.PhysicalResourceId.of('RegistryAlbCfPrefixListLookup'),
+    },
+    policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+      resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
+    }),
+  });
+  const prefixListId = lookup.getResponseField('PrefixLists.0.PrefixListId');
+
+  const cfSg = new ec2.SecurityGroup(scope, 'AlbCloudFrontSg', {
+    vpc,
+    securityGroupName: `${namePrefix}-alb-cloudfront`,
+    description: 'CloudFront prefix-list ingress for registry ALB',
+    allowAllOutbound: true,
+  });
+  cdk.Tags.of(cfSg).add('Name', `${namePrefix}-alb-cloudfront`);
+
+  // Only port 80 — CloudFront origin protocol is HTTP-only (see
+  // constructs/cloudfront-distribution.ts). Each prefix-list ingress rule
+  // counts one AWS SG entry per CIDR (~55 for cloudfront.origin-facing),
+  // so adding a 443 rule too would exceed the 60-entry/SG quota.
+  new ec2.CfnSecurityGroupIngress(scope, 'CfAlbIngressPrefixList80', {
+    groupId: cfSg.securityGroupId,
+    ipProtocol: 'tcp',
+    fromPort: 80,
+    toPort: 80,
+    sourcePrefixListId: prefixListId,
+    description: 'CloudFront origin-facing IPs to registry ALB (HTTP)',
+  });
+
+  alb.addSecurityGroup(cfSg);
 }

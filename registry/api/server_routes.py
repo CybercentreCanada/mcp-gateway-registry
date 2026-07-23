@@ -99,6 +99,69 @@ def _require_admin(
         )
 
 
+def _scan_destination_is_safe(
+    server_info: dict,
+) -> bool:
+    """Re-validate the scan destination through the shared SSRF guard.
+
+    The security scanner is an external process that opens its own connection
+    to ``proxy_pass_url`` (and ``mcp_endpoint`` when set), so the registry's
+    pinned guarded client cannot protect that outbound hop. A stored credential
+    must therefore only be handed to the scanner once the destination has been
+    re-validated at the moment of use: registration-time validation is not
+    enough because ``proxy_pass_url`` is mutable after registration (an owner or
+    a registration-time bypass could point it at a private/metadata address and
+    then trigger a scan to leak the credential there). Validate every
+    destination the scanner might reach and fail closed: if any is present and
+    fails validation, the credential is not attached and the caller must not
+    proceed with the credential.
+
+    Returns:
+        True only if every configured destination passes the PROXY_PROFILE
+        SSRF guard. False (deny) on any validation failure or ambiguity.
+    """
+    from ..exceptions import UrlValidationError
+    from ..utils.url_guard import PROXY_PROFILE, validate_url
+
+    destinations = [
+        server_info.get("proxy_pass_url"),
+        server_info.get("mcp_endpoint"),
+    ]
+    checked_any = False
+    for destination in destinations:
+        if not destination:
+            continue
+        checked_any = True
+        try:
+            validate_url(destination, profile=PROXY_PROFILE)
+        except UrlValidationError as e:
+            logger.warning(
+                "Refusing to attach stored credential for '%s': destination "
+                "failed SSRF re-validation: %s",
+                server_info.get("path", "unknown"),
+                e,
+            )
+            return False
+        except Exception as e:  # pragma: no cover - defensive, fail closed
+            logger.warning(
+                "Refusing to attach stored credential for '%s': destination validation error: %s",
+                server_info.get("path", "unknown"),
+                e,
+            )
+            return False
+
+    if not checked_any:
+        # No destination to validate means we cannot establish where the
+        # credential would be sent -> fail closed rather than attach blindly.
+        logger.warning(
+            "Refusing to attach stored credential for '%s': no destination URL to validate",
+            server_info.get("path", "unknown"),
+        )
+        return False
+
+    return True
+
+
 def _build_scan_headers_from_credentials(
     server_info: dict,
 ) -> str | None:
@@ -107,16 +170,28 @@ def _build_scan_headers_from_credentials(
     Decrypts the stored credential and formats it as a JSON headers string
     that the scanner's _extract_bearer_token_from_headers() expects.
 
+    The stored credential is only decrypted and attached after the scan
+    destination is re-validated through the shared SSRF guard (see
+    :func:`_scan_destination_is_safe`), so a destination that was mutated to a
+    private/metadata address after registration cannot receive the credential.
+
     Args:
         server_info: Server info dict with include_credentials=True.
 
     Returns:
-        JSON string with X-Authorization header, or None if no credentials.
+        JSON string with X-Authorization header, or None if no credentials or
+        if the destination fails SSRF re-validation (fail closed).
     """
     auth_scheme = server_info.get("auth_scheme", "none")
     encrypted_credential = server_info.get("auth_credential_encrypted")
 
     if auth_scheme == "none" or not encrypted_credential:
+        return None
+
+    # Re-validate the destination at the moment of use, before decrypting or
+    # attaching the credential. Fail closed: an unsafe destination gets no
+    # credential (and the scan proceeds unauthenticated / is refused upstream).
+    if not _scan_destination_is_safe(server_info):
         return None
 
     from ..utils.credential_encryption import decrypt_credential
@@ -224,6 +299,46 @@ def _coerce_metadata_to_dict(parsed_metadata: Any, path: str) -> dict[str, Any]:
         type(parsed_metadata).__name__,
     )
     return {}
+
+
+def _apply_tool_visibility(
+    server_info: dict,
+    server_path: str,
+    user_context: dict,
+    *,
+    endpoint: str,
+) -> None:
+    """Prune a single-server response's ``tool_list`` to the caller's allowlist.
+
+    Mutates ``server_info`` in place so a caller with server access but a
+    restricted tool set cannot read tool names outside that set on the
+    single-server detail endpoints. Keeps ``num_tools`` consistent with the
+    pruned list. Uses the same canonical helper as the server-listing and
+    tool-catalog paths; admin / wildcard callers pass through unchanged and a
+    missing/empty allowlist fails closed (empty list).
+
+    Args:
+        server_info: The server document being returned (mutated in place).
+        server_path: The registered server path, used for the allowlist lookup.
+        user_context: The authenticated caller's context.
+        endpoint: Label for the tool-filter audit event.
+    """
+    raw_tools = server_info.get("tool_list")
+    if not isinstance(raw_tools, list):
+        return
+    filtered = filter_tools_for_user(
+        server_info.get("server_name", server_path),
+        raw_tools,
+        user_context or {},
+        endpoint=endpoint,
+        server_path=server_path,
+    )
+    # Safe to mutate: server_service.get_server_info() returns a fresh
+    # per-request document (not a shared/cached dict), so this cannot poison a
+    # cache or a concurrent request.
+    server_info["tool_list"] = filtered
+    # Keep the badge/count consistent with what is actually rendered.
+    server_info["num_tools"] = len(filtered)
 
 
 async def _build_versions_list(
@@ -1035,26 +1150,6 @@ def _to_dt(value: Any) -> datetime | None:
     return None
 
 
-def _require_admin(user_context: dict | None) -> None:
-    """Reject the request unless the caller is an authenticated admin.
-
-    Mirrors the sibling ``_require_admin`` helpers in management_routes.py,
-    log_routes.py, etc. Used to gate scope/group mutation endpoints, which
-    have no finer-grained permission model and must be admin-only.
-
-    Args:
-        user_context: Authenticated user context (may be None if auth failed).
-
-    Raises:
-        HTTPException: 403 if the user is missing or not an admin.
-    """
-    if not user_context or not user_context.get("is_admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Administrator permissions are required for this operation",
-        )
-
-
 def _check_server_permission(
     permission: str,
     server_name: str,
@@ -1670,7 +1765,7 @@ async def internal_register_service(
     # Create server entry with auto-generated UUID
     from uuid import uuid4
 
-    server_entry = {
+    server_entry: dict[str, Any] = {
         "id": str(uuid4()),
         "server_name": name,
         "description": description,
@@ -2680,6 +2775,12 @@ async def get_server_details(
     # early-return and the multi-version return path apply it.
     redact_backend = should_redact_backend_urls(user_context)
 
+    # Prune the tool_list to what this caller may see, matching the list
+    # endpoint (GET /servers) and the tool catalog. A caller with server
+    # access but a restricted tool set must not see tool names outside that
+    # set. filter_tools_for_user fails closed and passes through admin/wildcard.
+    _apply_tool_visibility(server_info, service_path, user_context, endpoint="server_details")
+
     # Local (stdio) servers don't support multi-version routing — early-return
     # avoids guarding the synthesis block below. _build_versions_list() also
     # handles this (returns []), but skipping it here saves the work.
@@ -3532,6 +3633,12 @@ async def generate_user_token(
                 "groups": user_context["groups"],
                 "provider": user_context.get("provider", session_data.get("provider")),
                 "auth_method": user_context.get("auth_method", session_data.get("auth_method")),
+                # Forward the opaque server-side session id so the auth server can
+                # reconcile the minted groups/scopes against the authoritative
+                # session record rather than trusting the body. Omitted (None) for
+                # non-session-backed callers, in which case the auth server uses
+                # the supplied context as-is.
+                "session_id": user_context.get("session_id"),
             },
             "requested_scopes": requested_scopes,
             "expires_in_hours": expires_in_hours,
@@ -4601,6 +4708,26 @@ async def remove_service_api(
                 content={
                     "error": "Permission denied",
                     "reason": f"User does not have delete_service permission for '{service_name}'",
+                },
+            )
+
+        # Ownership guard: deleting a server tears down its routing and scopes,
+        # so only the original owner (registered_by) or an admin may do it --
+        # matching PUT /servers/{path} and PATCH .../auth-credential. Permission
+        # AND ownership are both required (defense in depth) so the whole
+        # mutation family is consistent; a delete_service grant alone is not
+        # sufficient. Fails closed when ownership cannot be established
+        # (missing registered_by -> deny for a non-admin).
+        if server_info.get("registered_by") != user_context.get("username"):
+            logger.warning(
+                f"User {user_context.get('username')} attempted to delete server "
+                f"'{service_name}' ({path}) owned by {server_info.get('registered_by')}"
+            )
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "Not authorized",
+                    "reason": "You can only delete servers you registered",
                 },
             )
 
@@ -5877,6 +6004,11 @@ async def get_server_connect_config(
     # emit --callback-port and the IDE stops using a random port the IdP rejects.
     callback_port = settings.ide_oauth_callback_port or None
 
+    # Optional scope for the Claude Code Connect snippet (local|project|user).
+    # Empty (default) => the frontend omits --scope, keeping Claude Code's own
+    # default. Only affects the displayed Claude Code command.
+    connect_scope = settings.ide_connect_scope or None
+
     return {
         "path": service_path,
         "server_name": server_info.get("server_name"),
@@ -5885,6 +6017,7 @@ async def get_server_connect_config(
         "custom_headers": custom_headers,
         "oauth_client_id": oauth_client_id,
         "oauth_callback_port": callback_port,
+        "connect_scope": connect_scope,
         "append_mcp_path": server_info.get("append_mcp_path"),
         # Per-user egress credential vault mode. When "oauth_user", the gateway
         # injects the user's vaulted upstream token on egress, so the Connect
@@ -6315,6 +6448,12 @@ async def get_server(
     # In registry-only mode, users need the URL to connect directly.
     if should_redact_backend_urls(user_context):
         redact_server_backend_fields(server_info)
+
+    # Prune the tool_list to what this caller may see, matching the list
+    # endpoint (GET /servers), the tool catalog, and get_server_details. A
+    # caller with server access but a restricted tool set must not read tool
+    # names outside that set. Fails closed; admin/wildcard pass through.
+    _apply_tool_visibility(server_info, path, user_context, endpoint="server_detail")
 
     # Normalize visibility for servers stored before the write-side fix
     # always persisted the field (#1181). Matches the default-on-read

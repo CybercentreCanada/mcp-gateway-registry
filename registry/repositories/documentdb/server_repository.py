@@ -530,7 +530,7 @@ class DocumentDBServerRepository(ServerRepositoryBase):
         logger.debug(f"DocumentDB COUNT: Counting tools in collection '{self._collection_name}'")
         collection = await self._get_collection()
 
-        pipeline = [
+        pipeline: list[dict[str, Any]] = [
             {"$match": {"_id": {"$not": {"$regex": ":"}}}},
             {
                 "$group": {

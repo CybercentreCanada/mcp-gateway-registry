@@ -41,6 +41,7 @@ class _InMemoryStore(SecretStoreBase):
             if am == auth_method and uid == user_id
         ]
 
+
 EGRESS_OAUTH = {
     "provider": "github",
     "client_id": "Iv1.testclient",

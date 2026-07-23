@@ -24,7 +24,7 @@ import csv
 import json
 import logging
 import os
-import subprocess
+import subprocess  # nosec B404 - used only for hardcoded mongosh/docker commands below
 import sys
 import time
 from collections import (
@@ -596,8 +596,8 @@ def _print_summary(documents: list[dict]) -> None:
             print(f"  Max per instance:      {max_v}")
 
         _print_object_stats("MCP Servers", "servers_count")
-        _print_object_stats("Agents",      "agents_count")
-        _print_object_stats("Skills",      "skills_count")
+        _print_object_stats("Agents", "agents_count")
+        _print_object_stats("Skills", "skills_count")
         _print_object_stats("Federation Peers", "peers_count")
 
         # Search backend distribution

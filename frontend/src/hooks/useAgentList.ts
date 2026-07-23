@@ -6,22 +6,13 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import axios from 'axios';
+import { fetchAllPages } from '../utils/fetchAllPages';
 
 
 export interface AgentInfo {
   name: string;
   path: string;
   description: string;
-}
-
-interface AgentListResponse {
-  agents: Array<{
-    name: string;
-    path: string;
-    description?: string;
-    [key: string]: unknown;
-  }>;
 }
 
 interface UseAgentListReturn {
@@ -42,10 +33,17 @@ export function useAgentList(): UseAgentListReturn {
     setError(null);
 
     try {
-      const response = await axios.get<AgentListResponse>('/api/agents');
-      const data = response.data;
+      // Issue #880: default API limit is 20; page through all agents.
+      const rawAgents = await fetchAllPages<{
+        name: string;
+        path: string;
+        description?: string;
+      }>({
+        url: '/api/agents',
+        itemsKey: 'agents',
+      });
 
-      const agentList: AgentInfo[] = (data.agents || []).map((agent) => ({
+      const agentList: AgentInfo[] = rawAgents.map((agent) => ({
         name: agent.name,
         path: agent.path,
         description: agent.description || '',

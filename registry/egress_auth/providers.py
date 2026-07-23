@@ -77,7 +77,8 @@ def resolve_provider(egress_oauth: dict) -> OAuthProviderConfig:
     Args:
         egress_oauth: The ``EgressOAuthConfig`` as a dict (``.model_dump()`` or
             the persisted mapping). Must carry ``provider``; ``custom`` requires
-            ``custom_authorize_url`` and ``custom_token_url``.
+            ``custom_authorize_url`` and ``custom_token_url``, and may carry an
+            optional ``custom_resource`` (RFC 8707 resource indicator).
 
     Returns:
         The matching built-in ``OAuthProviderConfig`` or an assembled custom one.
@@ -107,6 +108,9 @@ def resolve_provider(egress_oauth: dict) -> OAuthProviderConfig:
                 egress_oauth.get("custom_token_auth_style") or "post_body"
             ),
             use_pkce=True,
+            # RFC 8707 resource indicator (optional). Empty string -> None so the
+            # engine only emits the ``resource`` param when actually configured.
+            resource=egress_oauth.get("custom_resource") or None,
         )
 
     cfg = PROVIDER_REGISTRY.get(name)

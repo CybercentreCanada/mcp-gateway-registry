@@ -891,4 +891,6 @@ class TestKeycloakAuthorizationServerMetadata:
             client_secret="s",
         )
 
-        assert provider.authorization_server_issuer() == "https://auth.example.com/realms/test-realm"
+        assert (
+            provider.authorization_server_issuer() == "https://auth.example.com/realms/test-realm"
+        )

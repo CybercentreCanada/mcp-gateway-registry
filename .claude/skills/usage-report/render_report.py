@@ -256,9 +256,7 @@ def _build_cloud_installs_table(
         delta = _format_combined_delta(cur, prev)
         last_startup = last_seen_per_cloud.get(cloud, {}).get("last_startup", "n/a")
         last_heartbeat = last_seen_per_cloud.get(cloud, {}).get("last_heartbeat", "n/a")
-        lines.append(
-            f"| {cloud} | {prev} | {cur} | {delta} | {last_startup} | {last_heartbeat} |"
-        )
+        lines.append(f"| {cloud} | {prev} | {cur} | {delta} | {last_startup} | {last_heartbeat} |")
     return "\n".join(lines)
 
 
@@ -374,7 +372,9 @@ def _build_upgrade_trajectories_table(
         if len(traj) > 150:
             parts = r.get("trajectory", [])
             traj = f"{parts[0]} -> ... -> {parts[-1]}"
-        lines.append(f"| `{r.get('registry_id', '')[:12]}...` | {prof} | {r['version_changes']} | {traj} |")
+        lines.append(
+            f"| `{r.get('registry_id', '')[:12]}...` | {prof} | {r['version_changes']} | {traj} |"
+        )
     return "\n".join(lines)
 
 
@@ -406,7 +406,7 @@ def _build_embeddings_backend_table(
         "|--------------|-----------------:|-----------:|",
     ]
     for r in rows:
-        kind = r["kind"] if r["kind"] != "unknown" else f"`unknown` (pre-v1.0.22)"
+        kind = r["kind"] if r["kind"] != "unknown" else "`unknown` (pre-v1.0.22)"
         if r["kind"] != "unknown":
             kind = f"`{r['kind']}`"
         lines.append(f"| {kind} | {r['instances']} | {r['percentage']} |")
@@ -491,7 +491,9 @@ def _build_detection_by_version_narrative(
 
     # Identify "release" versions (skip the "other" rollup, dev branches, sha-only refs)
     is_release_re = re.compile(r"^v?\d+\.\d+\.\d+(?:-p\d+)?$")
-    releases = [r for r in rows if is_release_re.match(r.get("version", "")) and int(r.get("total", 0)) >= 5]
+    releases = [
+        r for r in rows if is_release_re.match(r.get("version", "")) and int(r.get("total", 0)) >= 5
+    ]
 
     if not releases:
         return "_No release-version rows with sufficient sample size for narrative._"
@@ -551,7 +553,8 @@ def _build_architecture_patterns(
     instances = metrics.get("identified_instances", [])
     internal_ids = set(metrics.get("internal_instance_ids", []))
     customers = [
-        i for i in instances
+        i
+        for i in instances
         if (i.get("registry_id_full") or i.get("registry_id", "")) not in internal_ids
     ]
     # Index by both truncated and full IDs since stickiness.longest_non_internal_id
@@ -585,6 +588,7 @@ def _build_architecture_patterns(
             + i.get("max_skills", 0)
             + i.get("total_search_queries", 0)
         )
+
     if customers:
         most_active = max(customers, key=_activity_score)
         bullets.append(
@@ -596,6 +600,7 @@ def _build_architecture_patterns(
     # 3. Largest catalog
     def _catalog_score(i):
         return i.get("max_servers", 0) + i.get("max_agents", 0) + i.get("max_skills", 0)
+
     if customers:
         largest = max(customers, key=_catalog_score)
         score = _catalog_score(largest)
@@ -758,10 +763,14 @@ def _build_template_vars(
     # Lifetime stats
     lifetime_list = metrics.get("instance_lifetime", [])
     customer_lifetimes = [
-        i["age_days"] for i in lifetime_list
-        if i.get("registry_id_full", i.get("registry_id", "")) not in metrics.get("internal_instance_ids", [])
+        i["age_days"]
+        for i in lifetime_list
+        if i.get("registry_id_full", i.get("registry_id", ""))
+        not in metrics.get("internal_instance_ids", [])
     ]
-    avg_lifetime = (sum(customer_lifetimes) / len(customer_lifetimes)) if customer_lifetimes else 0.0
+    avg_lifetime = (
+        (sum(customer_lifetimes) / len(customer_lifetimes)) if customer_lifetimes else 0.0
+    )
     multi_day = sum(1 for d in customer_lifetimes if d > 0)
     multi_day_pct = (multi_day / len(customer_lifetimes) * 100) if customer_lifetimes else 0
 
@@ -769,7 +778,10 @@ def _build_template_vars(
     longest_id = stickiness.get("longest_non_internal_id", "")
     longest_profile = "?"
     for inst in metrics.get("identified_instances", []):
-        if inst.get("registry_id_full") == longest_id or inst.get("registry_id") == longest_id[:12] + "...":
+        if (
+            inst.get("registry_id_full") == longest_id
+            or inst.get("registry_id") == longest_id[:12] + "..."
+        ):
             longest_profile = f"{inst['cloud']}/{inst['compute']}/{inst['auth']}"
             break
         # Also try registry_id (truncated form)
@@ -828,7 +840,7 @@ def _build_template_vars(
     linear_rate = fc_linear.get("slope_per_day", 0)
     recent_rate = fc_recent.get("daily_add_rate", 0)
     today_count = forecast.get("today", {}).get("installs", total_instances)
-    target = forecast.get("target", 1000)
+    target = forecast.get("target", 2000)
     remaining = target - today_count
     if recent_rate > linear_rate:
         forecast_narrative = (
@@ -848,9 +860,15 @@ def _build_template_vars(
 
     # ===== One-day-wonder trend =====
     odw_pct = stickiness.get("one_day_wonder_pct", 0)
-    prev_odw_pct = prev_metrics.get("stickiness", {}).get("one_day_wonder_pct", odw_pct) if prev_metrics else odw_pct
+    prev_odw_pct = (
+        prev_metrics.get("stickiness", {}).get("one_day_wonder_pct", odw_pct)
+        if prev_metrics
+        else odw_pct
+    )
     if odw_pct < prev_odw_pct:
-        one_day_wonder_trend = f"Down from {prev_odw_pct:.1f}% in the previous report (retention strengthening)."
+        one_day_wonder_trend = (
+            f"Down from {prev_odw_pct:.1f}% in the previous report (retention strengthening)."
+        )
     elif odw_pct > prev_odw_pct:
         one_day_wonder_trend = f"Up from {prev_odw_pct:.1f}% (acquisition outpacing aging-in)."
     else:
@@ -858,10 +876,17 @@ def _build_template_vars(
 
     # ===== Executive summary lead =====
     sticky_now = stickiness.get("sticky_3plus_days", 0)
-    prev_sticky = prev_metrics.get("stickiness", {}).get("sticky_3plus_days", 0) if prev_metrics else 0
+    prev_sticky = (
+        prev_metrics.get("stickiness", {}).get("sticky_3plus_days", 0) if prev_metrics else 0
+    )
     confirmed_now = counts.get("confirmed", 0)
     prev_confirmed = prev_liveness.get("counts", {}).get("confirmed", 0) if prev_liveness else 0
-    instance_delta = total_instances - prev_metrics.get("key_metrics", {}).get("identified_instances", total_instances) if prev_metrics else 0
+    instance_delta = (
+        total_instances
+        - prev_metrics.get("key_metrics", {}).get("identified_instances", total_instances)
+        if prev_metrics
+        else 0
+    )
 
     # Customer instances that reported on the last complete day (report date - 1).
     # The report day itself is usually in-progress at export time, so we use the
@@ -877,7 +902,9 @@ def _build_template_vars(
 
     exec_lead_parts = []
     if instance_delta > 0:
-        exec_lead_parts.append(f"{instance_delta} new install{'s' if instance_delta != 1 else ''} since the previous report.")
+        exec_lead_parts.append(
+            f"{instance_delta} new install{'s' if instance_delta != 1 else ''} since the previous report."
+        )
     if confirmed_now > prev_confirmed:
         exec_lead_parts.append(f"Confirmed Alive moved from {prev_confirmed} to {confirmed_now}.")
     elif confirmed_now == prev_confirmed and confirmed_now > 0:
@@ -902,7 +929,6 @@ def _build_template_vars(
         "collection_period_days": _days_between(
             km.get("earliest_ts", "")[:10], km.get("latest_ts", "")[:10]
         ),
-
         # Headline counts
         "total_events": f"{km.get('total_events', 0):,}",
         "startup_events": f"{km.get('startup_events', 0):,}",
@@ -910,7 +936,6 @@ def _build_template_vars(
         "total_instances": total_instances,
         "internal_instances": internal_count,
         "customer_instances": customer_total,
-
         # Stickiness
         "sticky_3plus_days": sticky_now,
         "one_day_wonders": stickiness.get("one_day_wonders", 0),
@@ -922,19 +947,27 @@ def _build_template_vars(
         "avg_lifetime_days": f"{avg_lifetime:.1f}",
         "multi_day_customers": multi_day,
         "multi_day_pct_str": f"{multi_day_pct:.1f}",
-
         # Liveness
         "confirmed_alive": counts.get("confirmed", 0),
         "stronger_alive": counts.get("stronger", 0),
         "likely_alive": counts.get("likely", 0),
         "silent_but_recent": counts.get("silent_but_recent", 0),
         "dormant": counts.get("dormant", 0),
-        "confirmed_alive_pct": f"{counts.get('confirmed', 0) / customer_total * 100:.1f}" if customer_total else "0.0",
-        "stronger_alive_pct": f"{counts.get('stronger', 0) / customer_total * 100:.1f}" if customer_total else "0.0",
-        "likely_alive_pct": f"{counts.get('likely', 0) / customer_total * 100:.1f}" if customer_total else "0.0",
-        "silent_but_recent_pct": f"{counts.get('silent_but_recent', 0) / customer_total * 100:.1f}" if customer_total else "0.0",
-        "dormant_pct": f"{counts.get('dormant', 0) / customer_total * 100:.1f}" if customer_total else "0.0",
-
+        "confirmed_alive_pct": f"{counts.get('confirmed', 0) / customer_total * 100:.1f}"
+        if customer_total
+        else "0.0",
+        "stronger_alive_pct": f"{counts.get('stronger', 0) / customer_total * 100:.1f}"
+        if customer_total
+        else "0.0",
+        "likely_alive_pct": f"{counts.get('likely', 0) / customer_total * 100:.1f}"
+        if customer_total
+        else "0.0",
+        "silent_but_recent_pct": f"{counts.get('silent_but_recent', 0) / customer_total * 100:.1f}"
+        if customer_total
+        else "0.0",
+        "dormant_pct": f"{counts.get('dormant', 0) / customer_total * 100:.1f}"
+        if customer_total
+        else "0.0",
         # Adoption funnel counts (cumulative thresholds)
         "weekly_count": stickiness.get("lifetime_bucket_counts", {}).get("7", 0),
         "biweekly_count": stickiness.get("lifetime_bucket_counts", {}).get("14", 0),
@@ -943,7 +976,6 @@ def _build_template_vars(
         "pct_7d": f"{stickiness.get('lifetime_bucket_pct', {}).get('7', 0):.1f}",
         "pct_14d": f"{stickiness.get('lifetime_bucket_pct', {}).get('14', 0):.1f}",
         "pct_30d": f"{stickiness.get('lifetime_bucket_pct', {}).get('30', 0):.1f}",
-
         # Lifetime retention over time
         "earliest_snapshot_date": earliest_pct.get("date", "(unknown)"),
         "earliest_pct_3d": f"{float(earliest_pct.get('pct_ge_3d', 0)):.1f}",
@@ -956,20 +988,18 @@ def _build_template_vars(
         "pct_14d_change_str": _pct_change_str("pct_ge_14d", "pct_ge_14d"),
         "pct_30d_change_str": _pct_change_str("pct_ge_30d", "pct_ge_30d"),
         "pct_odw_change_str": _pct_change_str("one_day_wonder_pct", "one_day_wonder_pct"),
-
         # Search
         "search_active_instances": metrics.get("search_stats", {}).get("instances_with_search", 0),
         "search_total_queries": f"{metrics.get('search_stats', {}).get('lifetime_sum', 0):,}",
         "search_avg_per_instance": f"{metrics.get('search_stats', {}).get('lifetime_avg', 0):.1f}",
         "search_max_single_instance": f"{metrics.get('search_stats', {}).get('lifetime_max', 0):,}",
-
         # Forecast
         "forecast_linear_rate": f"{linear_rate:.1f}",
         "forecast_linear_eta": linear_eta,
         "forecast_recent_rate": f"{recent_rate:.1f}",
         "forecast_recent_eta": recent_eta,
+        "forecast_target": f"{target:,}",
         "forecast_narrative": forecast_narrative,
-
         # LTV
         "yesterday_label": ltv_yesterday.get("date", "?"),
         "ltv_yesterday_proven": f"${ltv_yesterday.get('proven', {}).get('total_usd', 0):,.2f}",
@@ -992,7 +1022,6 @@ def _build_template_vars(
         "ltv_instance_days_proven": f"{id_proven:,}",
         "ltv_gap_install_vanish_days": f"{gap_install_vanish_days:,}",
         "ltv_gap_first_free_days": f"{gap_first_free_days:,}",
-
         # Comparison-with-previous
         "prev_total_events": f"{prev_metrics.get('key_metrics', {}).get('total_events', 0):,}",
         "prev_startup_events": f"{prev_metrics.get('key_metrics', {}).get('startup_events', 0):,}",
@@ -1000,41 +1029,58 @@ def _build_template_vars(
         "prev_total_instances": prev_metrics.get("key_metrics", {}).get("identified_instances", 0),
         "prev_sticky_3plus_days": prev_sticky,
         "prev_confirmed_alive": prev_confirmed,
-        "prev_stronger_alive": prev_liveness.get("counts", {}).get("stronger", 0) if prev_liveness else 0,
-        "prev_likely_alive": prev_liveness.get("counts", {}).get("likely", 0) if prev_liveness else 0,
-        "prev_silent_but_recent": prev_liveness.get("counts", {}).get("silent_but_recent", 0) if prev_liveness else 0,
+        "prev_stronger_alive": prev_liveness.get("counts", {}).get("stronger", 0)
+        if prev_liveness
+        else 0,
+        "prev_likely_alive": prev_liveness.get("counts", {}).get("likely", 0)
+        if prev_liveness
+        else 0,
+        "prev_silent_but_recent": prev_liveness.get("counts", {}).get("silent_but_recent", 0)
+        if prev_liveness
+        else 0,
         "prev_dormant": prev_liveness.get("counts", {}).get("dormant", 0) if prev_liveness else 0,
         "total_events_delta_str": _format_combined_delta(
             km.get("total_events", 0),
             prev_metrics.get("key_metrics", {}).get("total_events", 0),
-        ) if prev_metrics else "(no prior)",
+        )
+        if prev_metrics
+        else "(no prior)",
         "startup_events_delta_str": _format_combined_delta(
             km.get("startup_events", 0),
             prev_metrics.get("key_metrics", {}).get("startup_events", 0),
-        ) if prev_metrics else "(no prior)",
+        )
+        if prev_metrics
+        else "(no prior)",
         "heartbeat_events_delta_str": _format_combined_delta(
             km.get("heartbeat_events", 0),
             prev_metrics.get("key_metrics", {}).get("heartbeat_events", 0),
-        ) if prev_metrics else "(no prior)",
+        )
+        if prev_metrics
+        else "(no prior)",
         "total_instances_delta_str": _format_combined_delta(
             total_instances,
             prev_metrics.get("key_metrics", {}).get("identified_instances", 0),
-        ) if prev_metrics else "(no prior)",
+        )
+        if prev_metrics
+        else "(no prior)",
         "sticky_delta_str": _format_delta_int(sticky_now - prev_sticky),
         "confirmed_alive_delta_str": _format_delta_int(counts.get("confirmed", 0) - prev_confirmed),
         "stronger_alive_delta_str": _format_delta_int(
-            counts.get("stronger", 0) - (prev_liveness.get("counts", {}).get("stronger", 0) if prev_liveness else 0)
+            counts.get("stronger", 0)
+            - (prev_liveness.get("counts", {}).get("stronger", 0) if prev_liveness else 0)
         ),
         "likely_alive_delta_str": _format_delta_int(
-            counts.get("likely", 0) - (prev_liveness.get("counts", {}).get("likely", 0) if prev_liveness else 0)
+            counts.get("likely", 0)
+            - (prev_liveness.get("counts", {}).get("likely", 0) if prev_liveness else 0)
         ),
         "silent_but_recent_delta_str": _format_delta_int(
-            counts.get("silent_but_recent", 0) - (prev_liveness.get("counts", {}).get("silent_but_recent", 0) if prev_liveness else 0)
+            counts.get("silent_but_recent", 0)
+            - (prev_liveness.get("counts", {}).get("silent_but_recent", 0) if prev_liveness else 0)
         ),
         "dormant_delta_str": _format_delta_int(
-            counts.get("dormant", 0) - (prev_liveness.get("counts", {}).get("dormant", 0) if prev_liveness else 0)
+            counts.get("dormant", 0)
+            - (prev_liveness.get("counts", {}).get("dormant", 0) if prev_liveness else 0)
         ),
-
         # GitHub
         "github_stars": github.get("stars", 0),
         "github_forks": github.get("forks", 0),
@@ -1046,15 +1092,21 @@ def _build_template_vars(
         "prev_github_watchers": prev_github.get("watchers", 0),
         "prev_github_open_issues": prev_github.get("open_issues", 0),
         "prev_github_contributors": github_contributors,  # contributors not stored historically
-        "github_stars_delta_str": _format_delta_int(github.get("stars", 0) - prev_github.get("stars", 0)),
-        "github_forks_delta_str": _format_delta_int(github.get("forks", 0) - prev_github.get("forks", 0)),
-        "github_watchers_delta_str": _format_delta_int(github.get("watchers", 0) - prev_github.get("watchers", 0)),
-        "github_open_issues_delta_str": _format_delta_int(github.get("open_issues", 0) - prev_github.get("open_issues", 0)),
+        "github_stars_delta_str": _format_delta_int(
+            github.get("stars", 0) - prev_github.get("stars", 0)
+        ),
+        "github_forks_delta_str": _format_delta_int(
+            github.get("forks", 0) - prev_github.get("forks", 0)
+        ),
+        "github_watchers_delta_str": _format_delta_int(
+            github.get("watchers", 0) - prev_github.get("watchers", 0)
+        ),
+        "github_open_issues_delta_str": _format_delta_int(
+            github.get("open_issues", 0) - prev_github.get("open_issues", 0)
+        ),
         "github_contributors_delta_str": "0",
-
         # Narrative
         "executive_summary_lead": executive_summary_lead,
-
         # Sub-tables (markdown blocks)
         "cloud_installs_table": _build_cloud_installs_table(metrics, prev_metrics),
         "engagement_recent_days_table": _build_engagement_table(active_rows),
@@ -1078,7 +1130,6 @@ def _build_template_vars(
             str(output_dir / f"detection-by-version-{date_str}.csv")
         ),
         "architecture_patterns": _build_architecture_patterns(metrics, liveness),
-
         # Community vs internal split (by version-string classification)
         "prod_internal_yesterday_date": pi_yesterday_date,
         "prod_internal_yesterday_total": pi_y_total,

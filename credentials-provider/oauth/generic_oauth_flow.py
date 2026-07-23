@@ -99,7 +99,7 @@ def _safe_oauth_error(response: "requests.Response") -> str:
         data = response.json()
         if isinstance(data, dict) and data.get("error"):
             return f"error={data['error']}"
-    except Exception:
+    except Exception:  # nosec B110 - best-effort parse of error body; never log raw response
         pass
     return "(body omitted)"
 
@@ -823,7 +823,7 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
         let timer = 5;
         const timerElement = document.getElementById('timer');
         const countdownElement = document.getElementById('countdown');
-        
+
         const interval = setInterval(() => {{
             timer--;
             timerElement.textContent = timer;
@@ -833,7 +833,7 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
                 window.close();
             }}
         }}, 1000);
-        
+
         // Also try to close on click
         document.addEventListener('click', () => window.close());
     </script>
@@ -1040,7 +1040,10 @@ def interactive_configuration() -> dict[str, Any]:
             import subprocess  # nosec B404
 
             public_ip = (
-                subprocess.check_output(["curl", "-s", "http://checkip.amazonaws.com/"])
+                subprocess.check_output(  # nosec B603 B607 - hardcoded command detecting public IP during interactive setup
+                    ["curl", "-s", "http://checkip.amazonaws.com/"],
+                    timeout=10,
+                )
                 .decode()
                 .strip()
             )

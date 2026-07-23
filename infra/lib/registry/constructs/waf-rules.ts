@@ -65,19 +65,31 @@ export class WafRules extends Construct {
     // ------------------------------------------------------------------
     // MCP Gateway WAF
     // ------------------------------------------------------------------
+    // Guard on mcpGatewayAlbArn (mirrors the Keycloak block below). CloudFront
+    // + WAF is now embedded per-stack, so this construct is instantiated in
+    // BOTH the Auth stack (mcpGatewayAlbArn: '') and the Service stack (real
+    // registry ALB ARN). Without this guard the Auth stack would ALSO build a
+    // Web ACL named `${config.name}-mcp-gateway-waf` — a WAFv2 REGIONAL name
+    // collision with the Service stack's ACL — and associate it to an empty
+    // resourceArn (a deploy failure). Only the stack that owns the registry ALB
+    // builds this ACL.
 
-    const mcpGatewayWaf = _createWebAcl(
-      this,
-      'McpGateway',
-      config,
-      `${config.name}-mcp-gateway-waf`,
-      'WAF protection for MCP Gateway ALB',
-    );
+    if (mcpGatewayAlbArn) {
+      const mcpGatewayWaf = _createWebAcl(
+        this,
+        'McpGateway',
+        config,
+        `${config.name}-mcp-gateway-waf`,
+        'WAF protection for MCP Gateway ALB',
+      );
 
-    _createWebAclAssociation(this, 'McpGatewayAssoc', mcpGatewayWaf, mcpGatewayAlbArn);
-    _createWafLogging(this, 'McpGatewayLogs', config, mcpGatewayWaf, 'mcp-gateway');
+      _createWebAclAssociation(this, 'McpGatewayAssoc', mcpGatewayWaf, mcpGatewayAlbArn);
+      _createWafLogging(this, 'McpGatewayLogs', config, mcpGatewayWaf, 'mcp-gateway');
 
-    this.mcpGatewayWebAclArn = mcpGatewayWaf.attrArn;
+      this.mcpGatewayWebAclArn = mcpGatewayWaf.attrArn;
+    } else {
+      this.mcpGatewayWebAclArn = '';
+    }
 
     // ------------------------------------------------------------------
     // Keycloak WAF

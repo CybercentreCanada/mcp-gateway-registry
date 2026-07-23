@@ -38,29 +38,39 @@ class RemoteAgentClient:
         agent_id: str,
         skills: list[str] | None = None,
         delegation_token: str | None = None,
+        gateway_token: str | None = None,
     ):
         """Initialize a client for a registry-discovered remote agent.
 
         Args:
-            agent_url: The remote agent's endpoint URL (registrant-controlled,
-                not fully trusted). Validated against the SSRF guard before any
-                outbound request.
+            agent_url: The remote agent's endpoint URL. When the agent was
+                discovered through the MCP gateway, this is the gateway-rewritten
+                URL (``/agent/<path>/``), so the call is proxied and the gateway
+                enforces the ``invoke_agent`` scope.
             agent_name: Human-readable agent name (for logging).
             agent_id: Registry path/id used as the cache key.
             skills: Skill names the agent advertises.
             delegation_token: OPTIONAL, audience-restricted, short-lived token
                 minted specifically for this target agent. It MUST NOT be the
-                caller's registry-scoped token: forwarding the registry token to
-                an untrusted remote agent would let that agent replay it against
-                the registry API. When ``None`` (the default in this sample), no
-                credential is sent to the remote agent.
+                caller's registry-scoped token. Sent in the standard
+                ``Authorization`` header, which the A2A gateway forwards
+                end-to-end to the target agent (per the A2A egress trust model).
+                When ``None``, a random placeholder is sent so the target's
+                presence-only check has a credential to see (test/demo).
+            gateway_token: OPTIONAL gateway/ingress token, sent in
+                ``X-Authorization`` for the gateway's ``/validate`` hop to
+                authenticate the caller and enforce the ``invoke_agent`` scope.
+                The gateway strips it before proxying, so it never reaches the
+                target agent.
         """
         self.agent_url = agent_url
         self.agent_name = agent_name
         self.agent_id = agent_id
         self.skills = skills or []
-        # Per-target delegation credential only -- never the registry token.
+        # Per-target delegation credential (Authorization) -- never the registry
+        # token. The registry/gateway token travels separately in X-Authorization.
         self.delegation_token = delegation_token
+        self.gateway_token = gateway_token
         self.agent_card = None
         self.client = None
         self.httpx_client = None
@@ -86,9 +96,23 @@ class RemoteAgentClient:
             raise
 
         headers = {}
+        # A2A egress trust model (two-header split):
+        #   X-Authorization -> caller's gateway/ingress token; the gateway
+        #     validates it at /validate, enforces invoke_agent, then STRIPS it.
+        #   Authorization   -> the target agent's own credential (obtained
+        #     out-of-band); the gateway forwards it end-to-end untouched.
+        if self.gateway_token:
+            headers["X-Authorization"] = f"Bearer {self.gateway_token}"
         if self.delegation_token:
-            # Only an explicit per-target delegation token is ever attached.
-            headers["Authorization"] = f"Bearer {self.delegation_token}"
+            authorization_token = self.delegation_token
+        else:
+            # No real per-target credential in this sample: send a random,
+            # opaque placeholder so the target agent's presence-only check has a
+            # bearer to see. It is deliberately NOT the gateway token (which
+            # lives in X-Authorization) -- the gateway rejects a request that
+            # duplicates the gateway credential into Authorization.
+            authorization_token = f"a2a-demo-{uuid4().hex}"
+        headers["Authorization"] = f"Bearer {authorization_token}"
 
         # Create persistent httpx client (not using context manager). Redirects
         # are disabled so a validated public host cannot 302 the request to an
@@ -116,6 +140,9 @@ class RemoteAgentClient:
         # Send a natural language message to the remote agent.
         await self._ensure_initialized()
 
+        # Always log the exact target URL for this A2A call (not just on first
+        # init), so every invocation shows which endpoint it is proxied through.
+        logger.info(f"A2A call -> {self.agent_url} (target agent: {self.agent_name})")
         logger.info(f"Sending message to {self.agent_name}: {message[:100]}...")
 
         try:
@@ -169,6 +196,7 @@ class RemoteAgentCache:
         self,
         agents: list[DiscoveredAgent],
         delegation_token_provider: Callable[[DiscoveredAgent], str | None] | None = None,
+        gateway_token: str | None = None,
     ) -> dict[str, RemoteAgentClient]:
         """Cache discovered remote agents for later invocation.
 
@@ -180,6 +208,10 @@ class RemoteAgentCache:
                 passed here -- doing so would leak it to untrusted remote agents.
                 When ``None`` (the default), no credential is attached to
                 outbound A2A calls.
+            gateway_token: OPTIONAL gateway/ingress token sent in X-Authorization
+                so the gateway can authenticate the caller and enforce the
+                invoke_agent scope. The gateway strips it before proxying, so it
+                never reaches the target agent.
 
         Returns:
             The newly cached agent clients keyed by agent id.
@@ -207,6 +239,7 @@ class RemoteAgentCache:
                 agent_id=agent_id,
                 skills=agent.skill_names,
                 delegation_token=delegation_token,
+                gateway_token=gateway_token,
             )
 
             self._cache[agent_id] = agent_client

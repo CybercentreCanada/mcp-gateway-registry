@@ -142,14 +142,34 @@ variable "keycloak_database_username" {
   default     = "keycloak"
 }
 
+variable "allow_unsafe_password_chars" {
+  description = <<-EOT
+    Escape hatch for the URI/RDS-safe password character validation added in
+    #1354. Default false: keycloak_database_password and documentdb_admin_password
+    are rejected if they contain / @ " ' + : ? # & ! = % or spaces (these break
+    RDS/DocumentDB, connection-string/URI parsing, or curl form-encoding).
+
+    Set true ONLY for an EXISTING install whose databases were already created
+    with such a password (rotating a live master password is avoidable churn).
+    This does NOT make those characters safe; it suppresses the fail-fast check
+    so an existing deployment can keep applying without a forced password change.
+    New installs should leave this false and choose a compliant password.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "keycloak_database_password" {
   description = "Keycloak database password"
   type        = string
   sensitive   = true
 
   validation {
-    condition     = !can(regex("[/ @\"'+:?#&!=%]", var.keycloak_database_password))
-    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces."
+    # Reject URI/RDS-unsafe characters (#1354) unless the operator explicitly
+    # opts out via allow_unsafe_password_chars (for existing installs already
+    # running such a password). Safe by default.
+    condition     = var.allow_unsafe_password_chars || !can(regex("[/ @\"'+:?#&!=%]", var.keycloak_database_password))
+    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces. Set allow_unsafe_password_chars=true to override for an existing install."
   }
 }
 
@@ -180,19 +200,19 @@ variable "keycloak_log_level" {
 variable "registry_image_uri" {
   description = "Container image URI for registry service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/registry:1.26.0"
+  default     = "public.ecr.aws/p3v1o3c6/registry:1.27.0"
 }
 
 variable "auth_server_image_uri" {
   description = "Container image URI for auth server service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/auth-server:1.26.0"
+  default     = "public.ecr.aws/p3v1o3c6/auth-server:1.27.0"
 }
 
 variable "mcpgw_image_uri" {
   description = "Container image URI for mcpgw service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/mcpgw:1.26.0"
+  default     = "public.ecr.aws/p3v1o3c6/mcpgw:1.27.0"
 }
 
 variable "keycloak_image_uri" {
@@ -379,7 +399,7 @@ variable "trusted_external_hosts" {
 }
 
 variable "trusted_real_ip_cidrs" {
-  description = "Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front of the bundled nginx, used for nginx's set_real_ip_from so the audited client IP is the real end user rather than the load balancer's internal IP. Leave empty (default) for edge deployments where nginx is reached directly. Behind an ALB (EC2/ECS/EKS) set your VPC CIDR (e.g. 10.0.0.0/16); for CloudFront in front of an ALB list the VPC CIDR AND CloudFront's origin-facing ranges. Malformed entries are dropped (fail closed) and a spoofed left-most X-Forwarded-For is always ignored."
+  description = "Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front of the bundled nginx, used for nginx's set_real_ip_from so the audited client IP is the real end user rather than the load balancer's internal IP AND so the inbound rate-limit zones throttle per real client IP instead of collapsing to one global bucket at the ALB's IP. Leave EMPTY (the default) to auto-populate with this stack's VPC CIDR: ECS is always behind an ALB, so the module defaults set_real_ip_from to the VPC CIDR for you. Set it explicitly only to override (e.g. CloudFront in front of an ALB: list the VPC CIDR AND CloudFront's origin-facing ranges), or to a narrower range. Malformed entries are dropped (fail closed) and a spoofed left-most X-Forwarded-For is always ignored."
   type        = string
   default     = ""
 }
@@ -408,8 +428,12 @@ variable "documentdb_admin_password" {
   default     = ""
 
   validation {
-    condition     = var.documentdb_admin_password == "" || !can(regex("[/ @\"'+:?#&!=%]", var.documentdb_admin_password))
-    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces."
+    # Reject URI/RDS-unsafe characters (#1354) unless the operator explicitly
+    # opts out via allow_unsafe_password_chars (for existing installs already
+    # running such a password). Empty is allowed (only required for documentdb
+    # storage backend). Safe by default.
+    condition     = var.allow_unsafe_password_chars || var.documentdb_admin_password == "" || !can(regex("[/ @\"'+:?#&!=%]", var.documentdb_admin_password))
+    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces. Set allow_unsafe_password_chars=true to override for an existing install."
   }
 }
 
@@ -500,6 +524,50 @@ variable "documentdb_namespace" {
   default     = "default"
 }
 
+# Rate Limiting (issue #295). Application-level, identity/target-aware limits
+# enforced at the auth-server /validate hop. Off by default.
+variable "rate_limiting_enabled" {
+  description = "Master switch for application-level rate limiting"
+  type        = bool
+  default     = false
+}
+
+variable "rate_limit_backend" {
+  description = "Rate-limit counter backend (only 'documentdb' is implemented in v1)"
+  type        = string
+  default     = "documentdb"
+}
+
+variable "rate_limit_fail_open" {
+  description = "Global fail-open on rate-limit backend error (per-limit fail_closed overrides)"
+  type        = bool
+  default     = true
+}
+
+variable "rate_limit_definitions_cache_ttl_seconds" {
+  description = "In-process cache TTL (seconds) for rate-limit definition reads"
+  type        = number
+  default     = 30
+}
+
+variable "rate_limit_backend_timeout_ms" {
+  description = "Hard per-op timeout (ms) for each rate-limit counter operation"
+  type        = number
+  default     = 250
+}
+
+variable "rate_limit_user_floor_per_min" {
+  description = "Minimum per-minute user limit a group may set on short windows (lockout safeguard)"
+  type        = number
+  default     = 20
+}
+
+variable "rate_limit_agent_floor_per_min" {
+  description = "Minimum per-minute agent limit a group may set on short windows (lockout safeguard)"
+  type        = number
+  default     = 10
+}
+
 variable "documentdb_use_tls" {
   description = "Use TLS for DocumentDB connections"
   type        = bool
@@ -526,6 +594,30 @@ variable "mongodb_connection_string" {
 
 variable "mongodb_connection_string_secret_arn" {
   description = "Optional Secrets Manager ARN for the full MongoDB connection string. Preferred over mongodb_connection_string when the URI contains credentials."
+  type        = string
+  default     = ""
+}
+
+# Base64-encoded HTML snippet served as /rum.js for frontend Real User
+# Monitoring (RUM). Empty disables RUM. Prefer registry_rum_snippet_secret_arn
+# when the snippet carries a vendor token, to avoid storing secrets in
+# Terraform state (mirrors the mongodb_connection_string plaintext-or-secret
+# pattern).
+variable "registry_rum_snippet_b64" {
+  description = "Optional base64-encoded HTML snippet served as /rum.js for frontend RUM (plain text). Empty disables RUM. Prefer registry_rum_snippet_secret_arn when the snippet contains a vendor token."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "registry_rum_snippet_secret_arn" {
+  description = "Optional Secrets Manager ARN for the base64-encoded RUM snippet. Preferred over registry_rum_snippet_b64 when the snippet contains a vendor token."
+  type        = string
+  default     = ""
+}
+
+variable "registry_rum_allowed_hosts" {
+  description = "Optional comma-separated allowlist of hosts the RUM snippet may reference (script src and beacon). When set, a snippet referencing any host not on the list is rejected at startup (fail closed). Empty disables the check."
   type        = string
   default     = ""
 }
@@ -686,6 +778,12 @@ variable "cognito_client_secret" {
 
 variable "cognito_domain" {
   description = "Optional Cognito hosted UI domain prefix or custom domain. Leave empty to derive it from the User Pool ID (e.g. https://<pool-id-without-underscore>.auth.<region>.amazoncognito.com)."
+  type        = string
+  default     = ""
+}
+
+variable "cognito_m2m_client_ids" {
+  description = "Optional comma/space-separated allowlist of Cognito app-client ids that mint machine (client_credentials) access tokens the gateway should accept (COGNITO_M2M_CLIENT_IDS). Default-empty = fail closed."
   type        = string
   default     = ""
 }
@@ -1164,6 +1262,25 @@ variable "aws_registry_federation_enabled" {
   default     = false
 }
 
+variable "aws_registry_federation_assume_role_arns" {
+  description = <<-EOT
+    IAM role ARNs the registry task may assume for cross-account AWS Agent
+    Registry federation. Leave empty (the default) to disable cross-account
+    access: the sts:AssumeRole grant is omitted entirely and only same-account
+    federation works. Fail-closed: an unset list grants no cross-account trust.
+  EOT
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for arn in var.aws_registry_federation_assume_role_arns :
+      can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:role/.+$", arn))
+    ])
+    error_message = "Each entry must be a full IAM role ARN (arn:aws:iam::<account-id>:role/<name>)."
+  }
+}
+
 # =============================================================================
 # ANS (AGENT NAMING SERVICE) CONFIGURATION
 # =============================================================================
@@ -1231,6 +1348,12 @@ variable "audit_log_ttl_days" {
     condition     = var.audit_log_ttl_days >= 1 && var.audit_log_ttl_days <= 365
     error_message = "Audit log TTL must be between 1 and 365 days"
   }
+}
+
+variable "audit_log_require_durable" {
+  description = "Require a durable audit sink (fail closed). When true (default), the registry refuses to start if audit logging is enabled but no durable store (MongoDB/DocumentDB) is available, instead of silently degrading to non-durable JSON log lines that can be lost on restart and are not queryable for forensics. Set to false only in environments where a non-durable audit trail is acceptable."
+  type        = bool
+  default     = true
 }
 
 # =============================================================================
@@ -1506,6 +1629,24 @@ variable "registry_mode" {
   }
 }
 
+variable "a2a_reverse_proxy_enabled" {
+  description = "Enable A2A agent reverse-proxy generation (opt-in; default off). When true, each enabled A2A agent gets nginx location blocks proxying its card + JSON-RPC through the gateway for centralized auth and metrics."
+  type        = bool
+  default     = false
+}
+
+variable "ssrf_allowed_hosts" {
+  description = "Comma-separated hostnames (or literal IPs) that may resolve to private addresses and still be accepted by the SSRF guard for MCP-server proxy_pass_url / A2A-agent URLs. The cloud metadata endpoint is never permitted."
+  type        = string
+  default     = ""
+}
+
+variable "ssrf_allowed_cidrs" {
+  description = "Comma-separated CIDR ranges the SSRF guard accepts for MCP-server / A2A-agent upstreams even though they are private. The cloud metadata address 169.254.169.254 is never permitted."
+  type        = string
+  default     = ""
+}
+
 variable "internal_only_deployment" {
   description = <<-EOT
     Marks this as one of our own internal/workshop deployments (not a community
@@ -1720,7 +1861,7 @@ variable "github_api_base_url" {
 # =============================================================================
 
 variable "enable_waf" {
-  description = "Enable WAFv2 Web ACLs for ALBs. Requires wafv2:* IAM permissions. Set to false if IAM permissions are not available."
+  description = "Enable WAFv2 Web ACLs for ALBs (AWS managed rule sets + WAF-level rate rules) as optional defense-in-depth. NOT required for per-client-IP rate limiting: the container nginx already rate-limits the auth-validation fan-out per real client IP (trusted_real_ip_cidrs defaults to the VPC CIDR, so nginx's realip module rewrites the limit key from the ALB IP to the real client out of the box). Defaults to false as a cost decision (WAFv2 has a per-Web-ACL and per-request cost and requires wafv2:* IAM permissions); set to true for an extra managed-rules layer (see terraform/aws-ecs/README.md)."
   type        = bool
   default     = false
 }
@@ -1762,6 +1903,17 @@ variable "ide_oauth_callback_port" {
   EOT
   type        = number
   default     = 0
+}
+
+variable "ide_connect_scope" {
+  description = <<-EOT
+    Optional install scope for the Claude Code Connect snippet: local, project,
+    or user. When set, the generated `claude mcp add` command emits
+    `--scope <value>`. Empty (default) omits the flag. Display-only; passed
+    through to the mcp_gateway module.
+  EOT
+  type        = string
+  default     = ""
 }
 
 variable "registry_extra_env" {

@@ -35,6 +35,7 @@ data:
         "publish_agent": ["all"],
         "modify_agent": ["all"],
         "delete_agent": ["all"],
+        "publish_skill": ["all"],
         "list_service": ["all"],
         "register_service": ["all"],
         "health_check_service": ["all"],
@@ -69,7 +70,8 @@ data:
         else:
             uri = f"mongodb://{USERNAME}:{PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/?authMechanism=SCRAM-SHA-256&authSource=admin"
             display_host = f"{MONGO_HOST}:{MONGO_PORT}"
-            skip_replset_check = False
+            # Empty replica set means standalone MongoDB; skip replSetGetStatus.
+            skip_replset_check = not REPLICA_SET
 
         client = None
         while True:
@@ -137,6 +139,7 @@ data:
         "publish_agent": ["all"],
         "modify_agent": ["all"],
         "delete_agent": ["all"],
+        "publish_skill": ["all"],
         "list_service": ["all"],
         "register_service": ["all"],
         "health_check_service": ["all"],
@@ -481,6 +484,11 @@ data:
             # already configured by the provider.
             logger.info("Skipping replica-set initialization (connection string override in use)")
             connection_string = override
+        elif not config["replicaset"]:
+            # Standalone MongoDB (no replica set configured). Skip replSetInitiate
+            # and connect without a replicaSet parameter.
+            logger.info("Skipping replica-set initialization (standalone MongoDB, no replica set configured)")
+            connection_string = f"mongodb://{config['username']}:{config['password']}@{config['host']}:{config['port']}/{config['database']}?authMechanism=SCRAM-SHA-256&authSource=admin"
         else:
             # Initialize replica set (synchronous)
             _initialize_replica_set(config["host"], config["port"], config["username"], config["password"])

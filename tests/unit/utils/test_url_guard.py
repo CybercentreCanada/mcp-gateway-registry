@@ -138,6 +138,59 @@ class TestPrivateAndMetadata:
 
 
 # ---------------------------------------------------------------------------
+# Carrier-grade NAT (RFC 6598) explicit block
+# ---------------------------------------------------------------------------
+
+
+class TestCgnatBlock:
+    """CGNAT (100.64.0.0/10) must be blocked independently of Python's is_private.
+
+    These pin the exact range so a runtime/semantics change fails loudly here
+    rather than silently re-opening an SSRF pivot to a shared-address-space host.
+    """
+
+    @pytest.mark.parametrize(
+        "ip",
+        [
+            "100.64.0.1",
+            "100.64.0.0",
+            "100.100.50.1",
+            "100.127.255.254",
+            "::ffff:100.64.0.1",  # IPv4-mapped IPv6 form
+        ],
+    )
+    def test_cgnat_ip_is_blocked(self, ip):
+        assert url_guard._is_blocked_ip(ip, url_guard._Allowlist()) is True
+
+    @pytest.mark.parametrize(
+        "ip",
+        [
+            "100.63.255.255",  # just below the range
+            "100.128.0.1",  # just above the range
+        ],
+    )
+    def test_addresses_adjacent_to_cgnat_range_are_public(self, ip):
+        assert url_guard._is_blocked_ip(ip, url_guard._Allowlist()) is False
+
+    def test_cgnat_range_pinned_exactly(self):
+        """The pinned network must be exactly 100.64.0.0/10 (RFC 6598)."""
+        import ipaddress
+
+        assert ipaddress.ip_network("100.64.0.0/10") in url_guard._CGNAT_NETS
+
+    def test_cgnat_literal_host_rejected(self):
+        with patch.object(url_guard, "settings", _settings()):
+            with pytest.raises(UrlValidationError):
+                url_guard.validate_url("https://100.64.0.1/x")
+
+    def test_cgnat_resolution_rejected(self):
+        with patch.object(url_guard, "settings", _settings()):
+            with patch.object(url_guard.socket, "getaddrinfo", _resolve_to("100.64.0.1")):
+                with pytest.raises(UrlValidationError):
+                    url_guard.validate_url("https://sneaky.example/x")
+
+
+# ---------------------------------------------------------------------------
 # nginx metacharacters
 # ---------------------------------------------------------------------------
 
@@ -212,6 +265,49 @@ class TestNginxMetacharacters:
     def test_validate_server_path_rejects_empty(self):
         with pytest.raises(UrlValidationError):
             url_guard.validate_server_path("")
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/all",
+            "all",
+            "/ALL",
+            "/All",
+            "all/",
+            "//all//",
+            "/*",
+            "*",
+        ],
+    )
+    def test_validate_server_path_rejects_reserved_wildcard_names(self, path):
+        """Reserved cross-server wildcard names (all/*), any case or slash
+        wrapping, must be rejected (privilege escalation)."""
+        with pytest.raises(UrlValidationError):
+            url_guard.validate_server_path(path)
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/github",
+            "/my-server",
+            "/fininfo",
+            "/all-tools",
+            "/all/leaf",
+            "/callthing",
+        ],
+    )
+    def test_validate_server_path_allows_adjacent_names(self, path):
+        """Only the EXACT reserved names are blocked; superstrings and paths
+        that merely contain 'all' as a segment or substring stay valid."""
+        url_guard.validate_server_path(path)  # does not raise
+
+    @pytest.mark.parametrize("path", ["/", "//", "///"])
+    def test_validate_server_path_allows_root_and_slashes_only(self, path):
+        """A slashes-only path normalizes to an empty server name, which is
+        falsy and grants no access in the resolver, so it is not part of the
+        reserved-wildcard escalation and must stay registerable (the escalation
+        is narrowly about the 'all'/'*' sentinels, not empty names)."""
+        url_guard.validate_server_path(path)  # does not raise
 
 
 # ---------------------------------------------------------------------------

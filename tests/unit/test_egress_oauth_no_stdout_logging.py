@@ -11,12 +11,7 @@ is fed the captured stdout, so the fix cannot silently regress.
 import re
 from pathlib import Path
 
-_SRC = (
-    Path(__file__).resolve().parents[2]
-    / "credentials-provider"
-    / "oauth"
-    / "egress_oauth.py"
-)
+_SRC = Path(__file__).resolve().parents[2] / "credentials-provider" / "oauth" / "egress_oauth.py"
 
 
 def test_captured_stdout_is_never_logged() -> None:

@@ -217,6 +217,10 @@ exclude_dirs = ["tests", "*/test/*", "*/tests/*", ".venv"]
 [tool.mypy]
 explicit_package_bases = true
 mypy_path = "."
+# The Pydantic plugin teaches mypy about model __init__ signatures, including
+# populate_by_name aliases, so constructing a model by its snake_case field
+# name (not just the camelCase alias) type-checks correctly.
+plugins = ["pydantic.mypy"]
 
 # Ruff Configuration
 [tool.ruff]

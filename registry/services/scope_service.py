@@ -133,9 +133,7 @@ async def _trigger_auth_server_reload() -> bool:
                 logger.info("Successfully triggered auth server scope reload")
                 return True
             else:
-                logger.error(
-                    f"Failed to reload auth server scopes: HTTP {response.status_code}"
-                )
+                logger.error(f"Failed to reload auth server scopes: HTTP {response.status_code}")
                 return False
 
     except Exception as e:

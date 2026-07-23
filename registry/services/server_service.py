@@ -13,6 +13,31 @@ from ..utils.url_guard import validate_proxy_pass_url, validate_server_path
 logger = logging.getLogger(__name__)
 
 
+def _validate_endpoint_fields(
+    server_info: dict[str, Any],
+) -> None:
+    """Validate optional override endpoint fields at every write path.
+
+    ``mcp_endpoint`` and ``sse_endpoint`` are user-supplied alternate targets
+    that are later fetched (health checks, tool discovery, the scanner
+    subprocess) and interpolated into generated nginx config, exactly like
+    ``proxy_pass_url``. They therefore MUST pass the same canonical guard as
+    ``proxy_pass_url`` so an attacker cannot use them to smuggle a
+    private/metadata/loopback target or an nginx metacharacter past the check
+    on the primary URL field. Empty/unset is allowed (they are optional); a
+    present-but-invalid value is rejected with the same error shape as an
+    invalid ``proxy_pass_url`` (fail closed).
+
+    Raises:
+        UrlValidationError: If a present endpoint field fails scheme, host,
+            metacharacter, or private/metadata-IP validation.
+    """
+    for field_name in ("mcp_endpoint", "sse_endpoint"):
+        value = server_info.get(field_name)
+        if value:
+            validate_proxy_pass_url(value)
+
+
 class ServerService:
     """Service for managing server registration and state."""
 
@@ -77,6 +102,10 @@ class ServerService:
         proxy_pass_url = server_info.get("proxy_pass_url")
         if proxy_pass_url:
             validate_proxy_pass_url(proxy_pass_url)
+
+        # Alternate/override endpoint fields are fetched and interpolated into
+        # config just like proxy_pass_url, so they go through the SAME guard.
+        _validate_endpoint_fields(server_info)
 
         # The path is interpolated into nginx location directives; reject any
         # nginx metacharacters so a crafted path cannot inject config.
@@ -166,6 +195,9 @@ class ServerService:
         # Fail-closed URL validation on edit paths that change the backend URL.
         if server_info.get("proxy_pass_url"):
             validate_proxy_pass_url(server_info["proxy_pass_url"])
+
+        # Alternate/override endpoint fields get the same guard on edit paths.
+        _validate_endpoint_fields(server_info)
 
         result = await self._repo.update(path, server_info)
 

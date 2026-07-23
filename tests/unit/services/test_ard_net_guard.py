@@ -28,15 +28,37 @@ class TestAssertFetchable:
 
     @pytest.mark.parametrize(
         "ip",
-        ["127.0.0.1", "10.1.2.3", "192.168.1.5", "172.16.0.9", "169.254.169.254",
-         "0.0.0.0", "::ffff:10.0.0.1"],
+        [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.1.5",
+            "172.16.0.9",
+            "169.254.169.254",
+            "0.0.0.0",
+            "::ffff:10.0.0.1",
+        ],
     )
     def test_blocks_private_and_metadata(self, ip):
         family = 10 if ":" in ip else 2  # AF_INET6 vs AF_INET
-        stub = lambda host, port, **kw: [(family, 1, 6, "", (ip, port))]
+
+        def stub(host, port, **kw):
+            return [(family, 1, 6, "", (ip, port))]
+
         with patch.object(g.socket, "getaddrinfo", stub):
             with pytest.raises(ArdValidationError):
                 g.assert_fetchable("https://evil.example/x")
+
+    def test_blocks_cgnat_shared_address_space(self):
+        """Carrier-grade NAT (100.64.0.0/10, RFC 6598) must be blocked."""
+        with patch.object(g.socket, "getaddrinfo", _resolve_to("100.64.0.1")):
+            with pytest.raises(ArdValidationError):
+                g.assert_fetchable("https://evil.example/x")
+
+    def test_cgnat_range_pinned_in_blocked_nets(self):
+        """Pin the exact CGNAT range so a runtime-semantics change fails loudly."""
+        import ipaddress
+
+        assert ipaddress.ip_network("100.64.0.0/10") in g._BLOCKED_NETS
 
     def test_same_domain_allows_subdomain(self):
         with patch.object(g.socket, "getaddrinfo", _resolve_to("93.184.216.34")):

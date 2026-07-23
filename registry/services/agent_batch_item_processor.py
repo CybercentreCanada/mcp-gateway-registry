@@ -24,6 +24,10 @@ from ..schemas.agent_models import (
     AgentBatchItemResult,
     AgentCard,
     BatchItemOp,
+    _DeleteItem,
+    _PatchItem,
+    _RegisterItem,
+    _ReplaceItem,
 )
 from .agent_service import agent_service
 from .registration_gate_service import check_registration_gate
@@ -195,7 +199,7 @@ def _build_card_from_request(request, path: str, existing: AgentCard | None) -> 
 
 async def _do_register(
     index: int,
-    item: AgentBatchItem,
+    item: _RegisterItem,
     submitted_by: str,
 ) -> AgentBatchItemResult:
     """Register a new agent (POST /api/agents/register parity)."""
@@ -234,7 +238,7 @@ async def _do_register(
 
 async def _do_patch(
     index: int,
-    item: AgentBatchItem,
+    item: _PatchItem,
     submitted_by: str,
 ) -> AgentBatchItemResult:
     """Apply a JSON Merge Patch to an existing agent (PATCH parity)."""
@@ -286,7 +290,7 @@ async def _do_patch(
 
 async def _do_replace(
     index: int,
-    item: AgentBatchItem,
+    item: _ReplaceItem,
     submitted_by: str,
 ) -> AgentBatchItemResult:
     """Fully replace an existing agent card (PUT parity)."""
@@ -321,7 +325,7 @@ async def _do_replace(
 
 async def _do_delete(
     index: int,
-    item: AgentBatchItem,
+    item: _DeleteItem,
     submitted_by: str,
 ) -> AgentBatchItemResult:
     """Delete an existing agent (DELETE parity)."""

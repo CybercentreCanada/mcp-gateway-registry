@@ -9,7 +9,7 @@ warm storage requirements.
 import logging
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
-from typing import Any, Union
+from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorCollection
 from pymongo.errors import DuplicateKeyError
@@ -20,7 +20,7 @@ from .documentdb.client import get_collection_name, get_documentdb_client
 logger = logging.getLogger(__name__)
 
 # Type alias for audit records
-AuditRecord = Union[RegistryApiAccessRecord, MCPServerAccessRecord, TokenMintAuditRecord]
+AuditRecord = RegistryApiAccessRecord | MCPServerAccessRecord | TokenMintAuditRecord
 
 
 class AuditRepositoryBase(ABC):

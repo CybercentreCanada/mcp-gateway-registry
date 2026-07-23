@@ -206,6 +206,106 @@ def test_build_headers_for_server_empty_headers():
 
 
 # =============================================================================
+# DESTINATION RE-VALIDATION BEFORE ATTACHING A DECRYPTED SECRET
+# =============================================================================
+
+
+class TestBuildHeadersSecretDestinationGuard:
+    """A decrypted credential/custom header is only attached to a destination
+    that passes a fresh SSRF re-validation; otherwise it is withheld (fail
+    closed). Non-secret headers are always returned.
+    """
+
+    _SERVER_WITH_CREDENTIAL = {
+        "service_path": "/example",
+        "auth_scheme": "bearer",
+        "auth_credential_encrypted": "encrypted-blob",
+        "auth_header_name": "Authorization",
+    }
+
+    def test_credential_attached_when_destination_safe(self):
+        with (
+            patch(
+                "registry.core.mcp_client._assert_mcp_url_fetchable",
+                return_value=True,
+            ),
+            patch(
+                "registry.utils.credential_encryption.decrypt_credential",
+                return_value="plaintext-token",
+            ),
+        ):
+            headers = _build_headers_for_server(
+                dict(self._SERVER_WITH_CREDENTIAL),
+                destination_url="https://public.example.com/mcp",
+            )
+        assert headers["Authorization"] == "Bearer plaintext-token"
+
+    def test_credential_withheld_when_destination_unsafe(self):
+        with (
+            patch(
+                "registry.core.mcp_client._assert_mcp_url_fetchable",
+                return_value=False,
+            ),
+            patch(
+                "registry.utils.credential_encryption.decrypt_credential",
+                return_value="plaintext-token",
+            ) as mock_decrypt,
+        ):
+            headers = _build_headers_for_server(
+                dict(self._SERVER_WITH_CREDENTIAL),
+                destination_url="http://169.254.169.254/latest/meta-data/",
+            )
+        # Fail closed: no auth header, and the credential was never decrypted.
+        assert "Authorization" not in headers
+        assert "Accept" in headers
+        mock_decrypt.assert_not_called()
+
+    def test_credential_withheld_when_destination_missing(self):
+        with patch(
+            "registry.utils.credential_encryption.decrypt_credential",
+            return_value="plaintext-token",
+        ) as mock_decrypt:
+            headers = _build_headers_for_server(
+                dict(self._SERVER_WITH_CREDENTIAL),
+                destination_url=None,
+            )
+        assert "Authorization" not in headers
+        mock_decrypt.assert_not_called()
+
+    def test_plaintext_headers_returned_without_destination(self):
+        """A server with only plaintext headers (no secret) is unaffected."""
+        headers = _build_headers_for_server(
+            {"headers": [{"X-Plain": "ok"}]},
+            destination_url=None,
+        )
+        assert headers["X-Plain"] == "ok"
+
+    def test_encrypted_custom_headers_withheld_when_destination_unsafe(self):
+        """Encrypted custom headers are also gated on destination validation."""
+        server_info = {
+            "service_path": "/example",
+            "custom_headers_encrypted": "encrypted-custom-blob",
+        }
+        with (
+            patch(
+                "registry.core.mcp_client._assert_mcp_url_fetchable",
+                return_value=False,
+            ),
+            patch(
+                "registry.utils.credential_encryption.decrypt_custom_headers",
+                return_value=[{"name": "X-Secret", "value": "s3cret"}],
+            ) as mock_decrypt_custom,
+        ):
+            headers = _build_headers_for_server(
+                server_info,
+                destination_url="http://169.254.169.254/latest/meta-data/",
+            )
+        assert "X-Secret" not in headers
+        assert "Accept" in headers
+        mock_decrypt_custom.assert_not_called()
+
+
+# =============================================================================
 # DETECT_SERVER_TRANSPORT TESTS
 # =============================================================================
 
@@ -921,3 +1021,65 @@ class TestMcpClientSsrfGuard:
             assert result is None
             mock_headers.assert_not_called()
             mock_client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sse_explicit_endpoint_to_blocked_host_refused(self):
+        """An explicit sse_endpoint that resolves to a private host is refused.
+
+        The base_url is a public host, but the override sse_endpoint points at
+        a private target; the actual connection target must be validated so no
+        credential is attached to the private host.
+        """
+        from registry.core.mcp_client import _get_tools_sse
+
+        server_info = {
+            "sse_endpoint": "https://internal.evil.example/sse",
+            "headers": [],
+        }
+
+        with (
+            patch("registry.core.mcp_client._build_headers_for_server") as mock_headers,
+            patch("registry.core.mcp_client.sse_client") as mock_client,
+            patch("registry.utils.url_guard.socket.getaddrinfo") as mock_resolve,
+        ):
+            mock_resolve.return_value = [(None, None, None, None, ("10.0.0.9", 443))]
+
+            result = await _get_tools_sse("https://public.example", server_info)
+
+            assert result is None
+            mock_headers.assert_not_called()
+            mock_client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_connection_result_blocks_private_sse_endpoint(self):
+        """get_mcp_connection_result refuses a private-IP explicit sse_endpoint.
+
+        Only the sse_endpoint override is malicious here; the base_url resolves
+        public. The sse_endpoint must be validated because it can become the
+        actual connection target for the SSE transport.
+        """
+        from registry.core.mcp_client import get_mcp_connection_result
+
+        server_info = {
+            "sse_endpoint": "https://internal.evil.example/sse",
+            "headers": [],
+        }
+
+        def _resolve(host, port, **kw):
+            # base_url host is public; the sse_endpoint host is private.
+            if "internal.evil.example" in host:
+                return [(None, None, None, None, ("10.1.2.3", 443))]
+            return [(None, None, None, None, ("93.184.216.34", 443))]
+
+        with (
+            patch("registry.core.mcp_client._build_headers_for_server") as mock_headers,
+            patch("registry.core.mcp_client.streamablehttp_client") as mock_stream,
+            patch("registry.core.mcp_client.sse_client") as mock_sse,
+            patch("registry.utils.url_guard.socket.getaddrinfo", side_effect=_resolve),
+        ):
+            result = await get_mcp_connection_result("https://public.example", server_info)
+
+            assert result is None
+            mock_headers.assert_not_called()
+            mock_stream.assert_not_called()
+            mock_sse.assert_not_called()

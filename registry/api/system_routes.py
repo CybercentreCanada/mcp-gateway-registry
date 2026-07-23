@@ -144,7 +144,7 @@ async def _get_auth_status() -> dict:
                             "status": "Healthy",
                             "url": auth_url,
                         }
-                except Exception:
+                except Exception:  # nosec B112 - health probe: try next endpoint on failure
                     continue
 
             # If all endpoints failed, auth server is unhealthy

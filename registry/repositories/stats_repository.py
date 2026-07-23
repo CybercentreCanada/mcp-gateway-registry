@@ -15,6 +15,7 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from ..core.config import settings
 
@@ -86,7 +87,7 @@ async def _increment_mongodb() -> None:
     # Check staleness and reset if needed
     doc = await collection.find_one({"_id": "counters"})
     if doc:
-        updates = {}
+        updates: dict[str, Any] = {}
         hourly_reset = doc.get("hourly_reset_at")
         daily_reset = doc.get("daily_reset_at")
 

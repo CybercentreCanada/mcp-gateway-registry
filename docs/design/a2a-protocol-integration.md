@@ -12,19 +12,30 @@ This guide documents the Agent-to-Agent (A2A) protocol implementation in the MCP
 6. [Discovery: How Agents Find Other Agents](#discovery-how-agents-find-other-agents)
 7. [Access Control: Three-Tier Permission System](#access-control-three-tier-permission-system)
 8. [The Code: Where Everything Lives](#the-code-where-everything-lives)
+9. [Reverse-Proxy Mode: Proxying A2A Traffic](#reverse-proxy-mode-proxying-a2a-traffic)
 
 ---
 
 ## What We Built
 
-The MCP Gateway Registry now supports Agent-to-Agent (A2A) communication through a **registry-only design**. This means:
+The MCP Gateway Registry supports Agent-to-Agent (A2A) communication in **two modes**. Both share the same registration, discovery, and access-control machinery; they differ only in whether the gateway sits in the agent-to-agent *data path*.
 
-- Agents can register their capabilities and metadata with the registry
-- Agents can discover other agents they have permission to access
-- Agents communicate directly with each other using URLs returned by the registry
-- **The registry itself is NOT involved in agent-to-agent communication**
+**Mode 1 — Registry-only discovery (default).** The registry is a discovery and validation service only:
 
-This is fundamentally different from how the MCP Gateway works. The gateway proxies MCP server requests, but for A2A agents, it simply acts as a discovery and validation service. Once agents find each other through the registry, they communicate peer-to-peer with no registry intermediation.
+- Agents register their capabilities and metadata with the registry
+- Agents discover other agents they have permission to access
+- Agents then communicate **directly** with each other using the URLs returned by the registry
+- **The registry itself is NOT in the agent-to-agent data path** — once agents find each other, they talk peer-to-peer with no registry intermediation
+
+**Mode 2 — Reverse-proxy mode (opt-in, `A2A_REVERSE_PROXY_ENABLED=true`).** The gateway *does* sit in the data path, proxying A2A traffic (agent-card discovery and JSON-RPC) the same way it proxies MCP servers:
+
+- Each **enabled** agent gets proxied nginx routes under `/agent/{path}`, guarded by the `auth_request /validate` subrequest
+- The agent's real backend stays private (`proxy_pass_url`); discovery advertises the gateway `url` instead
+- Every call is authenticated and gated per-agent (`invoke_agent` FGAC) before it reaches the backend
+
+The two modes are not mutually exclusive per request so much as a deployment-wide choice: registry-only discovery always works; reverse-proxy mode additionally stands up proxied routes for registered agents. Reverse-proxy mode requires `with-gateway` deployment mode and is force-disabled in registry-only deployments (there is no gateway to proxy through). See [Reverse-Proxy Mode: Proxying A2A Traffic](#reverse-proxy-mode-proxying-a2a-traffic) for the full data-path design.
+
+The rest of this guide (registration, the agent card, CRUD, discovery, access control) applies to **both** modes. Where reverse-proxy mode changes behavior — the advertised `url`, the `proxy_pass_url` backend split, per-agent invoke gating — it is called out inline and detailed in the final section.
 
 ### Why This Matters
 
@@ -74,15 +85,26 @@ Agent cards, discovery results, or error
 
 ### The Key Difference from MCP
 
+The flow above is the **control plane** (register / discover), and it is identical in both modes. What differs is the **data plane** — the actual agent-to-agent call after discovery:
+
 ```
-MCP Request Flow:
+MCP Request Flow (always proxied):
 Agent → Nginx → Auth → FastAPI → Gateway Proxy → MCP Server → Agent
 
-A2A Request Flow:
+A2A control plane (register/discover, both modes):
 Agent → Nginx → Auth → FastAPI → Registry Service
-         ↓ Returns: Agent Card + Direct URL
-Agent ← [Agents now communicate directly, registry is done] → Other Agent
+         ↓ Returns: Agent Card + URL
+
+A2A data plane, Mode 1 (registry-only, default):
+Agent ← [agents communicate directly, registry is out of the path] → Other Agent
+   (discovery returns the agent's direct backend URL)
+
+A2A data plane, Mode 2 (reverse-proxy, opt-in):
+Agent → Nginx (/agent/{path}) → Auth (/validate: invoke_agent) → Gateway Proxy → Agent Backend
+   (discovery returns the gateway URL; backend URL is stored privately in proxy_pass_url)
 ```
+
+In Mode 2 the A2A data path looks just like the MCP data path: every call is authenticated and gated at the gateway before reaching the backend.
 
 ---
 
@@ -310,7 +332,8 @@ An agent card is a JSON document that describes what an agent does, how to reach
 - `protocol_version`: A2A protocol version (currently "1.0")
 - `name`: Human-readable agent name
 - `description`: What the agent does
-- `url`: Direct URL to reach the agent (used by other agents after discovery)
+- `url`: The URL other agents use to reach this agent after discovery. In **registry-only mode** this is the agent's direct backend. In **reverse-proxy mode** the registry rewrites it at registration time to the gateway address (`{REGISTRY_URL}/agent/{path}/`) and moves the real backend to `proxy_pass_url` (see below).
+- `proxy_pass_url` (reverse-proxy mode only): the agent's real private backend that the gateway proxies to. Written by the registry at registration time, read by the nginx generator / health checker / security scanner, and **redacted from non-admin reads** (single-agent GET and discovery) — exactly like the MCP-server backend-URL split. For legacy agents registered before reverse-proxy mode existed, this is absent and consumers fall back to `url`.
 
 **Capabilities**:
 - `skills`: List of capabilities the agent offers. Each skill has:
@@ -631,45 +654,37 @@ group_mappings:
 
 When a user authenticates with Keycloak, their JWT includes groups. The auth-server uses this mapping to determine which internal scopes apply.
 
-### Tier 3: Individual Group Scopes (Detailed Permissions)
+### Tier 3: `server_access` Rules (Detailed Permissions)
 
-The individual group scope entries in the `mcp_scopes` collection define detailed permissions for each group:
+Each scope document in the `mcp_scopes` collection has a `server_access` array holding the detailed grants. **Agent grants and MCP-server grants share this one array and use the same rule shape** — an identifier key plus a verb list:
 
-```yaml
-registry-users-lob1:
-- server: currenttime
-  methods:
-  - initialize
-  - tools/list
-  - tools/call
-- agents:
-    actions:
-    - action: list_agents
-      resources:
-      - /code-reviewer
-      - /test-automation
-    - action: get_agent
-      resources:
-      - /code-reviewer
-      - /test-automation
-    - action: publish_agent
-      resources:
-      - /code-reviewer
-      - /test-automation
-    - action: modify_agent
-      resources:
-      - /code-reviewer
-      - /test-automation
-    - action: delete_agent
-      resources:
-      - /code-reviewer
-      - /test-automation
+- an MCP-server rule is `{"server": "<name|*>", "methods": [...], "tools": [...]}`
+- an agent rule is `{"agent": "<path|*>", "actions": [...]}`
+
+`agent` mirrors `server` (the resource identifier) and `actions` mirrors `methods` (the allowed verbs). The two rule types coexist because MCP scope resolution only inspects `server`-keyed entries and the A2A validator only inspects `agent`-keyed entries.
+
+A least-privilege example (from `cli/examples/public-mcp-users.json`) granting invoke on two specific agents:
+
+```json
+"server_access": [
+  {"server": "context7", "methods": ["initialize", "tools/list", "tools/call"], "tools": ["*"]},
+  {"agent": "/flight-booking", "actions": ["list_agents", "get_agent", "invoke_agent"]},
+  {"agent": "/flight-booking-agent", "actions": ["list_agents", "get_agent", "invoke_agent"]}
+]
 ```
 
-This defines:
-- Which MCP servers the group can access (currenttime, mcpgw)
-- Which agent actions are allowed (list, get, publish, modify, delete)
-- Which agent paths apply (only /code-reviewer and /test-automation)
+An admin example (from `scripts/registry-admins.json`) uses the `*` wildcard for the agent identifier:
+
+```json
+"server_access": [
+  {"server": "*", "methods": ["all"], "tools": ["all"]},
+  {"agent": "*", "actions": ["list_agents", "get_agent", "publish_agent", "modify_agent", "delete_agent", "invoke_agent"]}
+]
+```
+
+Agent actions are: `list_agents`, `get_agent`, `publish_agent`, `modify_agent`, `delete_agent`, and (reverse-proxy mode) `invoke_agent`.
+
+> **Shape matters.** The agent rule must be a direct `{"agent": ..., "actions": [...]}` entry in `server_access`. An older nested form (`{"agents": {"actions": [{"action": ..., "resources": [...]}]}}`) is **silently dropped** by the scope flattener (`_flatten_server_access`) and grants nothing. Always use the flat `{agent, actions}` shape.
 
 ### How Permission Checking Works in Code
 
@@ -1100,16 +1115,137 @@ Now the agent is discoverable by other agents and will appear in semantic search
 
 ---
 
+## Reverse-Proxy Mode: Proxying A2A Traffic
+
+By default the registry returns an agent's *direct* URL and steps aside (registry-only discovery, above). **Reverse-proxy mode** instead puts the gateway in the A2A data path — the same way it proxies MCP servers — so the agent backend stays private and clients reach it through a gateway path with auth on every call. It is opt-in and does not change registry-only discovery; when enabled, each **enabled** agent gets a proxied route under `/agent/{path}`.
+
+### Enabling
+
+Off by default. Set `A2A_REVERSE_PROXY_ENABLED=true` (settings field `a2a_reverse_proxy_enabled`). It also requires `with-gateway` deployment mode. These two conditions are combined in a single source of truth, `settings.a2a_reverse_proxy_effective` (`a2a_reverse_proxy_enabled AND nginx_updates_enabled`), which both the nginx generator and the registration-time URL rewrite consult.
+
+**Registry-only mode force-disables routing (fail-safe):** in registry-only mode there is no gateway to proxy through, so the flag is inert even when set to `true`. When that combination is detected the registry logs a loud startup banner and:
+
+- generates no `/agent/*` location blocks;
+- stores registered agents with `url == proxy_pass_url` (no gateway rewrite — see below);
+- returns the registry-only 503 for `/agent/*` paths.
+
+### url vs proxy_pass_url (the backend/advertised split)
+
+Reverse-proxy mode mirrors the MCP-server `url`/`proxy_pass_url` split so the agent backend stays private and discovery advertises the gateway:
+
+- At **registration** (when `a2a_reverse_proxy_effective` and `supported_protocol == "a2a"`), the registry stores the registrant's real backend in **`proxy_pass_url`** and rewrites the advertised **`url`** to the gateway address `{REGISTRY_URL}/agent/{path}/`. The rewrite happens *after* endpoint validation, so the registration health check still probes the real backend.
+- **Discovery, the nginx generator, the health checker, and the security scanner** all read the backend from `proxy_pass_url`, falling back to `url` for legacy agents registered before the flag existed (backwards compatible).
+- **`proxy_pass_url` is redacted from non-admin reads** (single-agent GET and semantic discovery) via the shared `should_redact_backend_urls` helper — admin-only, exactly like the MCP-server backend-URL redaction. Discovery therefore returns only the gateway `url` to non-admins.
+
+So a discovering agent always receives the gateway URL and routes back through the proxy; only admins ever see the private backend.
+
+### Routes Per Agent
+
+For an agent at path `flight-booking-agent`, the config generator emits two nginx locations, both guarded by the `auth_request /validate` subrequest (like MCP routes):
+
+| Route | Purpose |
+| --- | --- |
+| `= /agent/flight-booking-agent/.well-known/agent-card.json` | Agent-card discovery (exact match) |
+| `/agent/flight-booking-agent/` | A2A JSON-RPC endpoint (and SSE streaming) |
+
+### Discovery Flow (Card Rewrite)
+
+```mermaid
+sequenceDiagram
+    participant C as A2A Client
+    participant GW as Gateway (nginx)
+    participant AS as Auth Server (/validate)
+    participant B as Agent Backend (proxy_pass_url)
+
+    C->>GW: GET /agent/{path}/.well-known/agent-card.json<br/>X-Authorization: Bearer <gateway JWT>
+    GW->>AS: auth_request /validate (X-Original-URL)
+    AS->>AS: _get_a2a_agent_path -> /{path}<br/>validate_a2a_agent_access(scopes)
+    AS-->>GW: 200 + X-Scopes  (else 401 / 403)
+    GW->>B: proxy_pass /.well-known/agent-card.json<br/>(X-Authorization + Cookie stripped)
+    B-->>GW: card { url: backend, supportedInterfaces: [...] }
+    GW->>GW: agent_card_rewrite.lua: rewrite url + interfaces -> gateway
+    GW-->>C: card advertising https://<gateway>/agent/{path}/
+```
+
+`agent_card_rewrite.lua` (a `body_filter`) makes the proxy transparent: it rewrites the card's top-level `url` and advertised interface URLs (`additionalInterfaces` for A2A 0.2.x, `supportedInterfaces` for proto/1.0 SDKs) from the backend origin to the gateway, so the client's JSON-RPC calls return through the proxy. A companion `header_filter` clears `Content-Length` since the body changes.
+
+**Scheme behind a TLS-terminating proxy:** the advertised URL's scheme is chosen from, in order, `X-Cloudfront-Forwarded-Proto`, then `X-Forwarded-Proto`, then `ngx.var.scheme` (only the exact values `http`/`https` are accepted). This matters when CloudFront terminates TLS and forwards to the ALB over plain HTTP: the ALB overwrites `X-Forwarded-Proto` with the CloudFront→ALB hop scheme (`http`), but `X-Cloudfront-Forwarded-Proto` preserves the original viewer scheme (`https`), so the card correctly advertises `https`. Empty-array card fields (e.g. a skill's `tags: []`) are preserved by rewriting only the URL substrings rather than decode/re-encoding the whole JSON.
+
+### Invocation Flow (Per-Agent FGAC)
+
+```mermaid
+sequenceDiagram
+    participant C as A2A Client / calling agent
+    participant GW as Gateway (nginx)
+    participant AS as Auth Server (/validate)
+    participant B as Agent Backend (proxy_pass_url)
+
+    C->>GW: POST /agent/{path}/ (message/send)<br/>X-Authorization: Bearer <gateway JWT><br/>Authorization: Bearer <target-agent cred>
+    GW->>AS: auth_request /validate (X-Original-URL)
+    AS->>AS: validate_a2a_agent_access(/{path}, scopes)<br/>any scope grant invoke_agent on {path}?
+    alt authorized
+        AS-->>GW: 200 + X-Scopes
+        GW->>B: proxy_pass /  (X-Authorization + Cookie stripped;<br/>Authorization forwarded; SSE-safe: buffering off, long read timeout)
+        B-->>C: JSON-RPC result
+    else denied
+        AS-->>GW: 403
+        GW-->>C: 403
+    end
+```
+
+### Egress Trust Model (two-header split)
+
+The gateway is a policy gate for A2A, never a credential broker. Two headers carry distinct credentials on the invoke path:
+
+- **`X-Authorization`** — the caller's gateway/registry token. `/validate` authenticates the caller on this header **only** for agent paths (no fallback to `Authorization`), enforces `invoke_agent`, then the nginx block **strips it** (with `Cookie`) so it never reaches the registrant-controlled agent backend.
+- **`Authorization`** — the target agent's own credential, obtained out-of-band by the caller (per the A2A spec's `securitySchemes`). The gateway **forwards it end-to-end, untouched**, for the target agent to authenticate.
+
+Because the sensitive gateway credential lives in `X-Authorization` (stripped) and the forwarded `Authorization` is audienced to the target agent, a malicious registered agent cannot replay a useful credential against the registry. As defense-in-depth, `/validate` **rejects** a request whose `Authorization` duplicates the `X-Authorization` value.
+
+### Access Control (Per-Agent FGAC)
+
+Invocation is gated per-agent at `/validate` by `validate_a2a_agent_access`, which mirrors MCP tool access (`validate_server_tool_access`) and uses the **same rule shape as a server rule**: within a scope's `server_access`, an agent rule is `{"agent": "<path|*>", "actions": [...]}` — `agent` is the identifier (like `server`) and `actions` is its sibling verb list (like `methods`). A caller may invoke an agent if any of its scopes has a rule whose `agent` matches (exact path, or `*`/`all` wildcard) and whose `actions` include `invoke_agent` (or an `all`/`*` action wildcard).
+
+Scopes are documents in the `mcp_scopes` collection (base scopes seeded from `scripts/*.json`; examples in `cli/examples/*.json`). An admin agent rule (from `scripts/registry-admins.json`):
+
+```json
+{
+  "agent": "*",
+  "actions": ["list_agents", "get_agent", "publish_agent", "modify_agent", "delete_agent", "invoke_agent"]
+}
+```
+
+A least-privilege agent rule granting invoke on specific agents only (from `cli/examples/public-mcp-users.json`):
+
+```json
+{
+  "agent": "/flight-booking-agent",
+  "actions": ["list_agents", "get_agent", "invoke_agent"]
+}
+```
+
+The agent rule lives in `server_access` alongside the MCP `{"server": ...}` rules; MCP scope resolution ignores `agent`-keyed entries (it matches on the `server` key) and the A2A validator ignores `server`-keyed entries, so the two coexist in one scope. Per-method/per-skill FGAC is out of scope — the gateway can't resolve structured permissions in the request path.
+
+> **Note on shape:** the agent rule must be a direct `{"agent": ..., "actions": [...]}` entry in `server_access` (or nested inside a `{"scope_name": ..., "access_rules": [...]}` wrapper). A bare `{"agents": {...}}` object is silently dropped by the scope flattener and will grant nothing.
+
+### Streaming (SSE)
+
+The JSON-RPC location sets `proxy_buffering off` and a long `proxy_read_timeout` so `message/stream` Server-Sent Events are delivered incrementally and long-lived connections are not killed mid-flight.
+
+---
+
 ## Summary: The Key Concepts
 
-**Registry-Only Design**: The registry handles discovery and validation, not communication. Once agents find each other, they talk directly.
+**Two Modes**:
+- *Registry-only (default)*: the registry handles discovery and validation, not communication. Once agents find each other, they talk directly using the returned backend URL.
+- *Reverse-proxy (opt-in)*: the gateway also sits in the A2A data path — proxying agent-card discovery and JSON-RPC under `/agent/{path}`, keeping the backend private (`proxy_pass_url`), and gating every call with `invoke_agent` FGAC. Requires `with-gateway` mode; force-disabled in registry-only deployments.
 
-**Authentication Layer**: All requests require a valid JWT token from a Keycloak service account. Tokens are validated at three points: Nginx, Auth-Server, and FastAPI.
+**Authentication Layer**: All requests require a valid JWT token from a Keycloak service account. Tokens are validated at three points: Nginx, Auth-Server, and FastAPI. In reverse-proxy mode the caller's gateway token rides in `X-Authorization` (stripped at egress) while the target agent's own credential rides in `Authorization` (forwarded end-to-end).
 
 **Three-Tier Access Control**:
 1. UI-Scopes define high-level actions
 2. Group Mappings connect Keycloak groups to scopes
-3. Individual Group Scopes define detailed permissions
+3. `server_access` rules define detailed permissions — one array holding both `{"server", "methods", "tools"}` MCP rules and `{"agent", "actions"}` agent rules
 
 **Agent Card**: The machine-readable profile that agents register. Contains name, description, URL, skills, security requirements, and metadata.
 

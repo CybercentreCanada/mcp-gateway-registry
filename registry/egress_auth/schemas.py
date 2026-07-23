@@ -57,6 +57,17 @@ class OAuthProviderConfig(BaseModel):
     token_endpoint_auth_style: TokenEndpointAuthStyle = TokenEndpointAuthStyle.POST_BODY
     extra_authorize_params: dict[str, str] = Field(default_factory=dict)
     use_pkce: bool = True
+    resource: str | None = Field(
+        default=None,
+        description="RFC 8707 resource indicator. When set, it is sent as the "
+        "``resource`` parameter on BOTH the authorize request AND the "
+        "token/refresh requests, binding the issued token to one protected "
+        "resource. Required by resource servers that mint per-resource tokens -- "
+        "e.g. Atlassian's Rovo MCP, whose Authorization Server rejects a code "
+        "minted without it ('Invalid context provided') and whose MCP endpoint "
+        "rejects a token whose audience is the generic REST API instead of the "
+        "MCP resource. None (default) keeps built-in providers unchanged.",
+    )
     token_response_parser: str | None = Field(
         default=None,
         description="Name of a registered parser for non-JSON token responses (e.g. 'github_form').",

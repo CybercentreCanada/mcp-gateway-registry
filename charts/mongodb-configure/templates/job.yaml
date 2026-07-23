@@ -4,21 +4,36 @@ kind: Job
 metadata:
   name: setup-mongodb
   namespace: {{ .Release.Namespace | quote }}
+  annotations:
+    # Helm hook: delete before re-creating (avoids immutable spec errors when the
+    # ConfigMap content changes) and clean up after a successful run.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   template:
     spec:
       initContainers:
         - name: wait-for-mongodb
-          image: public.ecr.aws/docker/library/python:3.13-slim
+          image: {{ .Values.pythonImage | default "public.ecr.aws/docker/library/python:3.13-slim" }}
           command: ['sh', '-c']
           envFrom:
             - secretRef:
                 name: {{ $existingSecret | default "mongo-credentials" }}
+          env:
+            - name: HOME
+              value: /tmp
+            - name: PIP_NO_CACHE_DIR
+              value: "1"
+            {{- if .Values.pipIndexUrl }}
+            - name: PIP_INDEX_URL
+              value: {{ .Values.pipIndexUrl | quote }}
+            {{- end }}
           args:
             - |
               echo "Installing pymongo..."
               pip install --no-cache-dir pymongo
-              
+
               echo "Waiting for MongoDB replica set to be ready..."
               python3 /app/wait.py
           volumeMounts:
@@ -27,7 +42,7 @@ spec:
               subPath: wait.py
       containers:
         - name: job
-          image: public.ecr.aws/docker/library/python:3.13-slim
+          image: {{ .Values.pythonImage | default "public.ecr.aws/docker/library/python:3.13-slim" }}
           command: ["/bin/sh", "-c"]
           args: [
             "pip install --no-cache-dir pyyaml motor && python /app/script.py"
@@ -35,6 +50,15 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ $existingSecret | default "mongo-credentials" }}
+          env:
+            - name: HOME
+              value: /tmp
+            - name: PIP_NO_CACHE_DIR
+              value: "1"
+            {{- if .Values.pipIndexUrl }}
+            - name: PIP_INDEX_URL
+              value: {{ .Values.pipIndexUrl | quote }}
+            {{- end }}
           volumeMounts:
             - mountPath: /app/script.py
               name: script

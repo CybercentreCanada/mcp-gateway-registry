@@ -9,9 +9,15 @@ if not metrics then return end
 local metrics_url = os.getenv("METRICS_SERVICE_URL") or ""
 if metrics_url == "" then return end
 
--- Extract server name from first URI path segment: /<server>/...
-local server_name = ngx.var.uri:match("^/([^/]+)/")
-if not server_name then return end
+-- Server/agent name for attribution. A location block may set
+-- $metrics_server_name explicitly (e.g. A2A agent blocks, whose URI first
+-- segment is the shared "agent" prefix and would otherwise bucket every agent
+-- together); otherwise derive it from the first URI path segment: /<server>/...
+local server_name = ngx.var.metrics_server_name
+if server_name == nil or server_name == "" then
+    server_name = ngx.var.uri:match("^/([^/]+)/")
+end
+if not server_name or server_name == "" then return end
 
 -- Parse JSON-RPC body from X-Body header (set by capture_body.lua in rewrite phase)
 local method = "unknown"

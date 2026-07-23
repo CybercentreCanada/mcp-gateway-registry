@@ -88,7 +88,7 @@ def _safe_oauth_error(response: "requests.Response") -> str:
         data = response.json()
         if isinstance(data, dict) and data.get("error"):
             return f"error={data['error']}"
-    except Exception:
+    except Exception:  # nosec B110 - best-effort parse of error body; never log raw response
         pass
     return "(body omitted)"
 
@@ -165,9 +165,7 @@ def _perform_keycloak_m2m_authentication(
 
         if not response.ok:
             _err = _safe_oauth_error(response)
-            logger.error(
-                f"M2M token request failed with status {response.status_code}. {_err}"
-            )
+            logger.error(f"M2M token request failed with status {response.status_code}. {_err}")
             raise ValueError(f"Token request failed with status {response.status_code} ({_err})")
 
         token_data = response.json()
@@ -246,9 +244,7 @@ def _perform_entra_m2m_authentication(
 
         if not response.ok:
             _err = _safe_oauth_error(response)
-            logger.error(
-                f"M2M token request failed with status {response.status_code}. {_err}"
-            )
+            logger.error(f"M2M token request failed with status {response.status_code}. {_err}")
             raise ValueError(f"Token request failed with status {response.status_code} ({_err})")
 
         token_data = response.json()
@@ -332,9 +328,7 @@ def _perform_m2m_authentication(
 
         if not response.ok:
             _err = _safe_oauth_error(response)
-            logger.error(
-                f"M2M token request failed with status {response.status_code}. {_err}"
-            )
+            logger.error(f"M2M token request failed with status {response.status_code}. {_err}")
             raise ValueError(f"Token request failed with status {response.status_code} ({_err})")
 
         token_data = response.json()

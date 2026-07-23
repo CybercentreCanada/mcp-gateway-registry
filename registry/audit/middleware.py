@@ -16,6 +16,7 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
+from ..common.instance import resolve_instance_id
 from ..utils.request_utils import get_client_ip
 from .models import (
     Action,
@@ -217,11 +218,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 # email so an operator knows who to contact without an IdP
                 # reverse lookup. `username` may be the OIDC sub on some auth
                 # paths; email is threaded through user_context for this.
-                username=(
-                    user_context.get("email")
-                    or user_context.get("username")
-                    or "anonymous"
-                ),
+                username=(user_context.get("email") or user_context.get("username") or "anonymous"),
                 auth_method=user_context.get("auth_method", "anonymous"),
                 provider=user_context.get("provider"),
                 groups=user_context.get("groups", []),
@@ -362,6 +359,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 timestamp=datetime.now(UTC),
                 request_id=request_id,
                 correlation_id=correlation_id,
+                instance_id=resolve_instance_id(),
                 identity=await self._extract_identity(request),
                 request=AuditRequest(
                     method=request.method,
@@ -385,8 +383,17 @@ class AuditMiddleware(BaseHTTPMiddleware):
             await self.audit_logger.log_event(record)
 
         except Exception as e:
-            # Don't let audit logging failures break the request
-            logger.error(f"Failed to create audit record: {e}")
+            # Never break the request on an audit failure, but a record we could
+            # not even build is a dropped audit event — make it loud/alertable
+            # (CRITICAL) rather than a quiet error line. log_event() handles its
+            # own durable-write failures internally, so reaching here means
+            # record construction itself failed.
+            logger.critical(
+                "AUDIT RECORD DROPPED: could not build/log record for %s %s: %s",
+                request.method,
+                request.url.path,
+                e,
+            )
 
         return response
 

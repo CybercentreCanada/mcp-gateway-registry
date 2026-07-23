@@ -1,9 +1,11 @@
 {{- /*
-  Skip rendering the in-cluster MongoDB when the user supplies an external
-  connection string — they're managing their own MongoDB and the operator
-  shouldn't run.
+  Render the MongoDBCommunity CR only when:
+    - mongodb.enabled is true (subchart is active), AND
+    - mongodb.operator.enabled is true (using the Community Operator, not Bitnami), AND
+    - mongodb.connectionString is unset (user is not providing an external cluster).
+  Set mongodb.operator.enabled: false when using the Bitnami mongodb subchart.
 */}}
-{{ if and .Values.mongodb.enabled (not .Values.mongodb.connectionString) }}
+{{ if and .Values.mongodb.enabled (.Values.mongodb.operator | default dict).enabled (not .Values.mongodb.connectionString) }}
 apiVersion: mongodbcommunity.mongodb.com/v1
 kind: MongoDBCommunity
 metadata:

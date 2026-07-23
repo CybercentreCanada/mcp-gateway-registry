@@ -21,9 +21,10 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys
+
 import matplotlib.pyplot as plt
 import seaborn as sns
-import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -83,7 +84,7 @@ def _build_funnel_rows(
     ]
 
     if confirmed_alive is not None:
-        rows.append((f"Confirmed alive (>=5 hb in 7d)", confirmed_alive))
+        rows.append(("Confirmed alive (>=5 hb in 7d)", confirmed_alive))
 
     return rows
 
@@ -120,7 +121,7 @@ def _generate_chart(
     bars = ax.barh(labels_rev, counts_rev, color=colors, edgecolor="white")
 
     # Annotate each bar with absolute count and % of top of funnel.
-    for bar, label, count in zip(bars, labels_rev, counts_rev):
+    for bar, label, count in zip(bars, labels_rev, counts_rev, strict=False):
         pct = 100.0 * count / top if top else 0
         text = f"  {count} ({pct:.1f}% of top)"
         ax.text(

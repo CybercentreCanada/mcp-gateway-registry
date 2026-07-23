@@ -315,9 +315,7 @@ class CustomEntityService:
         if existing is None or not _user_can_view(existing, user_context):
             raise CustomEntityNotFoundError(path)  # 404 — don't disclose existence
 
-        updated_details, _ = update_rating_details(
-            list(existing.rating_details), username, rating
-        )
+        updated_details, _ = update_rating_details(list(existing.rating_details), username, rating)
         average = calculate_average_rating(updated_details)
         updated = await self._get_entities().update(
             path,

@@ -120,24 +120,26 @@ MAX_CUSTOM_HEADERS_PER_SERVER: int = 10
 
 # Header names the registry and gateway own. Custom headers with a name
 # whose lowercased form appears here are rejected at registration time.
-RESERVED_CUSTOM_HEADER_NAMES: frozenset[str] = frozenset({
-    "authorization",
-    "x-authorization",
-    "proxy-authorization",
-    "content-type",
-    "content-length",
-    "accept",
-    "host",
-    "connection",
-    "keep-alive",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-    "x-forwarded-for",
-    "x-forwarded-proto",
-    "x-forwarded-host",
-    "x-real-ip",
-    "cookie",
-    "set-cookie",
-})
+RESERVED_CUSTOM_HEADER_NAMES: frozenset[str] = frozenset(
+    {
+        "authorization",
+        "x-authorization",
+        "proxy-authorization",
+        "content-type",
+        "content-length",
+        "accept",
+        "host",
+        "connection",
+        "keep-alive",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "x-forwarded-for",
+        "x-forwarded-proto",
+        "x-forwarded-host",
+        "x-real-ip",
+        "cookie",
+        "set-cookie",
+    }
+)

@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +57,9 @@ def _build_deployment_section(registry_info: dict[str, Any]) -> str:
     lines.append(f"| Search Backend | {registry_info.get('search_backend', 'unknown')} |")
     lines.append(f"| Auth Provider | {registry_info.get('auth', 'unknown')} |")
     lines.append(f"| Embeddings Provider | {registry_info.get('embeddings_provider', 'unknown')} |")
-    lines.append(f"| Embeddings Backend | {registry_info.get('embeddings_backend_kind', 'unknown')} |")
+    lines.append(
+        f"| Embeddings Backend | {registry_info.get('embeddings_backend_kind', 'unknown')} |"
+    )
     lines.append(f"| Python Version | {registry_info.get('py', 'unknown')} |")
     lines.append(f"| OS | {registry_info.get('os', 'unknown')} |")
     lines.append(f"| Deployment Mode | {registry_info.get('mode', 'unknown')} |")
@@ -81,12 +83,18 @@ def _build_registration_section(reg: dict[str, Any]) -> str:
     lines = []
     lines.append("## Registration Throughput (Phase 1)")
     lines.append("")
-    lines.append(f"Bulk registration of {reg.get('size', '?')} entities per type "
-                 f"with concurrency={reg.get('concurrency', '?')}.")
+    lines.append(
+        f"Bulk registration of {reg.get('size', '?')} entities per type "
+        f"with concurrency={reg.get('concurrency', '?')}."
+    )
     lines.append(f"Total wall clock: {reg.get('wall_clock_seconds', 0):.1f}s.")
     lines.append("")
-    lines.append("| Entity Type | Target | Registered | Skipped | Failed | Failure Rate | p50 | p95 | p99 |")
-    lines.append("|-------------|--------|------------|---------|--------|--------------|-----|-----|-----|")
+    lines.append(
+        "| Entity Type | Target | Registered | Skipped | Failed | Failure Rate | p50 | p95 | p99 |"
+    )
+    lines.append(
+        "|-------------|--------|------------|---------|--------|--------------|-----|-----|-----|"
+    )
 
     for entity_type, data in reg.get("entity_types", {}).items():
         latency = data.get("latency_ms", {})
@@ -111,8 +119,10 @@ def _build_api_perf_section(perf: dict[str, Any]) -> str:
     lines = []
     lines.append("## API Latency, Serial (Phase 2a)")
     lines.append("")
-    lines.append(f"Steady-state per-request latency. Each operation measured "
-                 f"{perf.get('iterations', '?')} times (first iteration discarded as warmup).")
+    lines.append(
+        f"Steady-state per-request latency. Each operation measured "
+        f"{perf.get('iterations', '?')} times (first iteration discarded as warmup)."
+    )
     lines.append(f"Total wall clock: {perf.get('wall_clock_seconds', 0):.1f}s.")
     lines.append("")
 
@@ -188,10 +198,12 @@ def _build_concurrency_section(conc: dict[str, Any]) -> str:
     lines = []
     lines.append("## Semantic Search Concurrency Scaling (Phase 2b)")
     lines.append("")
-    lines.append(f"Concurrent search load test using {conc.get('num_queries', '?')} curated queries "
-                 f"at k={conc.get('k', '?')}. "
-                 f"Each concurrency level ran {conc.get('iterations', '?')} iterations "
-                 f"(first discarded as warmup).")
+    lines.append(
+        f"Concurrent search load test using {conc.get('num_queries', '?')} curated queries "
+        f"at k={conc.get('k', '?')}. "
+        f"Each concurrency level ran {conc.get('iterations', '?')} iterations "
+        f"(first discarded as warmup)."
+    )
     lines.append(f"Total wall clock: {conc.get('elapsed_seconds', 0):.1f}s.")
     lines.append("")
     lines.append("| Concurrency | Requests | Throughput (rps) | p50 | p90 | p95 | p99 | Max |")
@@ -222,17 +234,23 @@ def _build_concurrency_section(conc: dict[str, Any]) -> str:
             lines.append("### Scaling Analysis")
             lines.append("")
             lines.append(f"- Baseline p99 (concurrency=1): {_format_ms(baseline)}")
-            lines.append(f"- Peak p99 (concurrency={levels[-1].get('concurrency', '?')}): {_format_ms(highest)}")
+            lines.append(
+                f"- Peak p99 (concurrency={levels[-1].get('concurrency', '?')}): {_format_ms(highest)}"
+            )
             lines.append(f"- Degradation ratio: {ratio:.1f}x")
             lines.append("")
             if ratio <= 2:
                 lines.append("The search backend scales well under concurrent load (ratio <= 2x).")
             elif ratio <= 10:
-                lines.append("Moderate degradation under peak concurrent load. "
-                             "Acceptable for most production workloads.")
+                lines.append(
+                    "Moderate degradation under peak concurrent load. "
+                    "Acceptable for most production workloads."
+                )
             else:
-                lines.append("Significant degradation under peak concurrent load. "
-                             "Consider horizontal scaling (more ECS tasks) for high-concurrency workloads.")
+                lines.append(
+                    "Significant degradation under peak concurrent load. "
+                    "Consider horizontal scaling (more ECS tasks) for high-concurrency workloads."
+                )
             lines.append("")
 
     return "\n".join(lines)
@@ -259,7 +277,7 @@ def _build_report(
     lines = []
     lines.append("# MCP Gateway Registry Benchmark Report")
     lines.append("")
-    lines.append(f"*Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*")
+    lines.append(f"*Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}*")
     lines.append(f"*Backend: {backend}, Corpus size: {size} entities per type*")
     lines.append("")
     lines.append("---")
@@ -290,16 +308,26 @@ def _build_report(
     # Methodology
     lines.append("## Methodology")
     lines.append("")
-    lines.append("- **Registration (Phase 1):** Async bulk registration of generated payloads "
-                 "sourced from the Anthropic MCP registry and GoDaddy ANS catalog.")
-    lines.append("- **API Latency (Phase 2a):** Serial requests, each operation measured N+1 times "
-                 "(first iteration discarded as warmup). Reports steady-state per-request latency.")
-    lines.append("- **Search Concurrency (Phase 2b):** Concurrent batches of semantic search "
-                 "requests at increasing parallelism levels. Reports aggregate latency and throughput.")
-    lines.append("- **Warmup:** First iteration at each level/operation is always discarded. "
-                 "Covers embedding model lazy-load, connection pool establishment, and DB working-set warmup.")
-    lines.append("- **All result JSON files** include a `registry_info` snapshot of the deployment "
-                 "configuration at test time, captured from `GET /api/registry-management/telemetry/info`.")
+    lines.append(
+        "- **Registration (Phase 1):** Async bulk registration of generated payloads "
+        "sourced from the Anthropic MCP registry and GoDaddy ANS catalog."
+    )
+    lines.append(
+        "- **API Latency (Phase 2a):** Serial requests, each operation measured N+1 times "
+        "(first iteration discarded as warmup). Reports steady-state per-request latency."
+    )
+    lines.append(
+        "- **Search Concurrency (Phase 2b):** Concurrent batches of semantic search "
+        "requests at increasing parallelism levels. Reports aggregate latency and throughput."
+    )
+    lines.append(
+        "- **Warmup:** First iteration at each level/operation is always discarded. "
+        "Covers embedding model lazy-load, connection pool establishment, and DB working-set warmup."
+    )
+    lines.append(
+        "- **All result JSON files** include a `registry_info` snapshot of the deployment "
+        "configuration at test time, captured from `GET /api/registry-management/telemetry/info`."
+    )
     lines.append("")
 
     # Reproduction
@@ -347,9 +375,9 @@ def main() -> int:
 
     # Build a descriptive filename if output is the default
     if args.output == Path("docs/benchmarks/benchmark-report.md"):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        date_str = datetime.now(UTC).strftime("%Y-%m-%d")
         compute = registry_info.get("compute", "unknown")
         backend = registry_info.get("storage", "unknown")
         instances = registry_info.get("instance_count", "x")

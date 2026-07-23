@@ -1124,7 +1124,7 @@ class TestSettingsTabVisibilityFeatureFlags:
         """All defaults (true) produce same features as REGISTRY_MODE=full."""
         from registry.api.config_routes import get_config
 
-        result = await get_config()
+        result = await get_config(user_context={"username": "test-user"})
         features = result["features"]
 
         assert features["mcp_servers"] is True
@@ -1142,7 +1142,7 @@ class TestSettingsTabVisibilityFeatureFlags:
         with patch("registry.api.config_routes.settings", new_settings):
             from registry.api.config_routes import get_config
 
-            result = await get_config()
+            result = await get_config(user_context={"username": "test-user"})
             assert result["features"]["agents"] is False
             assert result["features"]["mcp_servers"] is True
 
@@ -1157,7 +1157,7 @@ class TestSettingsTabVisibilityFeatureFlags:
         with patch("registry.api.config_routes.settings", new_settings):
             from registry.api.config_routes import get_config
 
-            result = await get_config()
+            result = await get_config(user_context={"username": "test-user"})
             assert result["features"]["agents"] is False
             assert result["features"]["mcp_servers"] is True
 
@@ -1166,7 +1166,7 @@ class TestSettingsTabVisibilityFeatureFlags:
         """virtual_servers key is present in features dict."""
         from registry.api.config_routes import get_config
 
-        result = await get_config()
+        result = await get_config(user_context={"username": "test-user"})
         assert "virtual_servers" in result["features"]
         assert result["features"]["virtual_servers"] is True
 
@@ -1180,7 +1180,7 @@ class TestSettingsTabVisibilityFeatureFlags:
         with patch("registry.api.config_routes.settings", new_settings):
             from registry.api.config_routes import get_config
 
-            result = await get_config()
+            result = await get_config(user_context={"username": "test-user"})
             assert result["features"]["virtual_servers"] is False
 
     @pytest.mark.asyncio
@@ -1194,7 +1194,7 @@ class TestSettingsTabVisibilityFeatureFlags:
         with patch("registry.api.config_routes.settings", new_settings):
             from registry.api.config_routes import get_config
 
-            result = await get_config()
+            result = await get_config(user_context={"username": "test-user"})
             assert result["features"]["virtual_servers"] is False
             assert result["features"]["agents"] is True
 

@@ -74,6 +74,9 @@ class _FakeServerRepo(ServerRepositoryBase):
     async def count(self):  # pragma: no cover
         return len(self._servers)
 
+    async def count_tools(self):  # pragma: no cover
+        return 0
+
     async def update_field(self, path, field, value):  # pragma: no cover
         return False
 

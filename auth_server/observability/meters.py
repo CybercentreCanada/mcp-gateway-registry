@@ -88,7 +88,11 @@ _meter = metrics.get_meter("mcp-auth-server")
 
 auth_request_total = _meter.create_counter(
     name="mcpgw_registry_auth_request_total",
-    description="Authentication request count, labeled by outcome and method",
+    description=(
+        "Authentication request count, labeled by outcome, method, and "
+        "target_kind (a2a_agent | virtual_mcp_server | mcp_server | "
+        "control_plane | unknown) for routing breakdown"
+    ),
     unit="1",
 )
 

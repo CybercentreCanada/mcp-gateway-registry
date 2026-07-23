@@ -15,12 +15,20 @@ Subdomain mode does not need these extra rules: `/` on
 mcpregistry.<domain> already catches every browser-facing path and
 nginx does the internal routing.
 */ -}}
+{{- $ingressClass := .Values.ingress.className | default .Values.global.ingress.className | default "alb" }}
+{{- /* Compute the canonical hostname once so both spec.tls and spec.rules stay in sync */ -}}
+{{- /* Allow per-environment subdomain prefix override (e.g. "mcpregistry-stg"). Defaults to "mcpregistry". */ -}}
+{{- $subdomain := .Values.ingress.subdomain | default .Values.global.ingress.registrySubdomain | default "mcpregistry" }}
+{{- $host := ternary $domain (printf "%s.%s" $subdomain $domain) (eq $routingMode "path") }}
+{{- $tlsEnabled := .Values.ingress.tls | default .Values.global.ingress.tls | default false }}
+{{- $tlsSecretName := .Values.ingress.tlsSecretName | default (index .Values.global.ingress "tlsSecretName" | default "") }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ .Values.app.name }}
   namespace: {{ .Release.Namespace | quote }}
   annotations:
+    {{- if eq $ingressClass "alb" }}
     {{- if eq $routingMode "path" }}
     alb.ingress.kubernetes.io/group.name: mcp-gateway-stack
     alb.ingress.kubernetes.io/group.order: '20'
@@ -33,8 +41,26 @@ metadata:
     {{- if .Values.global.ingress.inboundCidrs }}
     alb.ingress.kubernetes.io/inbound-cidrs: {{ .Values.global.ingress.inboundCidrs }}
     {{- end }}
+    {{- else if eq $ingressClass "nginx" }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
-  ingressClassName: {{ .Values.ingress.className }}
+  ingressClassName: {{ $ingressClass }}
+  {{- if and $tlsEnabled (eq $ingressClass "nginx") }}
+  tls:
+  - hosts:
+    - {{ $host | quote }}
+    {{- if $tlsSecretName }}
+    secretName: {{ $tlsSecretName }}
+    {{- end }}
+  {{- end }}
   rules:
     {{- if eq $routingMode "path" }}
     - host: {{ $domain | quote }}
@@ -76,7 +102,7 @@ spec:
                 port:
                   name: http
     {{- else }}
-    - host: {{ printf "mcpregistry.%s" $domain | quote }}
+    - host: {{ $host | quote }}
       http:
         paths:
           - path: /

@@ -12,6 +12,7 @@
   "name": "Travel Assistant Agent",
   "preferredTransport": "JSONRPC",
   "protocolVersion": "0.3.0",
+  "supportedProtocol": "a2a",
   "skills": [
     {
       "description": "Search for available flights between cities on a specific date.",

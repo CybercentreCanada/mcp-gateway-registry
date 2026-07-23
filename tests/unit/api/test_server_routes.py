@@ -1628,6 +1628,85 @@ class TestInternalRemove:
 
 
 # =============================================================================
+# TEST POST /servers/remove - Ownership guard
+# =============================================================================
+
+
+@pytest.mark.unit
+@pytest.mark.api
+@pytest.mark.servers
+class TestRemoveServiceOwnership:
+    """Deleting a server must require ownership (or admin) in addition to the
+    delete_service permission, matching the update family. Permission alone is
+    not sufficient, and a missing owner fails closed for a non-admin."""
+
+    def _owned_server(self, owner: str) -> dict[str, Any]:
+        return {
+            "server_name": "test-server",
+            "path": "/test-server",
+            "proxy_pass_url": "http://localhost:8080",
+            "registered_by": owner,
+        }
+
+    def test_non_owner_non_admin_denied(self, test_client_regular, mock_server_service):
+        # regular user is "testuser"; server owned by someone else.
+        mock_server_service.get_server_info.return_value = self._owned_server("someoneelse")
+
+        with patch(
+            "registry.auth.dependencies.user_has_ui_permission_for_service", return_value=True
+        ):
+            response = test_client_regular.post(
+                "/api/servers/remove", data={"path": "/test-server"}
+            )
+
+        assert response.status_code == 403
+        assert "registered" in response.json()["reason"].lower()
+        mock_server_service.remove_server.assert_not_called()
+
+    def test_owner_allowed(self, test_client_regular, mock_server_service):
+        mock_server_service.get_server_info.return_value = self._owned_server("testuser")
+        mock_server_service.remove_server.return_value = True
+
+        with patch(
+            "registry.auth.dependencies.user_has_ui_permission_for_service", return_value=True
+        ):
+            response = test_client_regular.post(
+                "/api/servers/remove", data={"path": "/test-server"}
+            )
+
+        assert response.status_code == 200
+        mock_server_service.remove_server.assert_called_once_with("/test-server")
+
+    def test_admin_non_owner_allowed(self, test_client_admin, mock_server_service):
+        # admin bypasses both permission and ownership.
+        mock_server_service.get_server_info.return_value = self._owned_server("someoneelse")
+        mock_server_service.remove_server.return_value = True
+
+        response = test_client_admin.post("/api/servers/remove", data={"path": "/test-server"})
+
+        assert response.status_code == 200
+        mock_server_service.remove_server.assert_called_once_with("/test-server")
+
+    def test_missing_registered_by_denied_for_non_admin(
+        self, test_client_regular, mock_server_service
+    ):
+        # Fail closed: no registered_by means ownership cannot be established.
+        server = self._owned_server("testuser")
+        del server["registered_by"]
+        mock_server_service.get_server_info.return_value = server
+
+        with patch(
+            "registry.auth.dependencies.user_has_ui_permission_for_service", return_value=True
+        ):
+            response = test_client_regular.post(
+                "/api/servers/remove", data={"path": "/test-server"}
+            )
+
+        assert response.status_code == 403
+        mock_server_service.remove_server.assert_not_called()
+
+
+# =============================================================================
 # ADDITIONAL HELPER TESTS
 # =============================================================================
 

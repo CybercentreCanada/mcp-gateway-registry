@@ -13,4 +13,3 @@ rules:
     # registry-login-credentials. Plain `create` would 403 on upgrade
     # when those Secrets already exist.
     verbs: ["get", "watch", "list", "create", "update", "patch"]
-

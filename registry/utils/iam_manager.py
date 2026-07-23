@@ -773,9 +773,7 @@ class CognitoIAMManager:
         """List users from the Cognito User Pool."""
         from .cognito_manager import list_cognito_users
 
-        return await list_cognito_users(
-            max_results=max_results, include_groups=include_groups
-        )
+        return await list_cognito_users(max_results=max_results, include_groups=include_groups)
 
     async def list_groups(self) -> list[dict[str, Any]]:
         """List groups from the Cognito User Pool, filtered by IDP_GROUP_FILTER_PREFIX if set."""

@@ -216,7 +216,7 @@ Cumulative unique instances per development/git-describe version:
 
 ![Install Forecast](install-forecast-{date}.png)
 
-| Model | Daily Rate | ETA to 1,000 |
+| Model | Daily Rate | ETA to {forecast_target} |
 |-------|----------:|:-------------|
 | Linear OLS (14-day) | {forecast_linear_rate} / day | {forecast_linear_eta} |
 | Recent pace (7-day) | {forecast_recent_rate} / day | {forecast_recent_eta} |
