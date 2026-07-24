@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: setup-mongodb
-  namespace: {{ .Release.Namespace | quote }}
+  namespace: { { .Release.Namespace | quote } }
 data:
   registry-admins.json: |
     {
@@ -45,13 +45,13 @@ data:
       }
     }
 
-  trinity-developers.json: |
+  trinity-power-users.json: |
     {
-      "_id": "trinity-developers",
+      "_id": "trinity-power-users",
       "scope_type": "group",
       "description": "Trinity developer / analyst role. Read all registry assets, register own agents/servers/skills. Cannot toggle, delete, or modify resources owned by others. MCP gateway access comes from mcp-servers-unrestricted/execute.",
       "group_mappings": [
-        "trinity-developers"{{ if .Values.global.authProvider.entra.developerGroupId }},
+        "trinity-power-users"{{ if .Values.global.authProvider.entra.developerGroupId }},
         {{ printf "%s" (.Values.global.authProvider.entra.developerGroupId | quote) }}{{ end }}
       ],
       "server_access": [
@@ -429,7 +429,7 @@ data:
         - mcp-registry-admin.json: MCP registry admin scope (Keycloak group)
         - mcp-servers-unrestricted-read.json: Read-only access to all servers
         - mcp-servers-unrestricted-execute.json: Full CRUD access to all servers
-        - trinity-developers.json: Developer/analyst scope (ui_permissions, no wildcard server)
+        - trinity-power-users.json: Power-user scope — trinity-power-users (ui_permissions, no wildcard server)
         """
         collection_name = f"{COLLECTION_SCOPES}_{namespace}"
         collection = db[collection_name]
