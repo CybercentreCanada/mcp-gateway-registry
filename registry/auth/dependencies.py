@@ -242,8 +242,18 @@ def user_has_ui_permission_for_service(
 
     allowed_services = user_ui_permissions[permission]
 
-    # Check if user has permission for all services or the specific service
-    has_permission = "all" in allowed_services or service_name in allowed_services
+    # "all"  → admin-level wildcard (also triggers _user_is_admin()).
+    # "*"    → non-admin wildcard: grants access to any service name while
+    #          intentionally NOT triggering _user_is_admin() (which only fires
+    #          on "all"). Ownership checks in the route layer still apply, so
+    #          a scope with e.g. modify_service: ["*"] lets a user pass the
+    #          permission gate but the route's registered_by guard still
+    #          prevents modification of resources owned by another user.
+    has_permission = (
+        "all" in allowed_services
+        or "*" in allowed_services
+        or service_name in allowed_services
+    )
 
     logger.debug(
         f"Permission check: {permission} for {service_name} = {has_permission} (allowed: {allowed_services})"

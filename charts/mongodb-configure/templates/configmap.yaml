@@ -69,7 +69,9 @@ data:
         "list_agents": ["all"],
         "get_agent": ["all"],
         "publish_agent": ["*"],
-        "publish_skill": ["*"]
+        "publish_skill": ["*"],
+        "modify_service": ["*"],
+        "modify_agent": ["*"]
       }
     }
 
@@ -443,7 +445,7 @@ data:
             "mcp-registry-admin.json",
             "mcp-servers-unrestricted-read.json",
             "mcp-servers-unrestricted-execute.json",
-            "trinity-developers.json",
+            "trinity-power-users.json",
         ]
 
         loaded_count = 0
