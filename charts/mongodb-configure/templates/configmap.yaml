@@ -45,6 +45,34 @@ data:
       }
     }
 
+  trinity-developers.json: |
+    {
+      "_id": "trinity-developers",
+      "scope_type": "group",
+      "description": "Trinity developer / analyst role. Read all registry assets, register own agents/servers/skills. Cannot toggle, delete, or modify resources owned by others. MCP gateway access comes from mcp-servers-unrestricted/execute.",
+      "group_mappings": [
+        "trinity-developers"{{ if .Values.global.authProvider.entra.developerGroupId }},
+        {{ printf "%s" (.Values.global.authProvider.entra.developerGroupId | quote) }}{{ end }}
+      ],
+      "server_access": [
+        {
+          "server": "api",
+          "methods": ["initialize", "GET", "POST", "servers", "agents", "search", "rating", "tokens"],
+          "tools": []
+        }
+      ],
+      "ui_permissions": {
+        "list_service": ["all"],
+        "health_check_service": ["all"],
+        "register_service": ["*"],
+        "list_virtual_server": ["all"],
+        "list_agents": ["all"],
+        "get_agent": ["all"],
+        "publish_agent": ["*"],
+        "publish_skill": ["*"]
+      }
+    }
+
   wait.py: |
     import pymongo
     import os
@@ -152,7 +180,7 @@ data:
   mcp-servers-unrestricted-execute.json: |
     {
       "_id": "mcp-servers-unrestricted/execute",
-      "group_mappings": [],
+      "group_mappings": [{{ if .Values.global.authProvider.entra.developerGroupId }}{{ printf "%s" (.Values.global.authProvider.entra.developerGroupId | quote) }}{{ end }}],
       "server_access": [
         {
           "server": "*",
@@ -401,6 +429,7 @@ data:
         - mcp-registry-admin.json: MCP registry admin scope (Keycloak group)
         - mcp-servers-unrestricted-read.json: Read-only access to all servers
         - mcp-servers-unrestricted-execute.json: Full CRUD access to all servers
+        - trinity-developers.json: Developer/analyst scope (ui_permissions, no wildcard server)
         """
         collection_name = f"{COLLECTION_SCOPES}_{namespace}"
         collection = db[collection_name]
@@ -414,6 +443,7 @@ data:
             "mcp-registry-admin.json",
             "mcp-servers-unrestricted-read.json",
             "mcp-servers-unrestricted-execute.json",
+            "trinity-developers.json",
         ]
 
         loaded_count = 0

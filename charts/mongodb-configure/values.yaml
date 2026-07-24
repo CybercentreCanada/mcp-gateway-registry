@@ -17,6 +17,10 @@ global:
     type: keycloak
     entra:
       adminGroupId:
+      # Object ID of the Entra security group whose members get developer access
+      # (read all assets, register own agents/servers/skills, invoke MCP tools).
+      # Leave empty to skip developer scope seeding.
+      developerGroupId:
 
 # MongoDB configuration
 mongodb:
