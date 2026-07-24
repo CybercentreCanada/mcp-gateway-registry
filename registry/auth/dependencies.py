@@ -250,9 +250,7 @@ def user_has_ui_permission_for_service(
     #          permission gate but the route's registered_by guard still
     #          prevents modification of resources owned by another user.
     has_permission = (
-        "all" in allowed_services
-        or "*" in allowed_services
-        or service_name in allowed_services
+        "all" in allowed_services or "*" in allowed_services or service_name in allowed_services
     )
 
     logger.debug(
