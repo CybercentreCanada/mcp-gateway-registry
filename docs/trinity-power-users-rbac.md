@@ -321,6 +321,44 @@ To make a scope change permanent across redeployments:
 
 ---
 
+---
+
+## Entity edit behaviour: ownership rules
+
+| Entity | Edit endpoint | Has ownership check? | Power user can edit: |
+|---|---|---|---|
+| **MCP Server** | `POST /api/edit/{path}` (UI form) | **No** | Any server they can access (all, via `mcp-servers-unrestricted/execute`) |
+| **Agent** | `PUT /api/agents/{path}` | **Yes** (`registered_by`) | Only agents they registered |
+| **Skill** | `PUT /api/skills/{path}` | **Yes** (`owner`) | Only skills they registered |
+
+The MCP server edit form endpoint was intentionally designed without an ownership check, which is
+why power users can edit any server once the permission check passes. The REST API equivalents
+(`PUT /api/servers/{path}`, `PATCH /api/servers/{path}`) DO have ownership checks and would
+block non-owners even with a valid `modify_service` permission.
+
+If it becomes desirable for power users to also edit other users' agents or skills, the
+`PUT /api/agents/{path}` and skill equivalent endpoints need a targeted code change analogous to
+what the server form endpoint already does.
+
+---
+
+## Deployed image
+
+The code fix to `user_has_ui_permission_for_service` (recognising `"*"` as a non-admin wildcard)
+is NOT present in the upstream `1.27.1` image. A patch image was built from the current branch
+and pushed to the internal ACR:
+
+```
+uchimera.azurecr.io/mcpgateway/registry:1.27.1-rbac-fix
+```
+
+Both dev and staging environments are pinned to this image via a `registry.image.tag` override in
+their respective environment values files. auth-server and mcpgw remain on the upstream `1.27.1`
+image (no changes to those services).
+
+When the fix is merged upstream and a new release is cut, remove the `registry.image.tag`
+override from both values files and update the global `image.tag` to the new upstream version.
+
 ## Staging: pending re-import
 
 After the `modify_agent` permission was added, the staging MongoDB was updated directly
