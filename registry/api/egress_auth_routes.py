@@ -370,6 +370,23 @@ def _require_admin(user_context: dict) -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="admin required")
 
 
+def _require_admin_or_registrant(user_context: dict, server: dict) -> None:
+    """Allow admins or the user who registered the server.
+
+    Non-admin power users may configure egress auth on servers they own
+    (matching the ownership model used by PUT /servers/{path}). Admins
+    may configure egress auth on any server.
+    """
+    if user_context.get("is_admin"):
+        return
+    if server.get("registered_by") == user_context.get("username"):
+        return
+    raise HTTPException(
+        status.HTTP_403_FORBIDDEN,
+        detail="Only admins or the server registrant may configure egress auth",
+    )
+
+
 @router.post("/servers/{server_path:path}/egress-auth")
 async def configure_egress_auth(
     request: Request,
@@ -384,7 +401,6 @@ async def configure_egress_auth(
     callback URL the operator must register in the provider's OAuth app.
     """
     _feature_enabled_or_404()
-    _require_admin(user_context)
 
     if not server_path.startswith("/"):
         server_path = "/" + server_path
@@ -392,6 +408,9 @@ async def configure_egress_auth(
     server = await server_service.get_server_info(server_path, include_credentials=True)
     if not server:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="server not found")
+
+    # Admins or the server registrant may configure egress auth.
+    _require_admin_or_registrant(user_context, server)
 
     if body.egress_auth_mode == "none":
         server["egress_auth_mode"] = "none"
@@ -501,12 +520,12 @@ async def get_egress_auth_config(
 ):
     """Read a server's egress config (secret stripped). Admin only."""
     _feature_enabled_or_404()
-    _require_admin(user_context)
     if not server_path.startswith("/"):
         server_path = "/" + server_path
     server = await server_service.get_server_info(server_path, include_credentials=False)
     if not server:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="server not found")
+    _require_admin_or_registrant(user_context, server)
     return _egress_config_view(server)
 
 

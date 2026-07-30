@@ -1,0 +1,57 @@
+{
+  "scope_name": "trinity-power-users",
+  "description": "Trinity power user role (ui_permissions only). Read all registry assets, register own agents/servers/skills. Cannot toggle, delete, or modify resources owned by others. MCP gateway server access comes from mcp-servers-unrestricted/execute (group mapped separately in MongoDB).",
+  "group_mappings": [
+    "trinity-power-users",
+    "57ea5441-f8ba-4b74-bc04-cd0500bb12b3"
+  ],
+  "server_access": [
+    {
+      "server": "api",
+      "methods": [
+        "initialize",
+        "GET",
+        "POST",
+        "servers",
+        "agents",
+        "search",
+        "rating",
+        "tokens"
+      ],
+      "tools": []
+    }
+  ],
+  "ui_permissions": {
+    "list_service": [
+      "all"
+    ],
+    "health_check_service": [
+      "all"
+    ],
+    "register_service": [
+      "*"
+    ],
+    "list_virtual_server": [
+      "all"
+    ],
+    "list_agents": [
+      "all"
+    ],
+    "get_agent": [
+      "all"
+    ],
+    "publish_agent": [
+      "*"
+    ],
+    "publish_skill": [
+      "*"
+    ],
+    "modify_service": [
+      "*"
+    ],
+    "modify_agent": [
+      "*"
+    ]
+  },
+  "create_in_idp": false
+}

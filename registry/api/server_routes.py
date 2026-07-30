@@ -1004,9 +1004,12 @@ async def toggle_service_route(
 
     service_name = server_info["server_name"]
 
-    # Check if user has toggle_service permission for this specific service
-    if not user_has_ui_permission_for_service(
-        "toggle_service", service_name, user_context.get("ui_permissions", {})
+    is_registrant = server_info.get("registered_by") == user_context.get("username")
+    if (
+        not user_has_ui_permission_for_service(
+            "toggle_service", service_name, user_context.get("ui_permissions", {})
+        )
+        and not is_registrant
     ):
         logger.warning(
             f"User {user_context['username']} attempted to toggle service {service_name} without toggle_service permission"
@@ -2540,11 +2543,28 @@ async def edit_server_submit(
     if is_local:
         updated_server_entry["local_runtime"] = local_runtime_obj.model_dump()
     else:
-        updated_server_entry["proxy_pass_url"] = proxy_pass_url
-        if mcp_endpoint:
-            updated_server_entry["mcp_endpoint"] = mcp_endpoint
-        if sse_endpoint:
-            updated_server_entry["sse_endpoint"] = sse_endpoint
+        # Non-admin users cannot see proxy_pass_url / mcp_endpoint /
+        # sse_endpoint in the GET /server_details response (they are
+        # redacted by should_redact_backend_urls). If those fields come
+        # back empty from the form submission, preserve the values already
+        # stored in the DB so we don't wipe backend routing configuration.
+        _is_non_admin = not user_context.get("is_admin")
+        effective_proxy_pass_url = proxy_pass_url or (
+            server_info.get("proxy_pass_url")
+            if _is_non_admin and not proxy_pass_url
+            else proxy_pass_url
+        )
+        effective_mcp_endpoint = mcp_endpoint or (
+            server_info.get("mcp_endpoint") if _is_non_admin and not mcp_endpoint else mcp_endpoint
+        )
+        effective_sse_endpoint = sse_endpoint or (
+            server_info.get("sse_endpoint") if _is_non_admin and not sse_endpoint else sse_endpoint
+        )
+        updated_server_entry["proxy_pass_url"] = effective_proxy_pass_url
+        if effective_mcp_endpoint:
+            updated_server_entry["mcp_endpoint"] = effective_mcp_endpoint
+        if effective_sse_endpoint:
+            updated_server_entry["sse_endpoint"] = effective_sse_endpoint
 
     # Per-server Connect-config overrides (token-less IDE OAuth login + /mcp path).
     # None = unset (auto-detect / fall back to the registry-wide default).
@@ -4531,8 +4551,12 @@ async def toggle_service_api(
 
     service_name = server_info["server_name"]
 
-    if not user_has_ui_permission_for_service(
-        "toggle_service", service_name, user_context.get("ui_permissions", {})
+    is_registrant = server_info.get("registered_by") == user_context.get("username")
+    if (
+        not user_has_ui_permission_for_service(
+            "toggle_service", service_name, user_context.get("ui_permissions", {})
+        )
+        and not is_registrant
     ):
         logger.warning(
             f"User '{user_context.get('username')}' attempted to toggle "
