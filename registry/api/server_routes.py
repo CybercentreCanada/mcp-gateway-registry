@@ -1004,9 +1004,12 @@ async def toggle_service_route(
 
     service_name = server_info["server_name"]
 
-    # Check if user has toggle_service permission for this specific service
-    if not user_has_ui_permission_for_service(
-        "toggle_service", service_name, user_context.get("ui_permissions", {})
+    is_registrant = server_info.get("registered_by") == user_context.get("username")
+    if (
+        not user_has_ui_permission_for_service(
+            "toggle_service", service_name, user_context.get("ui_permissions", {})
+        )
+        and not is_registrant
     ):
         logger.warning(
             f"User {user_context['username']} attempted to toggle service {service_name} without toggle_service permission"
@@ -4548,8 +4551,12 @@ async def toggle_service_api(
 
     service_name = server_info["server_name"]
 
-    if not user_has_ui_permission_for_service(
-        "toggle_service", service_name, user_context.get("ui_permissions", {})
+    is_registrant = server_info.get("registered_by") == user_context.get("username")
+    if (
+        not user_has_ui_permission_for_service(
+            "toggle_service", service_name, user_context.get("ui_permissions", {})
+        )
+        and not is_registrant
     ):
         logger.warning(
             f"User '{user_context.get('username')}' attempted to toggle "
