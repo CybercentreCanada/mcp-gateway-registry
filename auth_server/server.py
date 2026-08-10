@@ -5776,6 +5776,26 @@ _HOP_BY_HOP_HEADERS: frozenset[str] = frozenset(
 )
 
 
+# Forwarding hints that describe the CLIENT -> gateway edge and must never ride
+# along to the upstream. The auth-server -> upstream call is a fresh connection
+# (httpx), and the upstream is a separate origin with its OWN reverse proxy. If
+# we relay these, the upstream's ingress makes scheme/host decisions based on the
+# gateway's internal hop instead of its real connection -- e.g. behind a
+# TLS-terminating front proxy the gateway sees `$scheme == http`, stamps
+# `X-Forwarded-Proto: http`, and the upstream then issues an http->https 308
+# redirect that surfaces to the client as a bare 308 (the gateway strips the
+# redirect Location). Stripping them lets the upstream infer scheme/host from the
+# actual (https) connection the auth-server opened.
+_PROXY_HOP_HINT_HEADERS: frozenset[str] = frozenset(
+    {
+        "x-forwarded-proto",
+        "x-forwarded-host",
+        "x-forwarded-port",
+        "forwarded",
+    }
+)
+
+
 # Allowlist of upstream response headers the proxy is permitted to forward
 # back to the MCP client. The auth-server sits on a trust boundary in front
 # of arbitrary upstream MCP servers, so the default posture is to drop
@@ -5869,6 +5889,11 @@ def _forward_headers(
     for key, value in incoming.items():
         lower = key.lower()
         if lower in _HOP_BY_HOP_HEADERS:
+            continue
+        if lower in _PROXY_HOP_HINT_HEADERS:
+            # Client-edge forwarding hints; the auth-server -> upstream hop is a
+            # fresh connection, so relaying these makes the upstream's own ingress
+            # mis-decide scheme/host (e.g. an http->https 308 redirect loop).
             continue
         if lower == "x-upstream-url":
             # Never leak this internal routing header to the upstream.
