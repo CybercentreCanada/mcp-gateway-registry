@@ -54,8 +54,9 @@ tests:
       #   env[8]  = RATE_LIMIT_FAIL_OPEN
       #   env[9]  = RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS
       #   env[10] = RATE_LIMIT_BACKEND_TIMEOUT_MS
-      #   env[11] = MY_FLAG       (extraEnv[0])
-      #   env[12] = MY_SECRET_VAR (extraEnv[1])
+      #   env[11] = A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED (always rendered)
+      #   env[12] = MY_FLAG       (extraEnv[0])
+      #   env[13] = MY_SECRET_VAR (extraEnv[1])
       - equal:
           path: spec.template.spec.containers[0].env[0].name
           value: ENTRA_CLIENT_SECRET
@@ -73,9 +74,12 @@ tests:
           value: RATE_LIMIT_BACKEND_TIMEOUT_MS
       - equal:
           path: spec.template.spec.containers[0].env[11].name
-          value: MY_FLAG
+          value: A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED
       - equal:
           path: spec.template.spec.containers[0].env[12].name
+          value: MY_FLAG
+      - equal:
+          path: spec.template.spec.containers[0].env[13].name
           value: MY_SECRET_VAR
 
   - it: appends extraEnvFrom entries after chart-managed envFrom sources
@@ -186,6 +190,15 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "\"RATE_LIMITING_ENABLED\" is a reserved variable"
+
+  - it: fails when extraEnv contains A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED
+    set:
+      extraEnv:
+        - name: A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED
+          value: "true"
+    asserts:
+      - failedTemplate:
+          errorPattern: "\"A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED\" is a reserved variable"
 
   - it: fails on duplicate names within extraEnv
     set:

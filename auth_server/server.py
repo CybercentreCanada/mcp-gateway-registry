@@ -2623,13 +2623,16 @@ async def validate_request(request: Request):
         # precedence (X-Authorization first, then Authorization) is preserved.
         a2a_agent_path = _get_a2a_agent_path(original_url)
         is_a2a_request = a2a_agent_path is not None
+        shared_token_mode = getattr(settings, "a2a_shared_gateway_agent_token_enabled", False)
         if x_authorization:
             authorization = x_authorization
-        elif is_a2a_request:
-            # No gateway credential on an agent path: fail closed as
-            # unauthenticated rather than trusting the target-agent Authorization.
+        elif is_a2a_request and not shared_token_mode:
+            # Strict default: no gateway credential on an agent path -> fail closed
+            # rather than trusting the target-agent Authorization.
             authorization = None
         else:
+            # Non-agent path, OR agent path with shared-token mode enabled:
+            # authenticate on the standard Authorization header.
             authorization = raw_authorization
 
         # Defense in depth: if a caller duplicates its gateway token into both
@@ -2649,6 +2652,7 @@ async def validate_request(request: Request):
 
         if (
             is_a2a_request
+            and not shared_token_mode
             and x_authorization
             and _bearer_token_value(raw_authorization) == _bearer_token_value(x_authorization)
         ):

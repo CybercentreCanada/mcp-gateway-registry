@@ -974,6 +974,150 @@ class TestValidateEndpoint:
         assert response.status_code == 401
 
     @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_shared_token_allows_authorization_fallback(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+        monkeypatch,
+    ):
+        """Shared-token mode: agent path with only Authorization authenticates.
+
+        With A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED on, a single bearer token in
+        Authorization both authenticates to the gateway and is forwarded to the
+        agent backend, so the strict no-fallback rule is relaxed.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        monkeypatch.setattr(
+            server_module.settings, "a2a_shared_gateway_agent_token_enabled", True
+        )
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_shared_token_allows_duplicate_credential(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+        monkeypatch,
+    ):
+        """Shared-token mode: Authorization == X-Authorization is no longer refused.
+
+        The duplicate-token rejection exists to stop the gateway credential from
+        leaking to the agent backend. In shared-token mode that leak is the
+        intended behavior, so the request is allowed.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        monkeypatch.setattr(
+            server_module.settings, "a2a_shared_gateway_agent_token_enabled", True
+        )
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    "Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_shared_token_off_still_fail_closed(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+        monkeypatch,
+    ):
+        """Regression guard: with the flag OFF the strict behavior is intact.
+
+        Both the Authorization-only fallback and the duplicate-token request must
+        still return 401 when A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED is false.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        monkeypatch.setattr(
+            server_module.settings, "a2a_shared_gateway_agent_token_enabled", False
+        )
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+
+            fallback = client.get(
+                "/validate",
+                headers={
+                    "Authorization": "Bearer target-agent-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+            duplicate = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    "Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert fallback.status_code == 401
+        assert duplicate.status_code == 401
+
+    @patch("auth_server.server.get_auth_provider")
     def test_validate_uninspectable_body_fails_closed(
         self,
         mock_get_provider,

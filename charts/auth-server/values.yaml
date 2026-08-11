@@ -99,6 +99,13 @@ app:
     failOpen: true
     definitionsCacheTtlSeconds: 30
     backendTimeoutMs: 250
+  # A2A shared gateway/agent token mode (OPT-IN, default off). When true, a
+  # single Authorization bearer token both authenticates to the gateway AND is
+  # forwarded to the downstream agent on /agent/... paths. This DEFEATS
+  # gateway/agent credential separation: the gateway credential becomes readable
+  # (and replayable) by the registrant-controlled agent backend. Only enable when
+  # the agent backend is in the same trust domain as the gateway.
+  a2aSharedGatewayAgentTokenEnabled: false
 # Authentication Provider Configuration
 # Choose ONE provider: keycloak, entra, okta, auth0, cognito, or pingfederate
 authProvider:

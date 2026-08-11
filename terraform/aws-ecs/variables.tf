@@ -1635,6 +1635,12 @@ variable "a2a_reverse_proxy_enabled" {
   default     = false
 }
 
+variable "a2a_shared_gateway_agent_token_enabled" {
+  description = "A2A shared gateway/agent token mode (OPT-IN, default off). When true, on an /agent/... path a single Authorization bearer token both authenticates to the gateway AND is forwarded to the downstream agent backend. This DEFEATS gateway/agent credential separation, so only enable when the agent backend is in the same trust domain as the gateway."
+  type        = bool
+  default     = false
+}
+
 variable "ssrf_allowed_hosts" {
   description = "Comma-separated hostnames (or literal IPs) that may resolve to private addresses and still be accepted by the SSRF guard for MCP-server proxy_pass_url / A2A-agent URLs. The cloud metadata endpoint is never permitted."
   type        = string

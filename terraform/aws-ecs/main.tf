@@ -338,6 +338,9 @@ module "mcp_gateway" {
   ssrf_allowed_hosts        = var.ssrf_allowed_hosts
   ssrf_allowed_cidrs        = var.ssrf_allowed_cidrs
 
+  # A2A shared gateway/agent token mode (opt-in, default off)
+  a2a_shared_gateway_agent_token_enabled = var.a2a_shared_gateway_agent_token_enabled
+
   # Internal/workshop deployment classification (telemetry labels; issue #1216)
   internal_only_deployment = var.internal_only_deployment
   internal_deployment_type = var.internal_deployment_type

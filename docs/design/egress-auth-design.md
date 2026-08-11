@@ -226,6 +226,12 @@ The registry's outbound SSRF guard (`registry/utils/url_guard.py`, `PROXY_PROFIL
 
 Wire the chosen value on the **registry** container across your deployment surface (`.env` / `docker-compose*.yml`, the registry Helm values, or the Terraform/ECS registry env block). Public-internet MCP upstreams (e.g. `https://mcp.slack.com`) need no allowlisting — they resolve to public IPs and pass the guard. The cloud metadata endpoint (`169.254.169.254`) is never allowlistable, regardless of these settings.
 
+### Operational note: A2A shared gateway/agent token mode (opt-in, default off)
+
+On an A2A agent path (`{root}/agent/{agent_path}/...`) the gateway enforces strict credential separation by default: the gateway credential travels in `X-Authorization` (stripped on the agent hop) and the target-agent credential travels in `Authorization` (forwarded end-to-end). `/validate` fails closed if `X-Authorization` is absent and refuses a request whose `Authorization` duplicates `X-Authorization`, so the gateway credential can never leak to the registrant-controlled agent backend.
+
+`A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED=true` relaxes this on agent paths: a single `Authorization` bearer token both authenticates the caller to the gateway (falling back to `Authorization` when `X-Authorization` is absent) **and** is forwarded to the agent backend, and the duplicate-token rejection is skipped. This **intentionally defeats** the credential separation — the gateway credential becomes readable and replayable by the agent backend — so it is **default-off**, **opt-in via env var only**, and **fail-closed** (strict behavior whenever the flag is unset/false). Only enable it when the agent backend is in the **same trust domain** as the gateway. The `invoke_agent` scope enforcement still applies in both modes.
+
 ---
 
 ## The egress modes

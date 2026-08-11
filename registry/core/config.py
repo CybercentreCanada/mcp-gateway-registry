@@ -538,6 +538,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    # A2A shared gateway/agent token mode (opt-in, default off)
+    a2a_shared_gateway_agent_token_enabled: bool = Field(
+        default=False,
+        description=(
+            "OPT-IN, default-off. When true, on an A2A agent path the gateway "
+            "authenticates the caller on the standard Authorization header (falling "
+            "back when X-Authorization is absent) and no longer rejects a request "
+            "whose Authorization equals its X-Authorization. This lets a single "
+            "bearer token both authenticate to the gateway AND be forwarded to the "
+            "agent backend. It defeats gateway/agent credential separation, so only "
+            "enable it when the agent backend is in the same trust domain as the "
+            "gateway. Env: A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED."
+        ),
+    )
+
     # Skill security scanning settings (AI Agent Skills)
     skill_security_scan_enabled: bool = True
     skill_security_scan_on_registration: bool = True

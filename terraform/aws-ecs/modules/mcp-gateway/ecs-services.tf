@@ -417,6 +417,15 @@ module "ecs_service_auth" {
           name  = "RATE_LIMIT_BACKEND_TIMEOUT_MS"
           value = tostring(var.rate_limit_backend_timeout_ms)
         },
+        # A2A shared gateway/agent token mode (OPT-IN, default off). When true, a
+        # single Authorization bearer token both authenticates to the gateway AND
+        # is forwarded to the downstream agent on /agent/... paths, defeating
+        # gateway/agent credential separation. Only enable when the agent backend
+        # is in the same trust domain as the gateway.
+        {
+          name  = "A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED"
+          value = tostring(var.a2a_shared_gateway_agent_token_enabled)
+        },
         # NOTE: the RATE_LIMIT_*_FLOOR_PER_MIN vars are intentionally NOT set on the
         # auth-server -- only the registry reads them (it validates group definitions
         # at config time). They are set on the registry container instead, matching

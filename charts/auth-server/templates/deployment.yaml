@@ -207,6 +207,13 @@ spec:
               value: {{ .Values.app.rateLimiting.definitionsCacheTtlSeconds | default 30 | toString | quote }}
             - name: RATE_LIMIT_BACKEND_TIMEOUT_MS
               value: {{ .Values.app.rateLimiting.backendTimeoutMs | default 250 | toString | quote }}
+            # A2A shared gateway/agent token mode (OPT-IN, default off). When
+            # true, a single Authorization bearer token both authenticates to the
+            # gateway AND is forwarded to the downstream agent on /agent/... paths,
+            # defeating gateway/agent credential separation. Only enable when the
+            # agent backend is in the same trust domain as the gateway.
+            - name: A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED
+              value: {{ .Values.app.a2aSharedGatewayAgentTokenEnabled | default false | toString | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

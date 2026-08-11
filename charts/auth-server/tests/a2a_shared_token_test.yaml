@@ -1,0 +1,25 @@
+suite: A2A shared gateway/agent token mode
+templates:
+  - deployment.yaml
+release:
+  name: test
+  namespace: default
+tests:
+  - it: renders A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED false by default
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED
+            value: "false"
+
+  - it: renders A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED true when opted in
+    set:
+      app:
+        a2aSharedGatewayAgentTokenEnabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED
+            value: "true"

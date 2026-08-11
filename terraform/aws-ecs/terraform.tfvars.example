@@ -1042,6 +1042,14 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # "with-gateway".
 # a2a_reverse_proxy_enabled = false
 
+# A2A shared gateway/agent token mode (OPT-IN, default false). When true, on an
+# /agent/... path a single Authorization bearer token both authenticates to the
+# gateway AND is forwarded to the downstream agent backend. This DEFEATS
+# gateway/agent credential separation: the gateway credential becomes readable
+# (and replayable) by the registrant-controlled agent backend. Only enable when
+# the agent backend is in the same trust domain as the gateway.
+# a2a_shared_gateway_agent_token_enabled = false
+
 # SSRF guard allowlist for internal MCP-server / A2A-agent upstreams. The health
 # checker and proxy validate every upstream URL through an SSRF guard that blocks
 # private/loopback/metadata addresses by default, so internal upstreams (private
