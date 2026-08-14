@@ -964,6 +964,38 @@ def _decrypt_skill_auth(
     return auth_scheme, credential, getattr(skill, "auth_header_name", None)
 
 
+async def _build_skill_fetch_auth(
+    skill: SkillCard,
+    url: str,
+) -> tuple[str, dict[str, str]]:
+    """Resolve the fetch URL and auth headers for downloading skill content.
+
+    Single source of truth for header resolution across every auth scheme so
+    all skill download paths -- the content endpoint and the security scanner
+    -- present identical credentials:
+
+    - ``none``: no headers.
+    - ``bearer`` / ``api_key``: the skill's decrypted per-skill credential
+      (plus any GitLab web->API URL translation performed by
+      ``_build_fetch_headers``).
+    - ``global_credentials``: the server's shared GitHub PAT / App token,
+      attached only for allowed GitHub hosts.
+
+    Returns:
+        (fetch_url, headers) tuple.
+    """
+    auth_scheme, credential, auth_header_name = _decrypt_skill_auth(skill)
+    fetch_url, headers = _build_fetch_headers(
+        url,
+        auth_scheme,
+        credential,
+        auth_header_name,
+    )
+    if auth_scheme == "global_credentials":
+        headers = await _github_auth.get_auth_headers(fetch_url, allow_global_credentials=True)
+    return fetch_url, headers
+
+
 async def _fetch_authenticated_content(
     url: str,
     skill: SkillCard,
@@ -990,23 +1022,7 @@ async def _fetch_authenticated_content(
     if not _is_safe_url(url):
         raise SkillContentSSRFError(url)
 
-    auth_scheme, credential, auth_header_name = _decrypt_skill_auth(skill)
-    fetch_url, fetch_headers = _build_fetch_headers(
-        url,
-        auth_scheme,
-        credential,
-        auth_header_name,
-    )
-
-    if auth_scheme == "none":
-        merged_headers = fetch_headers
-    elif auth_scheme == "global_credentials":
-        merged_headers = await _github_auth.get_auth_headers(
-            fetch_url, allow_global_credentials=True
-        )
-    else:
-        # bearer / api_key: use only the caller-supplied credential.
-        merged_headers = fetch_headers
+    fetch_url, merged_headers = await _build_skill_fetch_auth(skill, url)
 
     try:
         async with guarded_async_client() as client:
