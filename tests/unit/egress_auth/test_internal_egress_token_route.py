@@ -125,6 +125,35 @@ class TestInternalEgressTokenRoute:
         assert r.json()["access_token"] is None
         assert not client._svc.called
 
+    def test_ingress_relay_returns_directive_for_allowlisted_server(self, make_client, monkeypatch):
+        monkeypatch.setattr(
+            routes.settings,
+            "egress_ingress_relay_allowed_servers",
+            "/github-mcp",
+        )
+        client = make_client(
+            _claims(auth_method="m2m"),
+            _server(egress_auth_mode="ingress_relay", egress_oauth=None),
+        )
+
+        r = _post(client)
+
+        assert r.status_code == 200
+        assert r.json()["mode"] == "ingress_relay"
+        assert not client._svc.called
+
+    def test_ingress_relay_runtime_allowlist_is_fail_closed(self, make_client, monkeypatch):
+        monkeypatch.setattr(routes.settings, "egress_ingress_relay_allowed_servers", "")
+        client = make_client(
+            _claims(),
+            _server(egress_auth_mode="ingress_relay", egress_oauth=None),
+        )
+
+        r = _post(client)
+
+        assert r.status_code == 403
+        assert not client._svc.called
+
     def test_server_not_oauth_user_consent(self, make_client):
         client = make_client(_claims(), _server(egress_auth_mode="none", egress_oauth=None))
         r = _post(client)

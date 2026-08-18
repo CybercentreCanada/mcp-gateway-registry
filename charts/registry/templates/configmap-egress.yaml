@@ -53,6 +53,9 @@ data:
   # https host URLs), so shared first-party APIs (Graph/ARM/Key Vault) are rejected.
   EGRESS_OBO_ALLOWED_AUDIENCES: {{ .Values.egressAuth.oboAllowedAudiences | quote }}
   {{- end }}
+  {{- if .Values.egressAuth.ingressRelayAllowedServers }}
+  EGRESS_INGRESS_RELAY_ALLOWED_SERVERS: {{ .Values.egressAuth.ingressRelayAllowedServers | quote }}
+  {{- end }}
   {{- if .Values.egressAuth.secretsManager }}
   {{- if .Values.egressAuth.secretsManager.kmsKeyId }}
   SECRETS_MANAGER_KMS_KEY_ID: {{ .Values.egressAuth.secretsManager.kmsKeyId | quote }}

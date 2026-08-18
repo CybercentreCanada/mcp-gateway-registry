@@ -36,6 +36,30 @@ class TestServerEgressAuthValidation:
         with pytest.raises(ValidationError, match="invalid egress_auth_mode"):
             _server(egress_auth_mode="bogus")
 
+    def test_ingress_relay_requires_operator_allowlist(self, monkeypatch):
+        from registry.core.config import settings
+
+        monkeypatch.setattr(settings, "egress_ingress_relay_allowed_servers", "")
+        with pytest.raises(ValidationError, match="not allowed for ingress_relay"):
+            _server(egress_auth_mode="ingress_relay")
+
+    def test_ingress_relay_accepts_allowlisted_server(self, monkeypatch):
+        from registry.core.config import settings
+
+        monkeypatch.setattr(settings, "egress_ingress_relay_allowed_servers", "other S")
+        server = _server(egress_auth_mode="ingress_relay")
+        assert server.egress_auth_mode == "ingress_relay"
+
+    def test_ingress_relay_rejects_oauth_config(self, monkeypatch):
+        from registry.core.config import settings
+
+        monkeypatch.setattr(settings, "egress_ingress_relay_allowed_servers", "/s")
+        with pytest.raises(ValidationError, match="forbids egress_oauth"):
+            _server(
+                egress_auth_mode="ingress_relay",
+                egress_oauth=EgressOAuthConfig(provider="github"),
+            )
+
     def test_oauth_user_requires_provider(self):
         with pytest.raises(ValidationError, match="requires egress_oauth.provider"):
             _server(

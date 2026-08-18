@@ -96,3 +96,21 @@ tests:
       - equal:
           path: data.EGRESS_OBO_ALLOWED_AUDIENCES
           value: "api://outlook-mcp-server api://calendar-mcp-server"
+
+  - it: omits the ingress relay allowlist by default
+    set:
+      egressAuth:
+        enabled: true
+    asserts:
+      - notExists:
+          path: data.EGRESS_INGRESS_RELAY_ALLOWED_SERVERS
+
+  - it: renders the ingress relay allowlist when set
+    set:
+      egressAuth:
+        enabled: true
+        ingressRelayAllowedServers: "/internal-mcp /other-mcp"
+    asserts:
+      - equal:
+          path: data.EGRESS_INGRESS_RELAY_ALLOWED_SERVERS
+          value: "/internal-mcp /other-mcp"

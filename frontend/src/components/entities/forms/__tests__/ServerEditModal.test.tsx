@@ -148,6 +148,13 @@ describe('ServerEditModal', () => {
     expect(screen.queryByText('Target Audience')).not.toBeInTheDocument();
   });
 
+  it('shows and preserves ingress_relay mode', () => {
+    render(<Harness initial={{ ...baseForm, egress_auth_mode: 'ingress_relay' }} egressEnabled />);
+    const mode = screen.getByRole('combobox', { name: 'Mode' });
+    expect(mode).toHaveValue('ingress_relay');
+    expect(screen.getByText(/Requires this server path/)).toBeInTheDocument();
+  });
+
   it('shows neither provider nor target audience when egress mode is none', () => {
     render(<Harness initial={{ ...baseForm, egress_auth_mode: 'none' }} egressEnabled />);
     expect(screen.getByText('Egress Auth')).toBeInTheDocument();

@@ -13,7 +13,7 @@ Everything below rests on one rule. Every auth header a client sends (`Authoriza
 
 The upstream credential (when the server needs one) is supplied **by the gateway**, from the egress vault — never by relaying a client header. This is what makes "no third-party token on the laptop" true by construction.
 
-**The one exception** is the gateway's own built-in, same-trust-domain registry-tools server (`airegistry-tools`, proxied to the bundled mcpgw). A hardcoded, non-configurable constant (`_INTERNAL_INGRESS_RELAY_SERVERS` in `auth_server/server.py`) relays the ingress `Authorization` to it (never `X-Authorization`/`Cookie`). This is internal plumbing, not a user-facing relay feature — a server registrant cannot enable it.
+**The exceptions** are the gateway's own built-in, same-trust-domain registry-tools server (`airegistry-tools`, proxied to the bundled mcpgw) and operator-approved servers using `egress_auth_mode=ingress_relay`. The built-in path uses `_INTERNAL_INGRESS_RELAY_SERVERS`; configured relays require the server path in `EGRESS_INGRESS_RELAY_ALLOWED_SERVERS`. Both relay only `Authorization`, never `X-Authorization` or cookies.
 
 ---
 
@@ -173,7 +173,7 @@ The gateway **owns the authentication to every third-party MCP server**, which t
 
 ## The internal relay: airegistry-tools -> registry API (sequence)
 
-The one exception to "client auth headers are stripped on egress." `airegistry-tools` is the gateway's own bundled registry-tools MCP server (the `mcpgw` service). It is same-trust-domain, so a hardcoded constant (`_INTERNAL_INGRESS_RELAY_SERVERS = {"airegistry-tools"}` in `auth_server/server.py`) relays the ingress `Authorization` to it (never `X-Authorization`/`Cookie`). The mcpgw server then needs to call the **registry API** (list/search servers, agents, skills) — and it chooses which credential to present for that call, NOT the relayed one by default.
+The built-in exception to "client auth headers are stripped on egress" is `airegistry-tools`, the gateway's bundled registry-tools MCP server (`mcpgw`). A hardcoded constant (`_INTERNAL_INGRESS_RELAY_SERVERS = {"airegistry-tools"}` in `auth_server/server.py`) relays its ingress `Authorization`. Configured same-trust-domain servers use the separately gated `ingress_relay` mode described below. Neither path relays `X-Authorization` or cookies.
 
 Key point: the relayed ingress `Authorization` lets mcpgw's FastMCP front door admit the MCP call when it is configured to validate a bearer (`OIDC_ENABLED=true`). For its OUTBOUND registry API calls, mcpgw's `_get_registry_headers` picks a credential by priority — static `REGISTRY_API_TOKEN`, else its own M2M token, else (fallback) the caller's bearer. So in the common deployment mcpgw reaches the registry as **itself** (M2M), not by forwarding the user's token again.
 
@@ -236,17 +236,18 @@ On an A2A agent path (`{root}/agent/{agent_path}/...`) the gateway enforces stri
 
 ## The egress modes
 
-`egress_auth_mode` on the server entry selects how the gateway obtains the outbound credential. Today the **no-auth** and **vault-OAuth (3LO)** paths are implemented; the others are designed and reserved.
+`egress_auth_mode` on the server entry selects how the gateway obtains the outbound credential.
 
 | Mode | Vault used? | How the egress credential is obtained | Status |
 |------|-------------|----------------------------------------|--------|
 | **`none` (no egress auth)** | No | The server needs no upstream credential. All client auth headers are stripped on egress; nothing is injected. The default for every server. | **Implemented** (`egress_auth_mode = "none"`) |
 | **`vault-oauth` (3LO)** | Yes | User completes provider OAuth (3LO) out of band; the gateway vaults the per-user token and injects it. This document's main flow. | **Implemented** (`egress_auth_mode = "oauth_user"`) |
 | **`token-exchange` (OBO)** | No | For same-trust-domain backends, the gateway exchanges the user's ingress token for a backend-audience token (Entra `jwt-bearer` / Keycloak RFC 8693). `sub` preserved; nothing stored. | **Implemented** (`egress_auth_mode = "obo_exchange"`; Entra `jwt-bearer` today, Keycloak RFC 8693 next) |
+| **`ingress-relay`** | No | For an operator-approved same-trust-domain backend, the gateway forwards the original ingress `Authorization` bearer token unchanged. `X-Authorization` and cookies remain stripped. | **Implemented** (`egress_auth_mode = "ingress_relay"`; requires `EGRESS_INGRESS_RELAY_ALLOWED_SERVERS`) |
 | **`vault-pat` (PAT)** | Yes | A per-user static Personal Access Token / API key is stored in the vault and injected. No OAuth dance. | **Placeholder — not implemented** |
 | **custom-header** | Yes | A per-user credential the operator specifies by header **name + value**, stored in the vault and injected verbatim on egress. For backends with a bespoke/out-of-band auth scheme. Generalizes `vault-pat`. | **Placeholder — not implemented (planned with PAT)** |
 
-> **Internal relay (not a configurable mode).** The built-in `airegistry-tools` server receives the relayed ingress `Authorization` via a hardcoded constant (see "First principle" above). It is not an `egress_auth_mode` value and is not selectable per server — external servers that need an upstream credential use the vault modes above.
+> **Built-in relay.** The built-in `airegistry-tools` server retains its hardcoded same-trust-domain relay. Other operator-controlled servers must use `ingress_relay` and be explicitly allowlisted by path; the default-empty allowlist denies all configured relays.
 
 ### `none` (no egress auth) — implemented
 
@@ -261,6 +262,10 @@ The flow described throughout this document. `egress_auth_mode = "oauth_user"` o
 `egress_auth_mode = "obo_exchange"`. When the gateway IdP and the backend share a trust domain (e.g. M365 in the same Entra tenant), the gateway exchanges the user's verified ingress token for a token scoped to the backend's audience and injects that. `sub` is carried cryptographically across the exchange; **no vault, no refresh loop, nothing stored per user.** It fails closed: the ingress token is stripped and, on exchange failure, an error is returned — the ingress token is never relayed and there is no app-only (client-credentials) fallback that would drop the user identity. Its reach is limited to same-trust-domain backends — public SaaS (GitHub/Slack) does not federate with the gateway IdP, so those use `vault-oauth` instead.
 
 Provider support: **Microsoft Entra `jwt-bearer`** (the ingress token is the assertion, requesting the backend app audience) is implemented today. **Keycloak RFC 8693 token exchange** (ingress token as the subject token, backend as the audience) is the next phase and currently raises a not-implemented error. The exchange reuses the auth-server's configured IdP token endpoint and client credentials, runs on the async egress path, and logs no token material. Implementation: `auth_server/egress_obo.py` (`obo_exchange`) and the `mcp_proxy` egress hop in `auth_server/server.py`.
+
+### `ingress-relay` — implemented
+
+`egress_auth_mode = "ingress_relay"` forwards the exact ingress `Authorization` header only after the registry re-verifies the internal proxy token, binds its upstream to the registered server, and confirms the server path is present in `EGRESS_INGRESS_RELAY_ALLOWED_SERVERS`. The allowlist is whitespace-separated and empty by default. This mode is only appropriate for operator-controlled, same-trust-domain backends that independently validate the same issuer, audience, signature, and expiry as the gateway. Requests without an `Authorization` header fail with `401`; `X-Authorization` and cookies are never relayed.
 
 ### `vault-pat` (PAT) — placeholder
 

@@ -491,13 +491,27 @@ curl -X POST "https://mcpgateway.example.com/api/servers/github-mcp/mcp/egress-a
       }'
 ```
 
-- `egress_auth_mode`: `none` (default, feature off for this server) or
-  `oauth_user` (per-user OBO).
+- `egress_auth_mode`: `none` (default), `oauth_user` (per-user 3LO),
+  `obo_exchange`, or `ingress_relay`.
 - `client_secret` is **write-only** — it is Fernet-encrypted with the gateway
   `SECRET_KEY` at rest and never returned by the `GET` endpoint. Rotating
   `SECRET_KEY` invalidates stored secrets.
 - The `GET` response includes the `callback_url` to register in the provider's
   OAuth app.
+
+To relay the original gateway bearer token to an operator-controlled server, first set `EGRESS_INGRESS_RELAY_ALLOWED_SERVERS` to a whitespace-separated list containing its canonical path, enable egress auth, and then configure the server:
+
+```bash
+export EGRESS_AUTH_ENABLED=true
+export EGRESS_INGRESS_RELAY_ALLOWED_SERVERS="/internal-mcp"
+
+curl -X POST "https://mcpgateway.example.com/api/servers/internal-mcp/egress-auth" \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"egress_auth_mode":"ingress_relay"}'
+```
+
+The downstream server must validate the relayed token against the same trusted issuer, audience, signature, and expiry. The operator allowlist is empty by default and is re-checked on every relay vend.
 
 For a custom OIDC provider:
 

@@ -992,9 +992,7 @@ class TestValidateEndpoint:
 
         import auth_server.server as server_module
 
-        monkeypatch.setattr(
-            server_module.settings, "a2a_shared_gateway_agent_token_enabled", True
-        )
+        monkeypatch.setattr(server_module.settings, "a2a_shared_gateway_agent_token_enabled", True)
 
         with (
             patch(
@@ -1037,9 +1035,7 @@ class TestValidateEndpoint:
 
         import auth_server.server as server_module
 
-        monkeypatch.setattr(
-            server_module.settings, "a2a_shared_gateway_agent_token_enabled", True
-        )
+        monkeypatch.setattr(server_module.settings, "a2a_shared_gateway_agent_token_enabled", True)
 
         with (
             patch(
@@ -1082,9 +1078,7 @@ class TestValidateEndpoint:
 
         import auth_server.server as server_module
 
-        monkeypatch.setattr(
-            server_module.settings, "a2a_shared_gateway_agent_token_enabled", False
-        )
+        monkeypatch.setattr(server_module.settings, "a2a_shared_gateway_agent_token_enabled", False)
 
         with (
             patch(
@@ -4021,6 +4015,59 @@ class _FakeEntraProvider:
     client_id = "gw-client"
     client_secret = "gw-secret"
     token_url = "https://login.microsoftonline.com/t/oauth2/v2.0/token"
+
+
+class TestMcpProxyIngressRelay:
+    @staticmethod
+    async def _relay_directive_vend(token, server):
+        return {"mode": "ingress_relay"}
+
+    def test_relay_directive_forwards_authorization_only(self):
+        import auth_server.server as server_module
+
+        patch_httpx, captured = _capture_upstream_headers()
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", self._relay_directive_vend),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+            _patch_scope_repo_allow_all(),
+            patch_httpx,
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/relay-server",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers={
+                    **_mcp_proxy_token_headers(server_name="relay-server"),
+                    "Authorization": "Bearer original-access-token",
+                    "X-Authorization": "Bearer gateway-only-token",
+                    "Cookie": "session=secret",
+                },
+            )
+
+        assert response.status_code == 200
+        forwarded = {key.lower(): value for key, value in captured["headers"].items()}
+        assert forwarded["authorization"] == "Bearer original-access-token"
+        assert "x-authorization" not in forwarded
+        assert "cookie" not in forwarded
+
+    def test_relay_directive_without_authorization_fails_closed(self):
+        import auth_server.server as server_module
+
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", self._relay_directive_vend),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+            _patch_scope_repo_allow_all(),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/relay-server",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers=_mcp_proxy_token_headers(server_name="relay-server"),
+            )
+
+        assert response.status_code == 401
 
 
 class TestMcpProxyOboExchange:

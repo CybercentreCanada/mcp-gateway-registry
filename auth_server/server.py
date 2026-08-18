@@ -33,7 +33,7 @@ import requests
 import uvicorn
 import yaml
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 # Import metrics middleware
@@ -6505,10 +6505,9 @@ async def mcp_proxy(
     proxy_timeout = _read_mcp_proxy_timeout()
 
     # Ingress-auth policy (issue #1266): client auth headers authenticate the
-    # caller to the gateway and are stripped on egress. The ONLY exception is
-    # the built-in internal registry-tools server, which receives the relayed
-    # Authorization (it is a same-trust-domain component). The decision keys on
-    # the verified, path-validated `server` claim, never a forgeable header.
+    # caller to the gateway and are stripped on egress. The built-in registry
+    # tools server remains the only path-based exception. Configured relays are
+    # enabled later only by a trusted registry vend directive.
     registered_server = (claims.get("server") or "").lower()
     relay_ingress_auth = registered_server in _INTERNAL_INGRESS_RELAY_SERVERS
     forward_headers = _forward_headers(
@@ -6540,7 +6539,21 @@ async def mcp_proxy(
         if internal_proxy_token:
             server_first_segment = (server_name or "").split("/", 1)[0]
             vend = await _vend_egress_token(internal_proxy_token, server_first_segment)
-            if vend and vend.get("mode") == "obo_exchange":
+            if vend and vend.get("mode") == "ingress_relay":
+                if not request.headers.get("Authorization"):
+                    logger.warning(
+                        "mcp_proxy: ingress_relay server=%s but no Authorization header; rejecting",
+                        server_name,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Ingress relay requires an Authorization header",
+                    )
+                forward_headers = _forward_headers(
+                    dict(request.headers),
+                    relay_authorization=True,
+                )
+            elif vend and vend.get("mode") == "obo_exchange":
                 # OBO exchange: re-audience the user's ingress JWT to the internal
                 # MCP server's app via the gateway's OWN IdP credentials. The
                 # registry returned only the DIRECTIVE (target_audience+scopes),

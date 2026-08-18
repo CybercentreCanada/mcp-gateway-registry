@@ -457,6 +457,9 @@ egressAuth:
   # When empty, a shape rule applies: the target must be an internal app audience
   # (api:// App ID URI or bare client-id/GUID), never an https host URL.
   oboAllowedAudiences: ""
+  # Server paths allowed to relay the caller's original Authorization bearer
+  # token to the registered upstream. Whitespace-separated; empty denies all.
+  ingressRelayAllowedServers: ""
   # nginx marker secret. REQUIRED for standalone deployment (chart render fails
   # if empty) -- it guards all mcp-proxy token minting and the app requires it
   # at startup. Set a strong random value, identical to auth-server's. In the

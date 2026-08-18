@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   # OpenBao - per-user egress credential vault (third-party OBO support).
@@ -90,6 +90,7 @@ services:
       - EGRESS_TOKEN_REFRESH_SKEW_SECONDS=${EGRESS_TOKEN_REFRESH_SKEW_SECONDS:-300}
       - EGRESS_STATE_TTL_SECONDS=${EGRESS_STATE_TTL_SECONDS:-600}
       - EGRESS_OBO_ALLOWED_AUDIENCES=${EGRESS_OBO_ALLOWED_AUDIENCES:-}
+      - EGRESS_INGRESS_RELAY_ALLOWED_SERVERS=${EGRESS_INGRESS_RELAY_ALLOWED_SERVERS:-}
       - AUTH_SERVER_NGINX_MARKER_SECRET=${AUTH_SERVER_NGINX_MARKER_SECRET:-}
       - AWS_SECRETS_REGION=${AWS_SECRETS_REGION:-}
       - SECRETS_MANAGER_KMS_KEY_ID=${SECRETS_MANAGER_KMS_KEY_ID:-}
@@ -318,8 +319,8 @@ services:
       - INTERNAL_TOKEN_TTL_SECONDS=${INTERNAL_TOKEN_TTL_SECONDS:-30}
       - INTERNAL_TOKEN_LEEWAY_SECONDS=${INTERNAL_TOKEN_LEEWAY_SECONDS:-5}
     ports:
-      - "80:8080"   # Map host 80 to container 8080 (non-root nginx)
-      - "443:8443"  # Map host 443 to container 8443 (non-root nginx)
+      - "80:8080" # Map host 80 to container 8080 (non-root nginx)
+      - "443:8443" # Map host 443 to container 8443 (non-root nginx)
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -434,8 +435,8 @@ services:
       - OTEL_EXPORTER_PROMETHEUS_HOST=${OTEL_EXPORTER_PROMETHEUS_HOST:-0.0.0.0}
       - OTEL_EXPORTER_PROMETHEUS_PORT=${OTEL_EXPORTER_PROMETHEUS_PORT:-9464}
       # Keycloak configuration
-      - AUTH_PROVIDER=${AUTH_PROVIDER:-cognito}  # 'cognito' or 'keycloak'
-      - KEYCLOAK_ENABLED=${KEYCLOAK_ENABLED:-true}  # Enable Keycloak by default
+      - AUTH_PROVIDER=${AUTH_PROVIDER:-cognito} # 'cognito' or 'keycloak'
+      - KEYCLOAK_ENABLED=${KEYCLOAK_ENABLED:-true} # Enable Keycloak by default
       - KEYCLOAK_URL=${KEYCLOAK_URL:-http://keycloak:8080}
       # Podman note: host port 8080 is used by the registry UI (8080->80),
       # so Keycloak is exposed on 18080->8080 by default in this Podman compose.
@@ -616,14 +617,18 @@ services:
       - "${HOST_BIND_IP:-127.0.0.1}:8002:8002"
     restart: unless-stopped
 
-
   # SQLite container for metrics database
   metrics-db:
     # Pinned (not :latest) so rebuilds are reproducible.
     image: alpine:3.21
     volumes:
       - metrics-db-data:/var/lib/sqlite
-    command: ["sh", "-c", "apk add --no-cache sqlite && mkdir -p /var/lib/sqlite && sqlite3 /var/lib/sqlite/metrics.db 'CREATE TABLE IF NOT EXISTS _health (id INTEGER);' && tail -f /dev/null"]
+    command:
+      [
+        "sh",
+        "-c",
+        "apk add --no-cache sqlite && mkdir -p /var/lib/sqlite && sqlite3 /var/lib/sqlite/metrics.db 'CREATE TABLE IF NOT EXISTS _health (id INTEGER);' && tail -f /dev/null",
+      ]
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -646,12 +651,12 @@ services:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus-data:/prometheus
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
-      - '--storage.tsdb.retention.time=200h'
-      - '--web.enable-lifecycle'
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--storage.tsdb.retention.time=200h"
+      - "--web.enable-lifecycle"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -707,7 +712,7 @@ services:
     # keycloak/import/realm-config.json is not imported here (it is not compatible
     # with stock --import-realm on this Keycloak version), so do NOT add
     # --import-realm expecting it to work -- run init-keycloak.sh instead.
-    command: start-dev  # Use 'start' for production with proper SSL
+    command: start-dev # Use 'start' for production with proper SSL
     environment:
       # Database configuration
       KC_DB: postgres
@@ -722,11 +727,11 @@ services:
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set KEYCLOAK_ADMIN_PASSWORD in .env}
 
       # HTTP configuration
-      KC_HTTP_ENABLED: 'true'
+      KC_HTTP_ENABLED: "true"
       KC_HTTP_PORT: 8080
-      KC_HOSTNAME_STRICT: 'false'
-      KC_HOSTNAME_STRICT_HTTPS: 'false'
-      KC_PROXY: edge  # Running behind nginx
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_PROXY: edge # Running behind nginx
 
       # Frontend URL for external JWT issuer
       # Podman note: host port 8080 is used by the registry UI (8080->80),
@@ -740,7 +745,7 @@ services:
       KC_LOG_LEVEL: INFO
 
       # Health endpoints (required for /health/ready)
-      KC_HEALTH_ENABLED: 'true'
+      KC_HEALTH_ENABLED: "true"
 
     ports:
       # Loopback-only: Keycloak is reached through the nginx front door in normal use.
@@ -778,7 +783,11 @@ services:
       - pingfederate-data:/opt/out/instance/server/default/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -ksf https://localhost:9031/pf/heartbeat.ping || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "curl -ksf https://localhost:9031/pf/heartbeat.ping || exit 1",
+        ]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -807,10 +816,10 @@ services:
     cap_drop:
       - ALL
     cap_add:
-      - SETUID   # Required by gosu to switch to mongodb user at startup
-      - SETGID   # Required by gosu to switch to mongodb group at startup
-      - CHOWN    # Required by entrypoint to fix /data/db ownership
-      - DAC_OVERRIDE  # Required by entrypoint to read /data/db before chown
+      - SETUID # Required by gosu to switch to mongodb user at startup
+      - SETGID # Required by gosu to switch to mongodb group at startup
+      - CHOWN # Required by entrypoint to fix /data/db ownership
+      - DAC_OVERRIDE # Required by entrypoint to read /data/db before chown
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 60s

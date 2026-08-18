@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 # DocumentDB Initialization:
 # For AWS DocumentDB Elastic Cluster setup, run the initialization script:
@@ -64,15 +64,27 @@ services:
     cap_drop:
       - ALL
     cap_add:
-      - SETUID   # Required by gosu to switch to mongodb user at startup
-      - SETGID   # Required by gosu to switch to mongodb group at startup
-      - CHOWN    # Required by entrypoint to fix /data/db ownership
-      - DAC_OVERRIDE  # Required by entrypoint to read /data/db before chown
+      - SETUID # Required by gosu to switch to mongodb user at startup
+      - SETGID # Required by gosu to switch to mongodb group at startup
+      - CHOWN # Required by entrypoint to fix /data/db ownership
+      - DAC_OVERRIDE # Required by entrypoint to read /data/db before chown
     depends_on:
       mongodb-keyfile-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "mongosh", "-u", "${DOCUMENTDB_USERNAME}", "-p", "${DOCUMENTDB_PASSWORD}", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping')"]
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "-u",
+          "${DOCUMENTDB_USERNAME}",
+          "-p",
+          "${DOCUMENTDB_PASSWORD}",
+          "--authenticationDatabase",
+          "admin",
+          "--eval",
+          "db.adminCommand('ping')",
+        ]
       interval: 60s
       timeout: 5s
       retries: 5
@@ -213,6 +225,7 @@ services:
       - EGRESS_TOKEN_REFRESH_SKEW_SECONDS=${EGRESS_TOKEN_REFRESH_SKEW_SECONDS:-300}
       - EGRESS_STATE_TTL_SECONDS=${EGRESS_STATE_TTL_SECONDS:-600}
       - EGRESS_OBO_ALLOWED_AUDIENCES=${EGRESS_OBO_ALLOWED_AUDIENCES:-}
+      - EGRESS_INGRESS_RELAY_ALLOWED_SERVERS=${EGRESS_INGRESS_RELAY_ALLOWED_SERVERS:-}
       - EGRESS_CONSENT_USE_ELICITATION=${EGRESS_CONSENT_USE_ELICITATION:-false}
       - AUTH_SERVER_NGINX_MARKER_SECRET=${AUTH_SERVER_NGINX_MARKER_SECRET:-}
       - AWS_SECRETS_REGION=${AWS_SECRETS_REGION:-}
@@ -482,8 +495,8 @@ services:
       - INTERNAL_TOKEN_TTL_SECONDS=${INTERNAL_TOKEN_TTL_SECONDS:-30}
       - INTERNAL_TOKEN_LEEWAY_SECONDS=${INTERNAL_TOKEN_LEEWAY_SECONDS:-5}
     ports:
-      - "80:8080"   # Map host 80 to container 8080 (non-root nginx)
-      - "443:8443"  # Map host 443 to container 8443 (non-root nginx)
+      - "80:8080" # Map host 80 to container 8080 (non-root nginx)
+      - "443:8443" # Map host 443 to container 8443 (non-root nginx)
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -624,8 +637,8 @@ services:
       - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
       - OTEL_SERVICE_NAME=mcp-auth-server
       # Keycloak configuration
-      - AUTH_PROVIDER=${AUTH_PROVIDER:-cognito}  # 'cognito' or 'keycloak'
-      - KEYCLOAK_ENABLED=${KEYCLOAK_ENABLED:-true}  # Enable Keycloak by default
+      - AUTH_PROVIDER=${AUTH_PROVIDER:-cognito} # 'cognito' or 'keycloak'
+      - KEYCLOAK_ENABLED=${KEYCLOAK_ENABLED:-true} # Enable Keycloak by default
       - KEYCLOAK_URL=${KEYCLOAK_URL:-http://keycloak:8080}
       - KEYCLOAK_EXTERNAL_URL=${KEYCLOAK_EXTERNAL_URL:-http://localhost:8080}
       - KEYCLOAK_REALM=${KEYCLOAK_REALM:-mcp-gateway}
@@ -882,8 +895,8 @@ services:
       # Loopback-only OTLP receivers so a locally-run (non-compose) service can
       # still push to the collector via localhost. Compose services push over the
       # container network (otel-collector:4317) regardless of these mappings.
-      - "${HOST_BIND_IP:-127.0.0.1}:4317:4317"   # OTLP gRPC (services push here)
-      - "${HOST_BIND_IP:-127.0.0.1}:4318:4318"   # OTLP HTTP
+      - "${HOST_BIND_IP:-127.0.0.1}:4317:4317" # OTLP gRPC (services push here)
+      - "${HOST_BIND_IP:-127.0.0.1}:4318:4318" # OTLP HTTP
       # 8889 (Prometheus exporter) is scraped container-to-container (see
       # config/prometheus.yml job 'otel-collector' -> otel-collector:8889) and
       # 13133 (health_check) is used only by the in-container healthcheck below,
@@ -911,12 +924,12 @@ services:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus-data:/prometheus
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
-      - '--storage.tsdb.retention.time=200h'
-      - '--web.enable-lifecycle'
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--storage.tsdb.retention.time=200h"
+      - "--web.enable-lifecycle"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -969,7 +982,7 @@ services:
   # Keycloak Identity Provider
   keycloak:
     image: quay.io/keycloak/keycloak:25.0
-    command: start-dev  # Use 'start' for production with proper SSL
+    command: start-dev # Use 'start' for production with proper SSL
     environment:
       # Database configuration
       KC_DB: postgres
@@ -984,11 +997,11 @@ services:
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set KEYCLOAK_ADMIN_PASSWORD in .env}
 
       # HTTP configuration
-      KC_HTTP_ENABLED: 'true'
+      KC_HTTP_ENABLED: "true"
       KC_HTTP_PORT: 8080
-      KC_HOSTNAME_STRICT: 'false'
-      KC_HOSTNAME_STRICT_HTTPS: 'false'
-      KC_PROXY: edge  # Running behind nginx
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_PROXY: edge # Running behind nginx
 
       # Frontend URL for external JWT issuer
       KC_FRONTEND_URL: ${KEYCLOAK_EXTERNAL_URL:-http://localhost:8080}
@@ -1051,7 +1064,11 @@ services:
       - ./pingfederate/config/run.properties:/opt/staging/instance/bin/run.properties
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -ksf https://localhost:9031/pf/heartbeat.ping || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "curl -ksf https://localhost:9031/pf/heartbeat.ping || exit 1",
+        ]
       interval: 30s
       timeout: 5s
       retries: 5

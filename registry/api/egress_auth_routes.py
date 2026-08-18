@@ -34,7 +34,7 @@ from registry.auth.dependencies import nginx_proxied_auth
 from registry.auth.internal import validate_internal_auth
 from registry.auth.proxied_token import verify_mcp_proxy_token
 from registry.core.config import settings
-from registry.core.schemas import _is_gateway_own_audience
+from registry.core.schemas import _ingress_relay_server_allowlist, _is_gateway_own_audience
 from registry.egress_auth.factory import get_egress_auth_service
 from registry.egress_auth.providers import list_provider_names, resolve_provider
 from registry.egress_auth.service import EgressAuthError, is_per_user_auth_method
@@ -159,8 +159,8 @@ class EgressTokenResponse(BaseModel):
     # auth_server, which holds the gateway's IdP creds and the raw ingress JWT).
     mode: str | None = Field(
         default=None,
-        description="Egress mode for this server: 'obo_exchange' when the caller "
-        "should perform a same-IdP OBO token exchange instead of a vault vend.",
+        description="Egress directive: 'obo_exchange' for same-IdP token exchange or "
+        "'ingress_relay' for operator-approved bearer-token relay.",
     )
     obo_target_audience: str | None = Field(
         default=None,
@@ -229,11 +229,6 @@ async def vend_egress_token(
     auth_method = claims.get("auth_method") or ""
     token_upstream = claims.get("upstream_url") or ""
 
-    # Only real per-user principals may vend.
-    if not is_per_user_auth_method(auth_method):
-        logger.info("egress vend: non-per-user auth_method %r -> consent", auth_method)
-        return EgressTokenResponse(consent_required=True)
-
     # Normalize the server path: mcp_proxy passes the first path segment without a
     # leading slash ("github"), but server entries, the vault key, and the consent
     # state all use the slash-prefixed path ("/github"). Without this, the lookup
@@ -246,7 +241,9 @@ async def vend_egress_token(
 
     # Per-server enablement: a misconfigured/half-deleted server never vends.
     egress_mode = server.get("egress_auth_mode")
-    if egress_mode not in ("oauth_user", "obo_exchange") or not server.get("egress_oauth"):
+    if egress_mode not in ("oauth_user", "obo_exchange", "ingress_relay"):
+        return EgressTokenResponse(consent_required=True)
+    if egress_mode in ("oauth_user", "obo_exchange") and not server.get("egress_oauth"):
         return EgressTokenResponse(consent_required=True)
 
     # The bound upstream MUST match a registered upstream for this server. This
@@ -263,6 +260,20 @@ async def vend_egress_token(
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, detail="upstream not registered for this server"
         )
+
+    if egress_mode == "ingress_relay":
+        if server_path.lower() not in _ingress_relay_server_allowlist():
+            logger.warning("egress vend REFUSED: ingress_relay server is not operator-allowlisted")
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="ingress relay is not operator-allowed for this server",
+            )
+        return EgressTokenResponse(mode="ingress_relay")
+
+    # Only real per-user principals may address the OAuth vault or run OBO.
+    if not is_per_user_auth_method(auth_method):
+        logger.info("egress vend: non-per-user auth_method %r -> consent", auth_method)
+        return EgressTokenResponse(consent_required=True)
 
     egress_oauth = server["egress_oauth"]
 
@@ -335,7 +346,7 @@ async def vend_egress_token(
 class EgressConfigRequest(BaseModel):
     """Configure egress auth on a server (admin/registrant)."""
 
-    egress_auth_mode: str = "oauth_user"  # "none" | "oauth_user" | "obo_exchange"
+    egress_auth_mode: str = "oauth_user"
     egress_provider: str = ""
     client_id: str = ""
     client_secret: str | None = None  # write-only; encrypted, never echoed
@@ -505,6 +516,15 @@ async def configure_egress_auth(
             "target_audience": target,
             "scopes": body.scopes,
         }
+    elif body.egress_auth_mode == "ingress_relay":
+        normalized_path = "/" + server_path.strip().lower().strip("/")
+        if normalized_path not in _ingress_relay_server_allowlist():
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="server is not listed in EGRESS_INGRESS_RELAY_ALLOWED_SERVERS",
+            )
+        server["egress_auth_mode"] = "ingress_relay"
+        server["egress_oauth"] = None
     else:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="invalid egress_auth_mode")
 

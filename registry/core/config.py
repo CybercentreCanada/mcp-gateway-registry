@@ -1314,6 +1314,13 @@ class Settings(BaseSettings):
             "an explicit, audited set of internal server audiences."
         ),
     )
+    egress_ingress_relay_allowed_servers: str = Field(
+        default="",
+        description=(
+            "Operator allowlist for ingress_relay server paths (whitespace-separated). "
+            "Empty denies ingress token relay for every registered server."
+        ),
+    )
     auth_server_nginx_marker_secret: str = Field(
         default="",
         description=(

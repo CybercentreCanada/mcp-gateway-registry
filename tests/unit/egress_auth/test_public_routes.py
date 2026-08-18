@@ -111,6 +111,34 @@ class TestConfigure:
         )
         assert r.status_code == 400
 
+    def test_configure_ingress_relay_for_allowlisted_server(self, client, monkeypatch):
+        monkeypatch.setattr(
+            routes.settings,
+            "egress_ingress_relay_allowed_servers",
+            "/github-mcp",
+        )
+        c = client(ADMIN, server=_server())
+
+        r = c.post(
+            "/api/servers/github-mcp/egress-auth",
+            json={"egress_auth_mode": "ingress_relay"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["egress_auth_mode"] == "ingress_relay"
+        assert r.json()["egress_provider"] is None
+
+    def test_configure_ingress_relay_rejects_unlisted_server(self, client, monkeypatch):
+        monkeypatch.setattr(routes.settings, "egress_ingress_relay_allowed_servers", "")
+        c = client(ADMIN, server=_server())
+
+        r = c.post(
+            "/api/servers/github-mcp/egress-auth",
+            json={"egress_auth_mode": "ingress_relay"},
+        )
+
+        assert r.status_code == 403
+
     def test_configure_custom_missing_urls_400(self, client, monkeypatch):
         monkeypatch.setattr(routes, "encrypt_credential", lambda s: "ENC")
         c = client(ADMIN, server=_server())
