@@ -90,6 +90,18 @@ class TestGenerateAgentLocationBlocks:
         assert "{{ROOT_PATH}}/agent/flight-booking-agent/.well-known/agent-card.json" in result
 
     @pytest.mark.asyncio
+    async def test_includes_slashless_agent_redirect(self, patched_agent_service):
+        """A slashless /agent/{path} request is canonicalized to the proxied route."""
+        patched_agent_service.get_enabled_agents = AsyncMock(return_value=["/flight-booking-agent"])
+        patched_agent_service.get_agent_info = AsyncMock(return_value=_agent())
+        service = NginxConfigService()
+
+        result = await service._generate_agent_location_blocks()
+
+        assert "location = {{ROOT_PATH}}/agent/flight-booking-agent {" in result
+        assert "return 308 $real_scheme://$host$request_uri/;" in result
+
+    @pytest.mark.asyncio
     async def test_block_enforces_auth_request(self, patched_agent_service):
         """Generated blocks are protected by the /validate auth subrequest."""
         patched_agent_service.get_enabled_agents = AsyncMock(return_value=["/flight-booking-agent"])

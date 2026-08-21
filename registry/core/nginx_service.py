@@ -1942,6 +1942,16 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         route = f"{AGENT_ROUTE_PREFIX}/{agent_path}"
 
         return f"""
+    # Canonicalize slashless A2A agent URLs to the proxied route. Without this,
+    # /agent/<path> misses the prefix location below and falls through to the
+    # generic application route instead of the agent backend. Build the redirect
+    # from $real_scheme (X-Forwarded-Proto aware) so a TLS-terminating ingress
+    # does not get an http:// Location that bounces back into an https redirect
+    # loop ("too many redirects").
+    location = {{{{ROOT_PATH}}}}{route} {{
+        return 308 $real_scheme://$host$request_uri/;
+    }}
+
     # A2A agent card (discovery): {safe_name}
     # Exact match so suffixes (e.g. /.well-known/agent-card.json/../secret)
     # cannot be smuggled through this proxy.
@@ -2010,8 +2020,8 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         proxy_set_header Host {host_header};
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Original-URL $scheme://$host$request_uri;
+        proxy_set_header X-Forwarded-Proto $real_scheme;
+        proxy_set_header X-Original-URL $real_scheme://$host$request_uri;
         # SECURITY (A2A egress trust model): X-Authorization carries the caller's
         # gateway credential -- it is validated at /validate and MUST NOT reach
         # this registrant-controlled backend, or a malicious agent could replay

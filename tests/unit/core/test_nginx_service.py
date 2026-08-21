@@ -2075,6 +2075,21 @@ async def test_generated_virtual_server_block_is_rate_limited(nginx_service):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_declares_real_scheme_map(conf_path):
+    """Both templates must define $real_scheme so Python-generated blocks resolve it.
+
+    The agent location blocks are generated in nginx_service.py and injected into
+    whichever template is active. They build the slashless-redirect Location and
+    X-Forwarded-Proto from $real_scheme; if a template failed to declare the map,
+    nginx would reject the config with "unknown variable" and, before that guard
+    existed, a raw $scheme redirect looped behind a TLS-terminating ingress.
+    """
+    text = conf_path.read_text()
+    assert "map $http_x_forwarded_proto $real_scheme {" in text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
 def test_conf_declares_rate_limit_zones(conf_path):
     """Both nginx conf templates must declare the rate-limit zones at http scope."""
     text = conf_path.read_text()
