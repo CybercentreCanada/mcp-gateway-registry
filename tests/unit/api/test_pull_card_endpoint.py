@@ -10,13 +10,14 @@ Covers testing.md sections 1.1.x (functional/permission) and 6.6.x (apply path).
 """
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
 
 from registry.api.agent_routes import router
+from registry.core.config import settings
 from tests.fixtures.factories import AgentCardFactory
 
 AGENT_PATH = "/test-a2a-agent"
@@ -129,6 +130,29 @@ class TestPullCardDryRun:
 
 
 class TestPullCardApply:
+    def test_reverse_proxy_preserves_advertised_url(self, test_client):
+        agent = _a2a_agent(
+            url="https://registry.example.com/agent/test-a2a-agent/",
+            proxy_pass_url="https://backend.example.com/a2a",
+        )
+        with patch.object(
+            type(settings),
+            "a2a_reverse_proxy_effective",
+            new_callable=PropertyMock,
+            return_value=True,
+        ):
+            resp, svc = _run(
+                test_client,
+                agent,
+                {"url": "https://backend.example.com/a2a", "version": "2.0.0"},
+                query="?dry_run=false",
+            )
+
+        assert resp.status_code == 200
+        written = svc.update_agent.await_args.args[1]
+        assert written["version"] == "2.0.0"
+        assert "url" not in written
+
     def test_113_apply_updates_a2a_and_preserves_registry(self, test_client):
         agent = _a2a_agent(version="1.0.0")
         resp, svc = _run(

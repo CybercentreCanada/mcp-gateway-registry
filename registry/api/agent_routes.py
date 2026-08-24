@@ -2016,6 +2016,10 @@ async def pull_agent_card(
 
     # 7. Compute diff (A2A-spec fields only)
     changes = _compute_card_diff(existing_agent, remote_card)
+    if settings.a2a_reverse_proxy_effective:
+        # The card is fetched from the backend, whose URL is expected to differ
+        # from the reverse proxy URL advertised by the registry.
+        changes = [change for change in changes if change.field != "url"]
     has_changes = len(changes) > 0
 
     # S3: a change to the agent's URL could indicate a redirect/takeover, so log
