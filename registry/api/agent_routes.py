@@ -1619,9 +1619,7 @@ async def toggle_agent(
             detail=f"Agent not found at path '{path}'",
         )
 
-    # Registrant may toggle their own agent without toggle_service permission.
-    if agent_card.registered_by != user_context.get("username"):
-        _check_agent_permission("toggle_service", agent_card.name, user_context)
+    _check_agent_permission("toggle_service", agent_card.name, user_context)
 
     # Per-resource access check for non-admins, mirroring the server toggle
     # (POST /api/servers/toggle). Having toggle_service permission is not
@@ -2001,13 +1999,8 @@ async def pull_agent_card(
             detail="Pull card is only supported for A2A protocol agents",
         )
 
-    # 5. Fetch remote card. In A2A reverse-proxy mode the advertised `url` is the
-    #    gateway address (auth-guarded + body-rewritten), so the pristine card
-    #    lives on the registrant's real backend in `proxy_pass_url`. Prefer it and
-    #    fall back to `url` (registry-only mode / pre-split agents), mirroring
-    #    _probe_agent_backend_health.
-    backend_url = getattr(existing_agent, "proxy_pass_url", None) or existing_agent.url
-    base_url = str(backend_url).rstrip("/")
+    # 5. Fetch remote card
+    base_url = str(existing_agent.url).rstrip("/")
 
     remote_card_raw, remote_card_url = await _fetch_remote_agent_card(base_url)
 

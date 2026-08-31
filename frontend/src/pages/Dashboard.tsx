@@ -2191,7 +2191,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
                       onEdit={handleEditServer}
                       canModify={user?.can_modify_servers || false}
                       canHealthCheck={user?.is_admin || hasUiPermission('health_check_service', server.path)}
-                      canToggle={user?.is_admin || hasUiPermission('toggle_service', server.path) || server.registered_by === user?.username}
+                      canToggle={user?.is_admin || hasUiPermission('toggle_service', server.path)}
                       canDelete={(user?.is_admin || hasUiPermission('delete_service', server.path)) && !server.sync_metadata?.is_federated}
                       onDelete={handleDeleteServer}
                       onRefreshSuccess={refreshData}
@@ -2384,7 +2384,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
                       onEdit={handleEditAgent}
                       canModify={user?.can_modify_servers || false}
                       canHealthCheck={user?.is_admin || hasUiPermission('health_check_agent', agent.path)}
-                      canToggle={user?.is_admin || hasUiPermission('toggle_agent', agent.path) || agent.registered_by === user?.username}
+                      canToggle={user?.is_admin || hasUiPermission('toggle_agent', agent.path)}
                       canDelete={
                         (user?.is_admin ||
                         hasUiPermission('delete_agent', agent.path) ||
@@ -2447,7 +2447,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
             onShowToast={showToast}
             onSkillUpdate={handleSkillUpdate}
             canToggleSkill={(skill) =>
-              user?.is_admin || hasUiPermission('toggle_skill', skill.path) || skill.owner === user?.username
+              user?.is_admin || hasUiPermission('toggle_skill', skill.path)
             }
           />
         )}
@@ -2510,7 +2510,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
               onEdit={handleEditAgent}
               canModify={user?.can_modify_servers || false}
               canHealthCheck={user?.is_admin || hasUiPermission('health_check_agent', agent.path)}
-              canToggle={user?.is_admin || hasUiPermission('toggle_agent', agent.path) || agent.registered_by === user?.username}
+              canToggle={user?.is_admin || hasUiPermission('toggle_agent', agent.path)}
               canDelete={
                 (user?.is_admin ||
                 hasUiPermission('delete_agent', agent.path) ||
@@ -2531,7 +2531,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
               onEdit={handleEditSkill}
               onDelete={(path) => setShowDeleteSkillConfirm(path)}
               canModify={user?.can_modify_servers || false}
-              canToggle={user?.is_admin || hasUiPermission('toggle_skill', skill.path) || skill.owner === user?.username}
+              canToggle={user?.is_admin || hasUiPermission('toggle_skill', skill.path)}
               onRefreshSuccess={refreshSkills}
               onShowToast={showToast}
               onSkillUpdate={handleSkillUpdate}
