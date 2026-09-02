@@ -1,0 +1,7 @@
+{
+  "scope_name": "trinity-developers/execute",
+  "description": "Scope for execute permissions",
+  "group_mappings": ["57ea5441-f8ba-4b74-bc04-cd0500bb12b3"],
+  "server_access": [],
+  "ui_permissions": {}
+}

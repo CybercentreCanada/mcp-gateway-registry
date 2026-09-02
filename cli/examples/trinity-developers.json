@@ -1,27 +1,25 @@
 {
   "scope_name": "trinity-developers",
-  "description": "Trinity developers role (ui_permissions only). Read all registry assets, register own agents/servers/skills. Cannot toggle, delete, or modify resources owned by others. MCP gateway server access comes from mcp-servers-unrestricted/execute (group mapped separately in MongoDB).",
+  "description": "Developers who may publish agents and skills; they also belong to everyone-public.",
   "group_mappings": [
     "57ea5441-f8ba-4b74-bc04-cd0500bb12b3"
   ],
   "server_access": [
     {
       "server": "api",
-      "methods": ["GET", "POST"],
+      "methods": ["GET", "POST", "PUT"],
       "tools": []
     }
   ],
   "ui_permissions": {
+    "publish_agent": ["*"],
     "list_agents": ["all"],
     "get_agent": ["all"],
-    "publish_agent": ["all"],
+    "modify_service": ["*"],
     "modify_agent": ["*"],
-    "delete_agent": ["*"],
-    "list_virtual_server": ["all"],
-    "list_service": ["all"],
+    "publish_skill": ["*"],
     "health_check_service": ["all"],
-    "publish_skill": ["all"]
-
-  }, 
+    "toggle_service": ["*"]
+  },
   "create_in_idp": false
 }

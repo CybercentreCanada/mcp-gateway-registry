@@ -1,26 +1,174 @@
 {
-  "scope_name": "read-all-register-new",
-  "scope_type": "server_scope",
-  "description": "Non-admin read-write users: can see ALL servers and agents, search, register new servers, and run health checks. Cannot toggle server enabled/disabled state, cannot change lifecycle status, and cannot delete servers. Newly registered servers are visible immediately because access is granted via the '*' wildcard.",
-  "group_mappings": ["cf3b775f-1540-4076-b59a-42fa9034531b"],
+  "scope_name": "trinity-all",
+  "scope_type": "group",
+  "description": "Everyone: view and use approved public MCP servers, and view public agents and skills. No add/edit/delete capability.",
+  "group_mappings": [
+    "cf3b775f-1540-4076-b59a-42fa9034531b"
+  ],
   "server_access": [
     {
+      "server": "airegistry-tools",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "agents": "*",
+      "actions": [
+        "list_agents",
+        "get_agent",
+        "invoke_agent"
+      ]
+    },
+    {
       "server": "alfred",
-      "methods": ["*"],
-      "tools": ["*"]
-    },    
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "server": "assemblyline",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "server": "atlassian",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "server": "aventail",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "server": "borealis",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "server": "cmt-mcp",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "server": "clue",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "server": "coucou",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "server": "datahub",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "server": "dynamics-crm",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "server": "howler",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "server": "rag",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    {
+      "server": "trino",
+      "methods": [
+        "*"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
     {
       "server": "api",
-      "methods": ["initialize", "GET", "POST", "servers", "search", "tokens"],
+      "methods": [
+        "initialize",
+        "GET",
+        "POST",
+        "servers",
+        "search",
+        "tokens"
+      ],
       "tools": []
     }
   ],
   "ui_permissions": {
-    "list_service": ["all"],
-    "list_agents": ["all"],
-    "get_agent": ["all"],
-    "list_virtual_server": ["all"],
-    "health_check_service": ["all"]
+    "list_service": [
+      "all"
+    ],
+    "health_check_service": [
+      "all"
+    ],
+    "list_agents": [
+      "all"
+    ],
+    "get_agent": [
+      "all"
+    ],
+    "list_virtual_server": [
+      "all"
+    ]
   },
   "create_in_idp": false
 }
