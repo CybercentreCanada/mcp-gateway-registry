@@ -760,6 +760,19 @@ def _check_agent_permission(
     """
     from ..auth.dependencies import user_has_ui_permission_for_service
 
+    # Admins always pass: is_admin is conferred via other "all" grants and the
+    # admin seed scopes don't enumerate every _agent action (e.g. toggle_agent).
+    if user_context.get("is_admin"):
+        return
+
+    # A "*" grant means "all agents without admin", matching how publish_agent
+    # and _user_is_admin treat "*". The shared helper only honors "all"/exact
+    # names, so recognize the wildcard here; owner/access checks at the call
+    # site still restrict which agents a non-admin may actually mutate.
+    granted = (user_context.get("ui_permissions") or {}).get(permission, [])
+    if "*" in granted:
+        return
+
     if not user_has_ui_permission_for_service(
         permission,
         agent_name,
@@ -1592,7 +1605,7 @@ async def toggle_agent(
     """
     Enable or disable an agent.
 
-    Requires toggle_service permission for the agent.
+    Requires toggle_agent permission for the agent.
 
     Args:
         path: Agent path
@@ -1619,7 +1632,7 @@ async def toggle_agent(
             detail=f"Agent not found at path '{path}'",
         )
 
-    _check_agent_permission("toggle_service", agent_card.name, user_context)
+    _check_agent_permission("toggle_agent", agent_card.name, user_context)
 
     # Per-resource access check for non-admins, mirroring the server toggle
     # (POST /api/servers/toggle). Having toggle_service permission is not
@@ -1968,8 +1981,8 @@ async def pull_agent_card(
             detail=f"Agent not found at path '{path}'",
         )
 
-    # 2. Check permissions (modify_service + owner or admin)
-    _check_agent_permission("modify_service", existing_agent.name, user_context)
+    # 2. Check permissions (modify_agent + owner or admin)
+    _check_agent_permission("modify_agent", existing_agent.name, user_context)
 
     if not user_context["is_admin"] and existing_agent.registered_by != user_context["username"]:
         raise HTTPException(
@@ -2195,7 +2208,7 @@ async def update_agent(
     """
     Update an existing agent card.
 
-    Requires modify_service permission for the agent.
+    Requires modify_agent permission for the agent.
     User must be agent owner or admin.
 
     Args:
@@ -2227,7 +2240,7 @@ async def update_agent(
             detail=f"Agent not found at path '{path}'",
         )
 
-    _check_agent_permission("modify_service", existing_agent.name, user_context)
+    _check_agent_permission("modify_agent", existing_agent.name, user_context)
 
     if not user_context["is_admin"] and existing_agent.registered_by != user_context["username"]:
         logger.warning(
@@ -2412,7 +2425,7 @@ async def patch_agent(
         )
 
     # Authorization (parity with PUT)
-    _check_agent_permission("modify_service", existing_agent.name, user_context)
+    _check_agent_permission("modify_agent", existing_agent.name, user_context)
     if not user_context["is_admin"] and existing_agent.registered_by != user_context["username"]:
         logger.warning(
             f"User {user_context['username']} attempted to patch agent {path} "
