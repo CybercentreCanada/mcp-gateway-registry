@@ -1,0 +1,25 @@
+{
+  "scope_name": "trinity-developers",
+  "description": "Developers who may publish agents and skills; they also belong to everyone-public.",
+  "group_mappings": [
+    "57ea5441-f8ba-4b74-bc04-cd0500bb12b3"
+  ],
+  "server_access": [
+    {
+      "server": "api",
+      "methods": ["GET", "POST", "PUT"],
+      "tools": []
+    }
+  ],
+  "ui_permissions": {
+    "publish_agent": ["*"],
+    "list_agents": ["all"],
+    "get_agent": ["all"],
+    "modify_service": ["*"],
+    "modify_agent": ["*"],
+    "publish_skill": ["*"],
+    "health_check_service": ["all"],
+    "toggle_service": ["*"]
+  },
+  "create_in_idp": false
+}
