@@ -1284,7 +1284,10 @@ class TestToggleAgent:
         self, test_app, mock_limited_user_context, sample_agent_card
     ):
         """Test toggling agent without permission (403)."""
-        # Arrange
+        # Arrange: test_app authenticates as "testuser"; make the agent owned by
+        # someone else so the non-owner permission path (not the owner bypass) is
+        # exercised. Owners can toggle their own agent without a toggle_agent grant.
+        sample_agent_card.registered_by = "differentuser"
         with (
             patch("registry.api.agent_routes.agent_service") as mock_agent_service,
             patch(
@@ -1392,6 +1395,57 @@ class TestToggleAgent:
             patch(
                 "registry.auth.dependencies.user_has_ui_permission_for_service",
                 return_value=True,
+            ),
+            patch(
+                "registry.api.agent_routes.get_search_repository",
+                return_value=mock_search_repo,
+            ),
+        ):
+            mock_agent_service.get_agent_info = AsyncMock(return_value=sample_agent_card)
+            mock_agent_service.toggle_agent = AsyncMock(return_value=True)
+
+            client = TestClient(app)
+            response = client.post("/agents/test-agent/toggle?enabled=true")
+
+            assert response.status_code == status.HTTP_200_OK
+
+        app.dependency_overrides.clear()
+
+    @pytest.mark.asyncio
+    async def test_toggle_agent_owner_without_toggle_grant(
+        self, mock_search_repo, sample_agent_card
+    ):
+        """An owner can toggle their own agent without any toggle_agent grant.
+
+        Mirrors the delete endpoint's owner path: ownership alone suffices, so a
+        non-admin registrant is not forced to also hold a broad toggle_agent grant
+        (which would let them toggle every agent).
+        """
+        from fastapi import FastAPI
+
+        from registry.api.agent_routes import nginx_proxied_auth, router
+        from registry.auth.csrf import verify_csrf_token_flexible
+
+        # sample_agent_card.registered_by == "testuser"; no toggle_agent grant.
+        ctx = {
+            "username": "testuser",
+            "groups": ["test-group"],
+            "scopes": ["write:agents"],
+            "accessible_agents": [],
+            "ui_permissions": {},
+            "is_admin": False,
+        }
+
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[nginx_proxied_auth] = lambda: ctx
+        app.dependency_overrides[verify_csrf_token_flexible] = lambda: None
+
+        with (
+            patch("registry.api.agent_routes.agent_service") as mock_agent_service,
+            patch(
+                "registry.auth.dependencies.user_has_ui_permission_for_service",
+                return_value=False,
             ),
             patch(
                 "registry.api.agent_routes.get_search_repository",

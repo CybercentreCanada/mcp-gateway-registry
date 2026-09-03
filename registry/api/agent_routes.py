@@ -1632,16 +1632,16 @@ async def toggle_agent(
             detail=f"Agent not found at path '{path}'",
         )
 
-    _check_agent_permission("toggle_agent", agent_card.name, user_context)
+    # Owners (and admins) may toggle their own agent without an explicit
+    # toggle_agent grant (parity with delete). A non-owner needs the toggle_agent
+    # permission AND per-agent access, so a broad grant can't reach agents the
+    # caller neither owns nor was scoped to.
+    is_owner = agent_card.registered_by == user_context.get("username")
+    if not user_context.get("is_admin", False) and not is_owner:
+        _check_agent_permission("toggle_agent", agent_card.name, user_context)
 
-    # Per-resource access check for non-admins, mirroring the server toggle
-    # (POST /api/servers/toggle). Having toggle_service permission is not
-    # enough; the caller must also have access to this specific agent (in
-    # accessible_agents, or be its owner).
-    if not user_context.get("is_admin", False):
         accessible_agents = user_context.get("accessible_agents", [])
-        owns_agent = agent_card.registered_by == user_context.get("username")
-        if "all" not in accessible_agents and path not in accessible_agents and not owns_agent:
+        if "all" not in accessible_agents and path not in accessible_agents:
             logger.warning(
                 f"User {user_context.get('username')} attempted to toggle agent "
                 f"{path} without access"
@@ -2293,6 +2293,10 @@ async def update_agent(
             last_health_check=existing_agent.last_health_check,
             rating_details=existing_agent.rating_details,
             sync_metadata=existing_agent.sync_metadata,
+            # Server-managed backend (reverse-proxy split); the request never
+            # carries it and the UI shows the gateway url, so preserve it here or
+            # the split's idempotent branch would drop it and break pull-card.
+            proxy_pass_url=existing_agent.proxy_pass_url,
             status=request.status if request.status else existing_agent.status,
             **update_optional_kwargs,
         )

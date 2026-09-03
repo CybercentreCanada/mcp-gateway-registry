@@ -19,7 +19,8 @@
     "modify_agent": ["*"],
     "publish_skill": ["*"],
     "health_check_service": ["all"],
-    "toggle_service": ["*"]
+    "toggle_service": ["*"],
+    "toggle_agent": ["*"]
   },
   "create_in_idp": false
 }

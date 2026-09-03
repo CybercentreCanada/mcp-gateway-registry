@@ -2389,7 +2389,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
                           agent.registered_by === user?.username)
                       }
                       canHealthCheck={user?.is_admin || hasUiPermission('health_check_agent', agent.path)}
-                      canToggle={user?.is_admin || hasUiPermission('toggle_agent', agent.path)}
+                      canToggle={user?.is_admin || agent.registered_by === user?.username || hasUiPermission('toggle_agent', agent.path)}
                       canDelete={
                         (user?.is_admin ||
                         hasUiPermission('delete_agent', agent.path) ||
@@ -2519,7 +2519,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
                   agent.registered_by === user?.username)
               }
               canHealthCheck={user?.is_admin || hasUiPermission('health_check_agent', agent.path)}
-              canToggle={user?.is_admin || hasUiPermission('toggle_agent', agent.path)}
+              canToggle={user?.is_admin || agent.registered_by === user?.username || hasUiPermission('toggle_agent', agent.path)}
               canDelete={
                 (user?.is_admin ||
                 hasUiPermission('delete_agent', agent.path) ||
