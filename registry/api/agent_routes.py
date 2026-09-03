@@ -2012,8 +2012,10 @@ async def pull_agent_card(
             detail="Pull card is only supported for A2A protocol agents",
         )
 
-    # 5. Fetch remote card
-    base_url = str(existing_agent.url).rstrip("/")
+    # 5. Fetch remote card. In reverse-proxy mode the advertised `url` is the
+    #    gateway; the registrant's real backend lives in `proxy_pass_url`.
+    backend_url = getattr(existing_agent, "proxy_pass_url", None) or existing_agent.url
+    base_url = str(backend_url).rstrip("/")
 
     remote_card_raw, remote_card_url = await _fetch_remote_agent_card(base_url)
 
