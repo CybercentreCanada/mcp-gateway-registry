@@ -16,7 +16,7 @@
       ]
     },
     {
-      "agents": "*",
+      "agent": "*",
       "actions": [
         "list_agents",
         "get_agent",
