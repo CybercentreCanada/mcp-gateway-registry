@@ -862,6 +862,48 @@ def _has_delete_agent_permission(user_context: dict[str, Any], agent_path: str) 
     return False
 
 
+def _has_toggle_agent_permission(user_context: dict[str, Any], agent_path: str) -> bool:
+    """
+    Check if user has permission to toggle an agent, independent of ownership.
+
+    Mirrors _has_delete_agent_permission so toggle is owner-scoped like delete:
+    1. Admin users can toggle any agent
+    2. Users with toggle_agent UI permission for "all" can toggle any agent
+    3. Users with toggle_agent UI permission for the specific path can toggle it
+
+    A bare "*" grant is intentionally NOT treated as toggle-all: it confers the
+    capability only, and ownership (checked separately at the call site) decides
+    which agents a non-admin may actually toggle. This stops a broad publish-style
+    "*" scope from reaching every agent.
+
+    Args:
+        user_context: User context from auth containing is_admin and ui_permissions
+        agent_path: Path of the agent to toggle (e.g., "/code-reviewer")
+
+    Returns:
+        bool: True if user has toggle permission independent of ownership
+    """
+    # Admin users can toggle any agent
+    if user_context.get("is_admin", False):
+        return True
+
+    # Check toggle_agent UI permission
+    ui_permissions = user_context.get("ui_permissions", {})
+    toggle_perms = ui_permissions.get("toggle_agent", [])
+
+    # "all" grants permission to toggle any agent
+    if "all" in toggle_perms:
+        return True
+
+    # Check if user has permission for this specific agent path
+    # Normalize path for comparison (remove leading slash if present)
+    normalized_path = agent_path.lstrip("/")
+    if agent_path in toggle_perms or normalized_path in toggle_perms:
+        return True
+
+    return False
+
+
 def _filter_agents_by_access(
     agents: list[AgentCard],
     user_context: dict[str, Any],
@@ -1632,24 +1674,25 @@ async def toggle_agent(
             detail=f"Agent not found at path '{path}'",
         )
 
-    # Owners (and admins) may toggle their own agent without an explicit
-    # toggle_agent grant (parity with delete). A non-owner needs the toggle_agent
-    # permission AND per-agent access, so a broad grant can't reach agents the
-    # caller neither owns nor was scoped to.
-    is_owner = agent_card.registered_by == user_context.get("username")
-    if not user_context.get("is_admin", False) and not is_owner:
-        _check_agent_permission("toggle_agent", agent_card.name, user_context)
-
-        accessible_agents = user_context.get("accessible_agents", [])
-        if "all" not in accessible_agents and path not in accessible_agents:
-            logger.warning(
-                f"User {user_context.get('username')} attempted to toggle agent "
-                f"{path} without access"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have access to this agent",
-            )
+    # Owner-scoped toggle, mirroring delete: an agent's owner may toggle it, as
+    # may an admin or a user with an explicit toggle_agent grant ("all" or the
+    # specific path). A bare "*" grant is NOT treated as toggle-all, so a broad
+    # publish-style scope cannot reach agents the caller does not own.
+    if (
+        not _has_toggle_agent_permission(user_context, path)
+        and agent_card.registered_by != user_context.get("username")
+    ):
+        logger.warning(
+            f"User {user_context.get('username')} attempted to toggle agent "
+            f"{path} without permission"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only admins, agent owners, or users with toggle_agent "
+                "permission can toggle agents"
+            ),
+        )
 
     success = await agent_service.toggle_agent(path, enabled)
 
@@ -2256,23 +2299,53 @@ async def update_agent(
 
     tag_list = _normalize_tag_list(request.tags)
 
+    # The edit UI issues a partial PUT: its modal only carries a subset of
+    # fields, so anything it doesn't send must fall back to the stored value
+    # rather than the request-model default. Otherwise editing (e.g.) the
+    # version silently resets protocol_version / security_schemes / provider
+    # and other A2A fields back to their defaults. model_fields_set tells us
+    # which fields the client actually supplied.
+    fields_set = request.model_fields_set
+
     try:
-        # Build optional kwargs for fields that have defaults on AgentCard
+        # Build optional kwargs for fields that have defaults on AgentCard,
+        # preserving the stored value when the client didn't send them.
         update_optional_kwargs: dict[str, Any] = {}
-        if request.default_input_modes:
+        if "default_input_modes" in fields_set and request.default_input_modes:
             update_optional_kwargs["default_input_modes"] = request.default_input_modes
-        if request.default_output_modes:
+        elif existing_agent.default_input_modes:
+            update_optional_kwargs["default_input_modes"] = existing_agent.default_input_modes
+        if "default_output_modes" in fields_set and request.default_output_modes:
             update_optional_kwargs["default_output_modes"] = request.default_output_modes
+        elif existing_agent.default_output_modes:
+            update_optional_kwargs["default_output_modes"] = existing_agent.default_output_modes
 
         updated_agent = AgentCard(
-            protocol_version=request.protocol_version,
+            protocol_version=(
+                request.protocol_version
+                if "protocol_version" in fields_set
+                else existing_agent.protocol_version
+            ),
             name=request.name,
             description=request.description,
             url=request.url,
             path=path,
             version=request.version,
-            provider=request.provider,
-            security_schemes=request.security_schemes or {},
+            provider=request.provider if "provider" in fields_set else existing_agent.provider,
+            security_schemes=(
+                request.security_schemes
+                if "security_schemes" in fields_set and request.security_schemes is not None
+                else existing_agent.security_schemes
+            ),
+            # security has no request-model field, so it is never sent by the
+            # edit UI; always preserve the stored requirements array.
+            security=existing_agent.security,
+            # Optional A2A fields the edit UI doesn't expose; preserve them so a
+            # partial update doesn't reset them to their defaults.
+            preferred_transport=existing_agent.preferred_transport,
+            icon_url=existing_agent.icon_url,
+            documentation_url=existing_agent.documentation_url,
+            supports_authenticated_extended_card=existing_agent.supports_authenticated_extended_card,
             skills=request.skills or [],
             tags=tag_list,
             license=request.license,

@@ -1317,12 +1317,14 @@ class TestToggleAgent:
 
     @pytest.mark.asyncio
     async def test_toggle_agent_rejects_without_access(self, mock_search_repo, sample_agent_card):
-        """Permission alone is not enough: non-admin needs per-agent access.
+        """A bare "*" toggle_agent grant does not let a non-owner toggle.
 
-        Mirrors the per-server access check on POST /api/servers/toggle. The
-        caller has toggle_service for "all" (so the permission check passes)
-        but the target agent is not in accessible_agents and they are not the
-        owner, so the toggle must be rejected.
+        Reproduces the trinity-developers scenario: the caller holds
+        toggle_agent ["*"] and accessible_agents ["all"] (the latter derived from
+        list_agents ["all"]) but does not own the agent. Toggle is owner-scoped
+        like delete, so a "*" grant confers the capability only -- ownership, not
+        the wildcard, decides which agents may be toggled -- and the request is
+        rejected.
         """
         from fastapi import FastAPI
 
@@ -1333,8 +1335,8 @@ class TestToggleAgent:
             "username": "outsider",
             "groups": ["other-group"],
             "scopes": ["read:agents"],
-            "accessible_agents": ["/agents/some-other-agent"],
-            "ui_permissions": {"toggle_service": ["all"]},
+            "accessible_agents": ["all"],
+            "ui_permissions": {"toggle_agent": ["*"]},
             "is_admin": False,
         }
 
@@ -1362,6 +1364,56 @@ class TestToggleAgent:
 
             assert response.status_code == status.HTTP_403_FORBIDDEN
             mock_agent_service.toggle_agent.assert_not_called()
+
+        app.dependency_overrides.clear()
+
+    @pytest.mark.asyncio
+    async def test_toggle_agent_allows_non_owner_with_all_grant(
+        self, mock_search_repo, sample_agent_card
+    ):
+        """A genuine toggle_agent ["all"] grant lets a non-owner toggle.
+
+        Parity with delete: an explicit "all" grant (not the "*" wildcard) is an
+        opt-in to toggle any agent, so a non-owner holding it is allowed.
+        """
+        from fastapi import FastAPI
+
+        from registry.api.agent_routes import nginx_proxied_auth, router
+        from registry.auth.csrf import verify_csrf_token_flexible
+
+        # sample_agent_card.registered_by == "testuser"; caller is someone else.
+        ctx = {
+            "username": "operator",
+            "groups": ["ops-group"],
+            "scopes": ["write:agents"],
+            "accessible_agents": [],
+            "ui_permissions": {"toggle_agent": ["all"]},
+            "is_admin": False,
+        }
+
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[nginx_proxied_auth] = lambda: ctx
+        app.dependency_overrides[verify_csrf_token_flexible] = lambda: None
+
+        with (
+            patch("registry.api.agent_routes.agent_service") as mock_agent_service,
+            patch(
+                "registry.auth.dependencies.user_has_ui_permission_for_service",
+                return_value=True,
+            ),
+            patch(
+                "registry.api.agent_routes.get_search_repository",
+                return_value=mock_search_repo,
+            ),
+        ):
+            mock_agent_service.get_agent_info = AsyncMock(return_value=sample_agent_card)
+            mock_agent_service.toggle_agent = AsyncMock(return_value=True)
+
+            client = TestClient(app)
+            response = client.post("/agents/test-agent/toggle?enabled=true")
+
+            assert response.status_code == status.HTTP_200_OK
 
         app.dependency_overrides.clear()
 

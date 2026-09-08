@@ -578,6 +578,18 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
     return permissions.includes('all') || permissions.includes('*') || permissions.includes(serviceName);
   }, [user?.ui_permissions]);
 
+  // Like hasUiPermission but deliberately excludes the "*" wildcard. Used for
+  // owner-scoped actions (e.g. toggle_agent) where a bare "*" confers the
+  // capability but ownership -- not the wildcard -- decides which resources it
+  // applies to. Mirrors the backend _has_toggle_agent_permission helper.
+  const hasScopedUiPermission = useCallback((permission: string, servicePath: string): boolean => {
+    const permissions = user?.ui_permissions?.[permission];
+    if (!permissions) return false;
+
+    const serviceName = servicePath.replace(/^\//, '');
+    return permissions.includes('all') || permissions.includes(serviceName);
+  }, [user?.ui_permissions]);
+
   // External registry tags - can be configured via environment or constants
   // Default tags that identify servers from external registries
   const EXTERNAL_REGISTRY_TAGS = ['anthropic-registry', 'workday-asor', 'asor', 'federated'];
@@ -2389,7 +2401,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
                           agent.registered_by === user?.username)
                       }
                       canHealthCheck={user?.is_admin || hasUiPermission('health_check_agent', agent.path)}
-                      canToggle={user?.is_admin || agent.registered_by === user?.username || hasUiPermission('toggle_agent', agent.path)}
+                      canToggle={user?.is_admin || agent.registered_by === user?.username || hasScopedUiPermission('toggle_agent', agent.path)}
                       canDelete={
                         (user?.is_admin ||
                         hasUiPermission('delete_agent', agent.path) ||
@@ -2519,7 +2531,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
                   agent.registered_by === user?.username)
               }
               canHealthCheck={user?.is_admin || hasUiPermission('health_check_agent', agent.path)}
-              canToggle={user?.is_admin || agent.registered_by === user?.username || hasUiPermission('toggle_agent', agent.path)}
+              canToggle={user?.is_admin || agent.registered_by === user?.username || hasScopedUiPermission('toggle_agent', agent.path)}
               canDelete={
                 (user?.is_admin ||
                 hasUiPermission('delete_agent', agent.path) ||
