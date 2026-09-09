@@ -1,0 +1,4 @@
+[submodule "deployment"]
+	path = deployment
+	url = git@github.chimera.cyber.gc.ca:CCCS/trinity-registry-deployment.git
+	branch = AIGR_Deployment_Recon
