@@ -560,7 +560,9 @@ resources:
 # Ingress configuration
 ingress:
   enabled: false
-  className: alb
+  # Leave className empty to inherit global.ingress.className (set per-environment).
+  # Explicit override only when this chart is deployed standalone without the stack.
+  className: ""
   # ALB scheme for this specific ingress. Leave empty to fall back to
   # global.ingress.scheme (chart-level default, or stack-level override
   # when deployed via mcp-gateway-registry-stack), and finally to
