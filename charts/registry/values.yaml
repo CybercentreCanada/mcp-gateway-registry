@@ -571,6 +571,9 @@ ingress:
   hostname: ""
   annotations: {}
   tls: false
+  # Name of the TLS secret for nginx ingress. When set, emits a spec.tls
+  # stanza referencing this secret. Has no effect with className: alb.
+  tlsSecretName: ""
   # Routing mode: "subdomain" or "path"
   # - subdomain: mcpregistry.domain.com
   # - path: domain.com/registry (configurable via path setting)

@@ -66,8 +66,15 @@ global:
     scheme: internet-facing
     className: alb
     tls: true
+    # Name of the TLS secret for nginx ingress. When set, emits a spec.tls
+    # stanza referencing this secret. Has no effect with className: alb.
+    tlsSecretName: ""
+    # Subdomain prefix used in subdomain routing mode. Override per-environment
+    # (e.g. "mcpregistry-stg" for staging) to avoid hostname collisions across
+    # environments on the same domain.
+    registrySubdomain: "mcpregistry"
     # Routing mode: "subdomain" or "path"
-    # - subdomain: mcpregistry.domain.com
+    # - subdomain: mcpregistry.domain.com  (registrySubdomain.domain.com)
     # - path:      domain.com/registry
     routingMode: subdomain
     # Path prefixes used when routingMode: path. Keycloak's browser path
@@ -514,7 +521,10 @@ registry:
     passwordExistingSecretKey: "PF_ADMIN_PASS"
   ingress:
     enabled: true
-    ingressClassName: alb
+    # Use `className` (not `ingressClassName`) — the registry subchart template
+    # reads .Values.ingress.className; `ingressClassName` is silently ignored.
+    # Leave empty to inherit global.ingress.className (set per-environment).
+    className: ""
   nodeSelector: {}
   # Extra env vars / envFrom sources appended to the registry container.
   # See charts/registry/values.yaml for validation rules, reserved names,

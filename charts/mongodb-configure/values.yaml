@@ -1,3 +1,12 @@
+# Image used by the init (wait-for-mongodb) and main job containers.
+# Override this when the default public.ecr.aws image is not reachable from the cluster.
+pythonImage: "public.ecr.aws/docker/library/python:3.13-slim"
+
+# PyPI index URL for pip install in the init and main containers.
+# Leave empty to use the default (pypi.org). Override in air-gapped environments
+# that have an internal PyPI proxy (e.g. a Nexus/Artifactory instance).
+pipIndexUrl: ""
+
 global:
   existingMongoCredentialsSecret: ""  # If set, use this existing secret instead of creating one
   authProvider:
