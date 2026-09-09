@@ -1,7 +1,5 @@
 """Tests for MCP Registry server.json schema detection and transformation."""
 
-import pytest
-
 from registry.schemas.mcp_registry_schema import McpRegistryServerJson
 from registry.schemas.mcp_registry_transform import (
     _slugify,
@@ -247,9 +245,7 @@ class TestMetadataPreservation:
         data = {
             "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/registry/main/docs/reference/server-json/draft/server.schema.json",
             "name": "test",
-            "packages": [
-                {"registryType": "pypi", "identifier": "my-tool", "version": "1.0.0"}
-            ],
+            "packages": [{"registryType": "pypi", "identifier": "my-tool", "version": "1.0.0"}],
             "remotes": [{"type": "streamable-http", "url": "https://a.com/mcp"}],
         }
 

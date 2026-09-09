@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import posixpath
 import re
 from enum import Enum
 from typing import Any, Final
+from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
@@ -47,17 +49,50 @@ _CONSECUTIVE_SLASHES = re.compile(r"/{2,}")
 def _normalize_path(path: str) -> str:
     """Canonicalize a URL path for prefix/allow-list matching.
 
-    Strips query string, guarantees a leading slash, and collapses
-    consecutive slashes. Does NOT lowercase or resolve ``..`` — the
-    classifier and deny-list rely on byte-exact comparison, and ``..``
-    in a request URL is expected to arrive as literal path segments
-    (nginx should reject path traversal).
+    Strips query string, percent-decodes, resolves ``.``/``..`` segments to
+    a canonical absolute path, guarantees a leading slash, and collapses
+    consecutive slashes.
+
+    Percent-decode-then-resolve is required for correctness of every
+    authorization decision that consumes this path (the resource-token
+    deny-list and the (type, id) classifier). The raw request URI is
+    attacker-controlled and arrives here percent-encoded (nginx forwards
+    ``$request_uri`` via ``X-Original-URL``/``X-Original-URI``). If we matched
+    on the raw bytes, an encoded-traversal URL such as
+    ``/api/agents/foo/%2e%2e/tokens/generate`` would classify differently from
+    its canonical form ``/api/tokens/generate`` and slip past the byte-exact
+    deny-list. Decoding once and normalizing segments makes an encoded path
+    classify identically to its canonical form, and clamps a traversal that
+    tries to escape above root (``/api/../../etc`` -> ``/etc``) rather than
+    silently letting it through.
+
+    Fail closed: decoding is done exactly ONCE (a single ``unquote`` — we do
+    not re-decode the result, so a doubly-encoded ``%252e`` stays literal and
+    still fails classification rather than resolving to ``..``). Segment
+    resolution never rises above root. The existing leading-slash and
+    consecutive-slash canonicalization is preserved.
     """
     if "?" in path:
         path = path.split("?", 1)[0]
+    # Decode percent-escapes exactly once so encoded traversal / deny-listed
+    # segments are seen in their canonical form by the matchers below.
+    path = unquote(path)
     if not path.startswith("/"):
         path = "/" + path
-    return _CONSECUTIVE_SLASHES.sub("/", path)
+    # Collapse consecutive slashes before segment resolution so runs like
+    # "//api//foo" and "/api/./foo" canonicalize consistently.
+    path = _CONSECUTIVE_SLASHES.sub("/", path)
+    # Resolve "." and ".." segments. posixpath.normpath operates on the
+    # already-absolute path, so it can never escape above root ("/.." -> "/").
+    # It strips a trailing slash and may collapse a leading "//"; we only pass
+    # a single-leading-slash path in, and re-collapse afterwards, so host
+    # semantics are never affected (this is a path, not a URL authority).
+    normalized = posixpath.normpath(path)
+    # normpath drops a trailing slash and returns "." for an empty path; force
+    # a leading slash and re-collapse to keep the documented invariants.
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    return _CONSECUTIVE_SLASHES.sub("/", normalized)
 
 
 def _prepare_path(
@@ -86,6 +121,7 @@ def _prepare_path(
     if strip_trailing and len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
     return path
+
 
 # Maximum time we will wait for the repository lookups that the pre-mint
 # authorization check performs (agent visibility, skill visibility). These
@@ -456,13 +492,14 @@ async def validate_user_can_bind_resource(
             )
         except TimeoutError:
             logger.warning(
-                "Timed out looking up agent %s during resource-binding check; "
-                "denying bind request",
+                "Timed out looking up agent %s during resource-binding check; denying bind request",
                 normalized_id,
             )
             return False
         except Exception:
-            logger.exception("Failed to look up agent %s during resource-binding check", normalized_id)
+            logger.exception(
+                "Failed to look up agent %s during resource-binding check", normalized_id
+            )
             return False
         if not agent_card:
             return False
@@ -487,13 +524,14 @@ async def validate_user_can_bind_resource(
             )
         except TimeoutError:
             logger.warning(
-                "Timed out looking up skill %s during resource-binding check; "
-                "denying bind request",
+                "Timed out looking up skill %s during resource-binding check; denying bind request",
                 normalized_id,
             )
             return False
         except Exception:
-            logger.exception("Failed to look up skill %s during resource-binding check", normalized_id)
+            logger.exception(
+                "Failed to look up skill %s during resource-binding check", normalized_id
+            )
             return False
         if not skill:
             return False

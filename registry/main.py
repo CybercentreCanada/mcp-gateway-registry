@@ -22,7 +22,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from registry.api.agent_routes import router as agent_router
@@ -45,6 +45,7 @@ from registry.api.management_routes import router as management_router
 from registry.api.okta_m2m_routes import router as okta_m2m_router
 from registry.api.peer_management_routes import router as peer_management_router
 from registry.api.public_record_routes import router as public_record_router
+from registry.api.rate_limit_routes import router as rate_limit_router
 from registry.api.registry_management_routes import router as registry_management_router
 from registry.api.registry_routes import router as registry_router
 from registry.api.search_routes import router as search_router
@@ -58,6 +59,7 @@ from registry.api.wellknown_routes import router as wellknown_router
 # Import audit logging
 from registry.audit import AuditLogger, add_audit_middleware
 from registry.audit.routes import router as audit_router
+from registry.audit.service import enforce_durable_audit_sink
 
 # Import auth dependencies
 from registry.auth.dependencies import (
@@ -74,6 +76,7 @@ from registry.core.config import (
     _print_config_warning_banner,
     _validate_mode_combination,
     log_tab_visibility_warnings,
+    print_a2a_reverse_proxy_mode_banner,
     settings,
 )
 from registry.core.metrics import DEPLOYMENT_MODE_INFO
@@ -172,6 +175,13 @@ def _log_startup_configuration() -> None:
 
     logger.info("=" * 60)
 
+    # Nudge operators about recommended-but-optional settings left unset (e.g. the
+    # egress credential encryption key when the vault is enabled). Same source of
+    # truth as the recommended-config metric and the System Config UI badge.
+    from registry.core.recommended_config import log_recommended_config_warnings
+
+    log_recommended_config_warnings(settings)
+
 
 def _initialize_deployment_metrics() -> None:
     """Initialize deployment mode Prometheus metrics.
@@ -265,6 +275,7 @@ async def _sync_agentcore_on_startup(
         get_skill_repository,
     )
     from registry.schemas.agent_models import AgentCard
+    from registry.schemas.proxy_mixin import strip_proxy_fields
     from registry.schemas.skill_models import SkillCard
     from registry.services.agent_service import agent_service
     from registry.services.federation.agentcore_client import (
@@ -296,6 +307,8 @@ async def _sync_agentcore_on_startup(
     server_count = 0
     for server_data in records["servers"]:
         try:
+            # Peer content: strip proxy fields (no proxying federated entities).
+            server_data = strip_proxy_fields(server_data)
             server_path = server_data.get("path")
             if not server_path:
                 continue
@@ -322,6 +335,7 @@ async def _sync_agentcore_on_startup(
     agent_count = 0
     for agent_data in records["agents"]:
         try:
+            agent_data = strip_proxy_fields(agent_data)  # peer content: no proxying
             agent_path = agent_data.get("path")
             if not agent_path:
                 continue
@@ -345,6 +359,7 @@ async def _sync_agentcore_on_startup(
     skill_repo = get_skill_repository()
     for skill_data in records["skills"]:
         try:
+            skill_data = strip_proxy_fields(skill_data)  # peer content: no proxying
             skill_path = skill_data.get("path")
             if not skill_path:
                 continue
@@ -460,6 +475,11 @@ async def lifespan(app: FastAPI):
     # Apply internal-deployment classification default/correction (issue #1216)
     _resolve_internal_deployment_classification()
 
+    # Loudly warn if A2A reverse-proxy is enabled but the (now-finalized)
+    # deployment mode force-disables it (registry-only). Called after mode
+    # correction so it reflects the effective deployment_mode.
+    print_a2a_reverse_proxy_mode_banner(settings)
+
     # Log startup configuration
     _log_startup_configuration()
 
@@ -525,6 +545,18 @@ async def lifespan(app: FastAPI):
             logger.warning(
                 "Legacy scope audit failed (non-fatal, continuing startup): %s",
                 audit_exc,
+            )
+
+        # Seed the reserved quarantine groups (idempotent; visible in API/UI even
+        # when empty and regardless of RATE_LIMITING_ENABLED). Non-fatal on error.
+        try:
+            from registry.rate_limiting.definitions_repository import DefinitionsRepository
+
+            await DefinitionsRepository().seed_reserved_groups()
+        except Exception as seed_exc:
+            logger.warning(
+                "Reserved quarantine group seeding failed (non-fatal, continuing startup): %s",
+                seed_exc,
             )
 
         # Initialize services in order
@@ -623,9 +655,13 @@ async def lifespan(app: FastAPI):
                             )
 
                             # Register servers
+                            from registry.schemas.proxy_mixin import strip_proxy_fields
+
                             synced_count = 0
                             for server_data in servers:
                                 try:
+                                    # Peer content: strip proxy fields (no proxying federated entities).
+                                    server_data = strip_proxy_fields(server_data)
                                     server_path = server_data.get("path")
                                     if not server_path:
                                         continue
@@ -635,7 +671,9 @@ async def lifespan(app: FastAPI):
                                         server_data["id"] = str(uuid4())
 
                                     # Register or update server
-                                    success = await server_service.register_server(server_data)
+                                    success: (
+                                        dict[str, Any] | bool
+                                    ) = await server_service.register_server(server_data)
                                     if not success:
                                         # Ensure UUID exists before updating (for servers registered before UUID feature)
                                         if "id" not in server_data or not server_data["id"]:
@@ -838,7 +876,7 @@ async def lifespan(app: FastAPI):
         try:
             startup_config = settings.nginx_config_path.read_text()
             nginx_reload_scheduler.seed_hash(startup_config)
-        except Exception:
+        except Exception:  # nosec B110 - best-effort seed of nginx reload hash at startup
             pass
 
         await nginx_reload_scheduler.start()
@@ -1084,6 +1122,18 @@ if settings.audit_log_enabled:
             logger.warning("⚠️ MongoDB audit storage requested but repository unavailable")
             _mongodb_enabled = False
 
+    # Durability guard (fail closed). Without a durable sink, audit records
+    # degrade to best-effort JSON log lines that can be lost on restart, are not
+    # queryable for forensics, and are trivially rotated away — i.e. not a
+    # dependable audit trail for a repudiation-sensitive deployment. When
+    # AUDIT_LOG_REQUIRE_DURABLE is set (the default), refuse to start rather than
+    # run with a non-durable audit trail. Operators who accept a non-durable
+    # trail (local/dev) must explicitly opt out via AUDIT_LOG_REQUIRE_DURABLE=false.
+    enforce_durable_audit_sink(
+        durable_sink_available=_mongodb_enabled,
+        require_durable=settings.audit_log_require_durable,
+    )
+
     _audit_logger = AuditLogger(
         log_dir=str(settings.audit_log_path),
         rotation_hours=settings.audit_log_rotation_hours,
@@ -1150,10 +1200,18 @@ app.include_router(auth0_m2m_router, prefix="/api", tags=["Auth0 M2M"])
 if settings.m2m_direct_registration_enabled:
     app.include_router(m2m_management_router, prefix="/api", tags=["M2M Management"])
 
+app.include_router(rate_limit_router, prefix="/api", tags=["Rate Limiting"])
+
 # Direct user-to-group fallback registration API (issue #1127). The router
 # already declares its full /api/iam/user-groups prefix and tag, so include
 # it without an additional prefix override.
 app.include_router(iam_user_groups_router)
+
+# Proxied-entity listing for the IAM scope editor (gateway-proxy feature). Router
+# declares its own /api/iam/proxied-entities prefix.
+from registry.api.proxied_entities_routes import router as proxied_entities_router
+
+app.include_router(proxied_entities_router)
 
 # Register Anthropic MCP Registry API (public API for MCP servers only)
 app.include_router(registry_router, prefix="/api/registry", tags=["Registry Card"])
@@ -1174,8 +1232,8 @@ from registry.api.ard_routes import router as ard_router  # noqa: E402
 app.include_router(ard_router, prefix="/api/ard", tags=["ARD Registry"])
 # ARD error envelope: reshape HTTPException / validation errors on /api/ard/* only;
 # default behavior is preserved for every other path.
-app.add_exception_handler(StarletteHTTPException, ard_http_exception_handler)
-app.add_exception_handler(RequestValidationError, ard_validation_exception_handler)
+app.add_exception_handler(StarletteHTTPException, ard_http_exception_handler)  # type: ignore[arg-type]  # FastAPI narrows exc type; Starlette signature expects base Exception
+app.add_exception_handler(RequestValidationError, ard_validation_exception_handler)  # type: ignore[arg-type]  # FastAPI narrows exc type; Starlette signature expects base Exception
 
 
 # SSRF / URL validation: any registration or fetch path that persists or
@@ -1252,7 +1310,7 @@ def custom_openapi():
     return app.openapi_schema
 
 
-app.openapi = custom_openapi
+app.openapi = custom_openapi  # type: ignore[method-assign]  # standard FastAPI pattern for overriding the OpenAPI schema generator
 
 
 # Add user info endpoint for React auth context
@@ -1286,15 +1344,20 @@ async def get_current_user(user_context: dict[str, Any] = Depends(nginx_proxied_
 # Basic health check endpoint
 @app.get("/health")
 async def health_check():
-    """Simple health check for load balancers and monitoring."""
+    """Simple health check for load balancers and monitoring.
+
+    Anonymous by design (load-balancer / container probes hit it without a
+    session), so it must NOT disclose deployment topology. The deployment_mode /
+    registry_mode / nginx_updates_enabled feature surface was reconnaissance data
+    that duplicated what GET /api/config exposes; it now lives only behind the
+    authenticated /api/config endpoint. Probes rely on the HTTP status, not the
+    body, so trimming these fields does not affect health checking.
+    """
     from registry.services.agent_batch_worker import get_agent_batch_worker
 
     return {
         "status": "healthy",
         "service": "mcp-gateway-registry",
-        "deployment_mode": settings.deployment_mode.value,
-        "registry_mode": settings.registry_mode.value,
-        "nginx_updates_enabled": settings.nginx_updates_enabled,
         "batch_worker": get_agent_batch_worker().health(),
     }
 
@@ -1340,6 +1403,7 @@ def _build_cached_index_html() -> str | None:
     # Rewrite absolute asset references to include ROOT_PATH
     html_content = html_content.replace('="/static/', f'="{prefix}/static/')
     html_content = html_content.replace('="/favicon.ico"', f'="{prefix}/favicon.ico"')
+    html_content = html_content.replace('="/rum.js"', f'="{prefix}/rum.js"')
 
     # Inject <base> tag if not already present (for React Router relative links)
     if "<base" not in html_content:
@@ -1350,14 +1414,32 @@ def _build_cached_index_html() -> str | None:
     return html_content
 
 
+@app.get("/rum.js")
+async def serve_rum_js():
+    """Serve the customer RUM snippet as JavaScript.
+
+    Registered unconditionally (not gated on the frontend build directory) so
+    the route exists in every deployment mode. The container entrypoint writes
+    the file (empty stub when unconfigured); if it is missing, we return an
+    empty stub inline so the request never 404s or falls through to the SPA
+    catch-all. Public, like other static assets.
+    """
+    headers = {"Cache-Control": "public, max-age=300"}
+    rum_path = FRONTEND_BUILD_PATH / "rum.js"
+    if not rum_path.exists():
+        return Response(
+            content="// no RUM snippet configured\n",
+            media_type="application/javascript",
+            headers=headers,
+        )
+    return FileResponse(rum_path, media_type="application/javascript", headers=headers)
+
+
 if FRONTEND_BUILD_PATH.exists():
     # Build the cached HTML at import time
     _CACHED_INDEX_HTML = _build_cached_index_html()
-    # Mount static files - path depends on ROOT_PATH
-    # When ROOT_PATH is set, FastAPI automatically handles the prefix for routes,
-    # but we need to explicitly mount static files at the root level
-    # The <base> tag in HTML will make browsers request /registry/static/*
-    # which FastAPI will handle correctly with root_path
+    # Mount static files at the unprefixed path; nginx's own ROOT_PATH-prefixed
+    # static location handles the prefixed request and never reaches this app.
     app.mount("/static", StaticFiles(directory=FRONTEND_BUILD_PATH / "static"), name="static")
 
     # Serve React app for all other routes (SPA)

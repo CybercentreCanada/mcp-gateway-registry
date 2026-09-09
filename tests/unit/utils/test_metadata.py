@@ -1,7 +1,5 @@
 """Unit tests for registry.utils.metadata module."""
 
-import pytest
-
 from registry.utils.metadata import flatten_metadata_to_text
 
 

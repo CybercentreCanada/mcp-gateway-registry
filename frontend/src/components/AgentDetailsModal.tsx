@@ -35,8 +35,16 @@ interface AgentDetailsModalProps {
  */
 const getAgentCardUrl = (agentUrl: string): string | null => {
   try {
-    const origin = new URL(agentUrl).origin;
-    return `${origin}/.well-known/agent-card.json`;
+    // The agent card is served relative to the agent's advertised url, which in
+    // reverse-proxy mode includes the gateway path (e.g.
+    // https://host/agent/flight-booking-agent/). Append the well-known suffix to
+    // that full base, do NOT collapse to the origin (that would drop the
+    // /agent/<path>/ prefix and 404).
+    const parsed = new URL(agentUrl);
+    const basePath = parsed.pathname.endsWith('/')
+      ? parsed.pathname
+      : `${parsed.pathname}/`;
+    return `${parsed.origin}${basePath}.well-known/agent-card.json`;
   } catch {
     return null;
   }

@@ -6,10 +6,7 @@ from fastapi.testclient import TestClient
 
 from registry.middleware.mcp_www_authenticate import WWWAuthenticateMiddleware
 
-
-RESOURCE_METADATA_URL = (
-    "https://gw.example.com/.well-known/oauth-protected-resource"
-)
+RESOURCE_METADATA_URL = "https://gw.example.com/.well-known/oauth-protected-resource"
 
 
 def _build_app() -> FastAPI:

@@ -89,10 +89,7 @@ async def _list_servers(
             break
         offset += limit
 
-    stress_servers = [
-        s for s in all_servers
-        if STRESS_TAG in (s.get("tags") or [])
-    ]
+    stress_servers = [s for s in all_servers if STRESS_TAG in (s.get("tags") or [])]
     return stress_servers
 
 
@@ -122,10 +119,7 @@ async def _list_agents(
             break
         offset += limit
 
-    stress_agents = [
-        a for a in all_agents
-        if STRESS_TAG in (a.get("tags") or [])
-    ]
+    stress_agents = [a for a in all_agents if STRESS_TAG in (a.get("tags") or [])]
     return stress_agents
 
 
@@ -155,10 +149,7 @@ async def _list_skills(
             break
         offset += limit
 
-    stress_skills = [
-        s for s in all_skills
-        if STRESS_TAG in (s.get("tags") or [])
-    ]
+    stress_skills = [s for s in all_skills if STRESS_TAG in (s.get("tags") or [])]
     return stress_skills
 
 
@@ -186,7 +177,9 @@ async def _delete_servers(
             logger.debug("Deleted server: %s", path)
         else:
             failed += 1
-            logger.warning("Failed to delete server %s: %d %s", path, resp.status_code, resp.text[:100])
+            logger.warning(
+                "Failed to delete server %s: %d %s", path, resp.status_code, resp.text[:100]
+            )
     return deleted, failed
 
 
@@ -215,7 +208,9 @@ async def _delete_agents(
             logger.debug("Deleted agent: %s", path)
         else:
             failed += 1
-            logger.warning("Failed to delete agent %s: %d %s", path, resp.status_code, resp.text[:100])
+            logger.warning(
+                "Failed to delete agent %s: %d %s", path, resp.status_code, resp.text[:100]
+            )
     return deleted, failed
 
 
@@ -236,7 +231,7 @@ async def _delete_skills(
         # Strip the leading "/skills/" prefix since the API endpoint is /api/skills/{name}
         url_path = skill_path.lstrip("/")
         if url_path.startswith("skills/"):
-            url_path = url_path[len("skills/"):]
+            url_path = url_path[len("skills/") :]
         resp = await client.delete(
             f"{base_url}/api/skills/{url_path}",
             headers=headers,
@@ -246,7 +241,9 @@ async def _delete_skills(
             logger.debug("Deleted skill: %s", skill_path)
         else:
             failed += 1
-            logger.warning("Failed to delete skill %s: %d %s", skill_path, resp.status_code, resp.text[:100])
+            logger.warning(
+                "Failed to delete skill %s: %d %s", skill_path, resp.status_code, resp.text[:100]
+            )
     return deleted, failed
 
 

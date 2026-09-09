@@ -8,7 +8,7 @@ record path is ``/{type}/{uuid}``), so both are constrained at the signature
 """
 
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import (
     APIRouter,
@@ -22,6 +22,8 @@ from fastapi import (
 from pydantic import BaseModel
 
 from ..audit.context import set_audit_action
+from ..auth.asset_permissions import user_has_asset_permission
+from ..auth.csrf import verify_csrf_token_flexible
 from ..auth.dependencies import nginx_proxied_auth
 from ..schemas.custom_entity_models import (
     CustomEntityCreate,
@@ -34,7 +36,13 @@ from ..services.custom_entity_errors import (
     CustomTypeRecordCapError,
     UnknownCustomTypeError,
 )
+from ..services.custom_entity_scopes import (
+    entity_scope,
+    list_grant_allows_type,
+    list_grant_record_paths,
+)
 from ..services.custom_entity_service import CustomEntityService
+from ..services.visibility import redact_proxy_backend_url
 
 # Configure logging
 logging.basicConfig(
@@ -45,6 +53,11 @@ logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/custom", tags=["custom-entities"])
+
+# Encrypted upstream-header values are WRITE-ONLY: accepted on create, never
+# echoed on read. Excluded from every CustomEntityRecord response (the model
+# keeps the field so the internal vend endpoint can still decrypt it).
+_CUSTOM_RECORD_EXCLUDE = {"custom_headers_encrypted"}
 
 # NoSQL-injection guards: both segments compose the record path
 # /{type}/{uuid} interpolated into find({"_id": path}) / find({"entity_type": type}).
@@ -61,11 +74,130 @@ class RatingRequest(BaseModel):
     rating: int
 
 
+class UpstreamHeadersUpdateRequest(BaseModel):
+    """Body for PATCH /api/custom/{type}/{uuid}/upstream-headers.
+
+    Replaces the record's ENTIRE upstream custom-header set (rotation semantics).
+    Each entry is ``{name, value?, overridable?}`` -- same policy as create. An
+    empty list clears all upstream headers. Values are write-only.
+    """
+
+    custom_headers: list[dict[str, Any]] = []
+
+
 def _get_service() -> CustomEntityService:
     """Resolve the custom entity service singleton."""
     from ..repositories.factory import get_custom_entity_service
 
     return get_custom_entity_service()
+
+
+def _has_type_scope(
+    action: str,
+    type_name: str,
+    user_context: dict,
+) -> bool:
+    """Return True if the caller holds the per-type MUTATION scope, or is admin.
+
+    Used for the mutation actions (create/modify/delete), which stay type-level:
+    the caller must hold ``<action>_<type>_entity`` for this type (or "all").
+    Admin is the catch-all bypass. Fails closed on a missing ui_permissions dict.
+    The read/list gate is per-record aware and lives in ``_require_view_scope`` /
+    ``user_can_list_custom_entity_type`` instead.
+
+    Args:
+        action: One of create/modify/delete.
+        type_name: The custom type being accessed.
+        user_context: The authenticated request context.
+
+    Returns:
+        True if access is permitted, False otherwise.
+    """
+    return user_has_asset_permission(
+        "custom_entity", action, type_name, user_context, type_name=type_name
+    )
+
+
+def _require_view_scope(
+    type_name: str,
+    user_context: dict,
+    record_path: str | None = None,
+) -> None:
+    """Raise 404 (hide existence) if the caller lacks list access.
+
+    Read gate for list/get/search/rating. The ``list_<type>_entity`` grant is
+    per-record aware (parity with ``list_agents``): ``"all"``/type-name open the
+    whole type; a record path opens just that record.
+
+    - On the COLLECTION list (``record_path=None``): passes if the caller can see
+      ANY record of the type (whole-type OR at least one granted record), so a
+      record-scoped grant does NOT 404 the type — the list then filters to the
+      granted records. Holding nothing 404s (hides existence, incl. public).
+    - On a SINGLE record (``record_path`` given): passes only if the grant covers
+      that specific record; otherwise 404 (indistinguishable from not-found).
+    """
+    from ..auth.dependencies import user_can_list_custom_entity_type
+
+    if not user_can_list_custom_entity_type(type_name, user_context, record_path):
+        logger.info(
+            "User %s denied list access to custom type %s (record=%s) -> 404",
+            user_context.get("username"),
+            type_name,
+            record_path or "<collection>",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown custom type: {type_name}",
+        )
+
+
+def _require_mutate_scope(
+    action: str,
+    type_name: str,
+    user_context: dict,
+) -> None:
+    """Raise 403 if the caller lacks the ``<action>_<type>_entity`` scope.
+
+    Mutation gate for create/modify/delete. Unlike the read gate, existence is
+    not concealed (the caller can already see the type via the list scope), so a
+    non-holder gets a 403.
+    """
+    if not _has_type_scope(action, type_name, user_context):
+        logger.warning(
+            "User %s denied %s on custom type %s (no %s_%s_entity scope) -> 403",
+            user_context.get("username"),
+            action,
+            type_name,
+            action,
+            type_name,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"You do not have permission to {action} {type_name} records",
+        )
+
+
+def _list_restrict_paths(
+    type_name: str,
+    user_context: dict,
+) -> list[str] | None:
+    """Return the record-path restriction for the collection list.
+
+    - ``None`` — whole-type access (admin, or a ``"all"``/type-name grant): the
+      list is bounded only by per-record visibility.
+    - ``list[str]`` — the caller holds only specific records of this type; the
+      list must be restricted to those paths (intersected with the per-record
+      visibility filter).
+
+    Assumes ``_require_view_scope`` already passed, so a non-whole-type caller
+    holds at least one record path here.
+    """
+    if user_context.get("is_admin", False):
+        return None
+    granted = (user_context.get("ui_permissions") or {}).get(entity_scope("list", type_name)) or []
+    if list_grant_allows_type(type_name, granted):
+        return None
+    return list_grant_record_paths(type_name, granted)
 
 
 @router.get("/{type}", summary="List records of a custom type")
@@ -76,14 +208,33 @@ async def list_custom_entities(
     limit: int = Query(100, ge=1, le=1000, description="Max records to return"),
 ) -> dict:
     """List records of a type, filtered to those the caller may see."""
+    _require_view_scope(type, user_context)
+    # SECURITY: restrict_paths MUST be derived from _list_restrict_paths and
+    # passed to list_records. _require_view_scope passes a record-scoped caller
+    # (they hold at least one record path), so a whole-type read here would leak
+    # every record. _list_restrict_paths returns None only for whole-type/admin;
+    # a non-admin without the scope yields [] -> empty $in -> no records.
+    restrict_paths = _list_restrict_paths(type, user_context)
     service = _get_service()
     try:
-        items, total = await service.list_records(type, skip, limit, user_context)
+        items, total = await service.list_records(
+            type, skip, limit, user_context, restrict_paths=restrict_paths
+        )
     except UnknownCustomTypeError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
+    # Redact the internal backend origin (proxy_target_url) for non-admins,
+    # mirroring the skill/agent read endpoints. is_proxied + proxy_client_url stay.
+    # Encrypted upstream headers (custom_headers_encrypted) are never listed.
+    records = [
+        redact_proxy_backend_url(
+            r.model_dump(mode="json", exclude=_CUSTOM_RECORD_EXCLUDE), user_context
+        )
+        for r in items
+    ]
+
     return {
-        "records": [r.model_dump(mode="json") for r in items],
+        "records": records,
         "total_count": total,
         "skip": skip,
         "limit": limit,
@@ -93,6 +244,7 @@ async def list_custom_entities(
 @router.get(
     "/{type}/{uuid}",
     response_model=CustomEntityRecord,
+    response_model_exclude=_CUSTOM_RECORD_EXCLUDE,
     summary="Get a custom record",
 )
 async def get_custom_entity(
@@ -101,10 +253,13 @@ async def get_custom_entity(
     uuid: str = UUID_PARAM,
 ) -> CustomEntityRecord:
     """Get a single record by type and uuid (404 if not viewable)."""
-    service = _get_service()
     path = f"/{type}/{uuid}"
+    _require_view_scope(type, user_context, record_path=path)
+    service = _get_service()
     try:
-        return await service.get_record(path, user_context)
+        record = await service.get_record(path, user_context)
+        # Redact the internal backend origin for non-admins (mirrors skill/agent reads).
+        return redact_proxy_backend_url(record, user_context)
     except CustomEntityNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
@@ -112,6 +267,7 @@ async def get_custom_entity(
 @router.post(
     "/{type}",
     response_model=CustomEntityRecord,
+    response_model_exclude=_CUSTOM_RECORD_EXCLUDE,
     status_code=status.HTTP_201_CREATED,
     summary="Create a custom record",
 )
@@ -120,8 +276,10 @@ async def create_custom_entity(
     body: CustomEntityCreate,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     type: str = TYPE_PARAM,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> CustomEntityRecord:
     """Create a record of the given custom type."""
+    _require_mutate_scope("create", type, user_context)
     service = _get_service()
     owner = user_context.get("username")  # server-derived, never from body
     try:
@@ -147,6 +305,7 @@ async def create_custom_entity(
 @router.put(
     "/{type}/{uuid}",
     response_model=CustomEntityRecord,
+    response_model_exclude=_CUSTOM_RECORD_EXCLUDE,
     summary="Update a custom record",
 )
 async def update_custom_entity(
@@ -155,8 +314,11 @@ async def update_custom_entity(
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     type: str = TYPE_PARAM,
     uuid: str = UUID_PARAM,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> CustomEntityRecord:
     """Update a record (owner or admin only; partial-update semantics)."""
+    # Type-level gate first; the service still enforces per-record owner-or-admin.
+    _require_mutate_scope("modify", type, user_context)
     service = _get_service()
     path = f"/{type}/{uuid}"
     try:
@@ -178,6 +340,51 @@ async def update_custom_entity(
     return updated
 
 
+@router.patch(
+    "/{type}/{uuid}/upstream-headers",
+    response_model=CustomEntityRecord,
+    response_model_exclude=_CUSTOM_RECORD_EXCLUDE,
+    summary="Rotate a custom record's upstream proxy headers",
+)
+async def update_custom_entity_upstream_headers(
+    http_request: Request,
+    body: UpstreamHeadersUpdateRequest,
+    user_context: Annotated[dict, Depends(nginx_proxied_auth)],
+    type: str = TYPE_PARAM,
+    uuid: str = UUID_PARAM,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
+) -> CustomEntityRecord:
+    """Replace a record's upstream custom headers (the proxy-hop credentials).
+
+    Dedicated rotation surface (mirror of the skill / MCP-server credential
+    PATCH) so headers can be rotated after create. Type-level modify scope + the
+    service's per-record owner-or-admin gate. An empty ``custom_headers`` list
+    clears all upstream headers. 400 on any policy violation.
+    """
+    _require_mutate_scope("modify", type, user_context)
+    service = _get_service()
+    path = f"/{type}/{uuid}"
+    try:
+        updated = await service.update_record_upstream_headers(
+            type, path, body.custom_headers, user_context
+        )
+    except UnknownCustomTypeError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except CustomEntityNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except CustomEntityValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.errors)
+
+    set_audit_action(
+        http_request,
+        "update",
+        "custom_entity_upstream_headers",
+        resource_id=path,
+        description=f"Rotate upstream headers for {type} {updated.name}",
+    )
+    return updated
+
+
 @router.delete(
     "/{type}/{uuid}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -188,8 +395,11 @@ async def delete_custom_entity(
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     type: str = TYPE_PARAM,
     uuid: str = UUID_PARAM,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> None:
     """Delete a record (owner or admin only)."""
+    # Type-level gate first; the service still enforces per-record owner-or-admin.
+    _require_mutate_scope("delete", type, user_context)
     service = _get_service()
     path = f"/{type}/{uuid}"
     try:
@@ -213,10 +423,12 @@ async def rate_custom_entity(
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     type: str = TYPE_PARAM,
     uuid: str = UUID_PARAM,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> dict:
     """Add or update the caller's 1-5 rating on a record they can view."""
-    service = _get_service()
     path = f"/{type}/{uuid}"
+    _require_view_scope(type, user_context, record_path=path)
+    service = _get_service()
     set_audit_action(
         http_request,
         "rate",
@@ -243,8 +455,9 @@ async def get_custom_entity_rating(
     uuid: str = UUID_PARAM,
 ) -> dict:
     """Return {num_stars, rating_details} for a record the caller can view."""
-    service = _get_service()
     path = f"/{type}/{uuid}"
+    _require_view_scope(type, user_context, record_path=path)
+    service = _get_service()
     try:
         return await service.get_rating(path, user_context)
     except CustomEntityNotFoundError as e:

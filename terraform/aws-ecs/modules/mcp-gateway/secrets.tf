@@ -128,6 +128,29 @@ resource "aws_secretsmanager_secret_version" "nginx_marker_secret" {
   secret_string = var.egress_nginx_marker_secret != "" ? var.egress_nginx_marker_secret : random_password.nginx_marker_secret.result
 }
 
+# Per-user egress credential vault encryption key (registry-only, optional).
+# When set, the registry AES-256-GCM-encrypts stored egress tokens before they
+# reach Secrets Manager / OpenBao. Empty disables encryption (legacy plaintext),
+# so the secret is only provisioned when an operator supplies a value -- existing
+# deployments keep working unchanged. Never auto-generated.
+resource "aws_secretsmanager_secret" "egress_credential_encryption_key" {
+  #checkov:skip=CKV2_AWS_57:Operator-supplied encryption key, rotation requires coordinated re-encryption of the vault
+  count = var.egress_credential_encryption_key != "" ? 1 : 0
+
+  name_prefix             = "${local.name_prefix}-egress-cred-enc-key-"
+  description             = "AES-256-GCM key used by the registry to encrypt per-user egress credentials at rest"
+  recovery_window_in_days = 0
+  kms_key_id              = aws_kms_key.secrets.id
+  tags                    = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "egress_credential_encryption_key" {
+  count = var.egress_credential_encryption_key != "" ? 1 : 0
+
+  secret_id     = aws_secretsmanager_secret.egress_credential_encryption_key[0].id
+  secret_string = var.egress_credential_encryption_key
+}
+
 # Keycloak client secrets (created with placeholder, updated by init-keycloak.sh)
 resource "aws_secretsmanager_secret" "keycloak_client_secret" {
   #checkov:skip=CKV2_AWS_57:Keycloak client secret managed by Keycloak init script, not rotatable via Secrets Manager
@@ -199,6 +222,26 @@ resource "aws_secretsmanager_secret" "embeddings_api_key" {
 resource "aws_secretsmanager_secret_version" "embeddings_api_key" {
   secret_id     = aws_secretsmanager_secret.embeddings_api_key.id
   secret_string = var.embeddings_api_key != "" ? var.embeddings_api_key : "not-configured"
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+
+
+# Embeddings IdP client secret (optional - only needed for EMBEDDINGS_AUTH_MODE=idp)
+resource "aws_secretsmanager_secret" "embeddings_idp_client_secret" {
+  #checkov:skip=CKV2_AWS_57:IdP client secret managed in external IdP portal, not rotatable via Secrets Manager
+  name_prefix             = "${local.name_prefix}-embeddings-idp-secret-"
+  description             = "OAuth2 client secret for IdP-authenticated embeddings endpoint"
+  recovery_window_in_days = 0
+  kms_key_id              = aws_kms_key.secrets.id
+  tags                    = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "embeddings_idp_client_secret" {
+  secret_id     = aws_secretsmanager_secret.embeddings_idp_client_secret.id
+  secret_string = var.embeddings_idp_client_secret != "" ? var.embeddings_idp_client_secret : "not-configured"
 
   lifecycle {
     ignore_changes = [secret_string]
@@ -506,6 +549,35 @@ resource "aws_secretsmanager_secret_version" "metrics_key_pepper" {
 
   secret_id     = aws_secretsmanager_secret.metrics_key_pepper[0].id
   secret_string = random_password.metrics_key_pepper[0].result
+}
+
+# Metrics-service admin API key. Gates the /admin/* endpoints (retention policy
+# changes, cleanup, database stats/size), which are privilege-separated from
+# metrics ingest: an ingest key is rejected on /admin/*, and /admin/* denies by
+# default until this key is set. Generated separately from the ingest API key so
+# it is guaranteed DISTINCT (an ingest key must never be usable for admin ops).
+resource "random_password" "metrics_admin_api_key" {
+  count   = var.enable_observability ? 1 : 0
+  length  = 48
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "metrics_admin_api_key" {
+  #checkov:skip=CKV2_AWS_57:Application-generated admin key - rotation requires coordinated service restart
+  count = var.enable_observability ? 1 : 0
+
+  name_prefix             = "${local.name_prefix}-metrics-admin-api-key-"
+  description             = "Admin API key gating metrics-service /admin/* endpoints (distinct from ingest key)"
+  recovery_window_in_days = 0
+  kms_key_id              = aws_kms_key.secrets.id
+  tags                    = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "metrics_admin_api_key" {
+  count = var.enable_observability ? 1 : 0
+
+  secret_id     = aws_secretsmanager_secret.metrics_admin_api_key[0].id
+  secret_string = random_password.metrics_admin_api_key[0].result
 }
 
 # Grafana admin password (issue #1325). Previously injected as a plaintext

@@ -31,9 +31,13 @@ from fastapi import (
 from pydantic import BaseModel
 
 from ..audit.context import set_audit_action
+from ..auth.asset_permissions import user_has_asset_permission
 from ..auth.csrf import verify_csrf_token_flexible
 from ..auth.dependencies import nginx_proxied_auth
+from ..core.config import settings
+from ..core.metrics import ASSET_ID_SUPPLIED_TOTAL
 from ..exceptions import (
+    AssetIdConflictError,
     SkillAlreadyExistsError,
     SkillContentFetchError,
     SkillContentSSRFError,
@@ -74,8 +78,13 @@ from ..services.skill_service import (
     get_skill_service,
 )
 from ..services.tool_validation_service import get_tool_validation_service
+from ..services.visibility import redact_proxy_backend_url
 from ..services.webhook_service import send_registration_webhook
-from ..utils.metadata import flatten_metadata_to_text
+from ..utils.metadata import (
+    flatten_metadata_to_text,
+    parse_and_validate_metadata_fields,
+    project_metadata,
+)
 from ..utils.path_utils import normalize_skill_path
 
 # Configure logging
@@ -92,9 +101,21 @@ class RatingRequest(BaseModel):
     rating: int
 
 
+class UpstreamHeadersUpdateRequest(BaseModel):
+    """Body for PATCH /api/skills/{path}/upstream-headers.
+
+    Replaces the skill's ENTIRE upstream custom-header set (rotation semantics,
+    like PATCH /servers/{path}/auth-credential replaces the credential). Each
+    entry is ``{name, value?, overridable?}`` -- same policy as create. An empty
+    list clears all upstream headers. Values are write-only: never echoed back.
+    """
+
+    custom_headers: list[dict[str, Any]] = []
+
+
 router = APIRouter(prefix="/skills", tags=["skills"])
 
-_SKILL_CARD_EXCLUDE = {"auth_credential_encrypted"}
+_SKILL_CARD_EXCLUDE = {"auth_credential_encrypted", "custom_headers_encrypted"}
 
 
 # Dependency for normalized path
@@ -205,8 +226,14 @@ async def list_skills(
     tag: str | None = Query(None, description="Filter by tag"),
     limit: int = Query(20, ge=1, le=2000, description="Number of skills to return (max 2000)"),
     offset: int = Query(0, ge=0, description="Number of skills to skip"),
+    metadata_fields: list[str] | None = Query(
+        None,
+        description="Comma-separated metadata field paths to include (dot-notation for nested). Example: 'author,extra.team'. Omit to return full metadata.",
+    ),
 ) -> dict:
     """List all registered skills with visibility filtering and pagination."""
+    _metadata_paths = parse_and_validate_metadata_fields(metadata_fields)
+
     logger.debug(
         f"list_skills called: limit={limit}, offset={offset}, "
         f"tag={tag!r}, include_disabled={include_disabled}"
@@ -214,17 +241,22 @@ async def list_skills(
 
     service = get_skill_service()
 
-    # Determine if user has unrestricted access (no skills will be filtered out)
+    # Determine if the caller sees every skill unfiltered. Skill visibility is a
+    # SKILL-scoped concern: only an admin is exempt from per-skill visibility
+    # filtering (matching list_skills_for_user, which returns all skills solely
+    # for admins). Agent-scoped grants such as "all" in accessible_agents must
+    # NOT unlock private/group skills -- doing so is a cross-resource permission
+    # confusion. Fail closed: any non-admin (or missing user_context) takes the
+    # filtered fallback path.
     is_admin = user_context.get("is_admin", False) if user_context else False
-    accessible_agent_list = user_context.get("accessible_agents", []) if user_context else []
-    is_unrestricted = is_admin or "all" in accessible_agent_list
+    is_unrestricted = is_admin
     # include_disabled=False (default) means "exclude disabled" which IS a filter.
     # Only include_disabled=True (show all) with no tag requires no filtering.
     has_field_filters = bool(tag or not include_disabled)
 
     # Dual-path pagination:
-    # - Fast path: DB-level skip/limit for unrestricted users without field filters
-    # - Fallback: full fetch + Python filter + slice for restricted users or field filters
+    # - Fast path: DB-level skip/limit for admins without field filters
+    # - Fallback: full fetch + Python filter + slice for non-admins or field filters
     if is_unrestricted and not has_field_filters:
         # FAST PATH: DB-level pagination -- correct because no skills are filtered out
         # and no field filters need a full scan for accurate total_count
@@ -244,7 +276,11 @@ async def list_skills(
                 tags=s.tags,
                 author=s.metadata.author if s.metadata else None,
                 version=s.metadata.version if s.metadata else None,
-                metadata=s.metadata,
+                metadata=project_metadata(
+                    s.metadata.model_dump() if s.metadata else None, _metadata_paths
+                )
+                if _metadata_paths is not None
+                else s.metadata,
                 compatibility=s.compatibility,
                 target_agents=s.target_agents,
                 is_enabled=s.is_enabled,
@@ -259,6 +295,11 @@ async def list_skills(
                 health_status=s.health_status,
                 last_checked_time=s.last_checked_time,
                 status=s.status,
+                # Gateway-proxy opt-in: carry through so the card badge + edit
+                # modal reflect stored state (proxy_client_url is server-derived).
+                is_proxied=s.is_proxied,
+                proxy_target_url=s.proxy_target_url,
+                proxy_client_url=s.proxy_client_url,
             )
             for s in skill_cards
         ]
@@ -284,6 +325,10 @@ async def list_skills(
     scan_summaries = await skill_scanner_service.get_scan_summaries()
     for skill in page_skills:
         skill.security_scan = scan_summaries.get(skill.path)
+        # Redact the internal backend origin (proxy_target_url) for non-admins,
+        # mirroring the MCP server read endpoints. is_proxied and the derived
+        # proxy_client_url stay visible.
+        redact_proxy_backend_url(skill, user_context)
 
     logger.info(
         f"Returning {len(page_skills)} skills for user "
@@ -302,7 +347,11 @@ async def list_skills(
 @router.post("/parse-skill-md", summary="Parse SKILL.md content from URL")
 async def parse_skill_md(
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
-    url: str = Query(..., description="URL to SKILL.md file"),
+    url: str = Query(
+        ...,
+        max_length=4096,
+        description="URL to SKILL.md file",
+    ),
     auth_scheme: str = Query(
         "none", description="Auth scheme: none, global_credentials, bearer, api_key"
     ),
@@ -397,7 +446,7 @@ async def search_skills(
     if not include_draft:
         excluded_statuses.add("draft")
 
-    matching_skills = []
+    matching_skills: list[dict[str, Any]] = []
     for skill in skills:
         # Filter by lifecycle status
         skill_status = getattr(skill, "status", "active") or "active"
@@ -784,6 +833,7 @@ async def rescan_skill(
     http_request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     skill_path: str = Path(..., description="Skill path"),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> dict:
     """Trigger a manual security scan for a skill. Admin only."""
     if not user_context.get("is_admin"):
@@ -836,6 +886,7 @@ async def refresh_skill_resources(
     http_request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     skill_path: str = Path(..., description="Skill path or name"),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> dict:
     """Re-discover companion resource files and update the stored manifest.
 
@@ -900,6 +951,13 @@ async def refresh_skill_resources(
 async def get_skill(
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     skill_path: str = Path(..., description="Skill path or name"),
+    metadata_fields: list[str] | None = Query(
+        None,
+        description=(
+            "Comma-separated metadata field paths to include (dot-notation for nested). "
+            "Example: 'author,extra.team'. Omit to return full metadata."
+        ),
+    ),
 ) -> SkillCard:
     """Get a specific skill by its path."""
     normalized_path = normalize_skill_path(skill_path)
@@ -915,6 +973,17 @@ async def get_skill(
     if not _user_can_access_skill(skill, user_context):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
+    # Apply metadata projection if requested (Issue #1277)
+    _metadata_paths = parse_and_validate_metadata_fields(metadata_fields)
+    if _metadata_paths is not None and skill.metadata:
+        projected = project_metadata(skill.metadata.model_dump(), _metadata_paths)
+        # Replace metadata with a projected SkillMetadata-compatible dict
+        from ..schemas.skill_models import SkillMetadata
+
+        skill.metadata = SkillMetadata(**(projected or {}))
+
+    # Redact the internal backend origin for non-admins (mirrors the list path).
+    redact_proxy_backend_url(skill, user_context)
     return skill
 
 
@@ -970,6 +1039,7 @@ async def register_skill(
     http_request: Request,
     request: SkillRegistrationRequest,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> SkillCard:
     """Register a new skill in the registry."""
     # Authorization: require the publish_skill UI permission, mirroring
@@ -1028,12 +1098,29 @@ async def register_skill(
     if effective_status:
         request.status = effective_status
 
+    # Feature-flag gate (#1276): reject a caller-supplied id when the flag is off
+    # (fail-closed). Charset/length are already validated by the request model.
+    from ..services._asset_id import (
+        InvalidAssetIdError,
+        check_caller_supplied_id_allowed,
+    )
+
+    try:
+        check_caller_supplied_id_allowed(request.id, settings.allow_caller_supplied_asset_id)
+    except InvalidAssetIdError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid asset id: {e}",
+        )
+
     service = get_skill_service()
     owner = user_context.get("username")
 
     try:
         skill = await service.register_skill(request=request, owner=owner, validate_url=True)
         logger.info(f"Registered skill: {skill.name} by {owner}")
+        if request.id is not None:
+            ASSET_ID_SUPPLIED_TOTAL.labels(asset_type="skill").inc()
 
         # Security scanning if enabled (non-blocking — mirrors server registration pattern)
         scan_task = asyncio.create_task(
@@ -1060,6 +1147,11 @@ async def register_skill(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except SkillValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except AssetIdConflictError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Skill with id '{e.asset_id}' already exists",
+        )
     except SkillServiceError as e:
         logger.error(f"Failed to register skill: {e}")
         raise HTTPException(
@@ -1078,6 +1170,7 @@ async def update_skill(
     request: SkillRegistrationRequest,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     skill_path: str = Path(..., description="Skill path or name"),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> SkillCard:
     """Update an existing skill."""
     normalized_path = normalize_skill_path(skill_path)
@@ -1144,6 +1237,23 @@ async def update_skill(
 
     updates = request.model_dump(exclude_unset=True, mode="json")
 
+    # Upstream custom headers are NOT settable on this general update (they are
+    # accepted at create, mirroring the MCP-server update model's intentional
+    # omission — see server_update_models.py). Drop them from the update payload so
+    # a PUT carrying `custom_headers` can neither (a) bypass the create-path
+    # validation (reserved-name block + count cap) nor (b) persist PLAINTEXT header
+    # values straight into storage via $set (custom_headers_encrypted would be left
+    # untouched, so it would also be a silent egress no-op). Header rotation after
+    # create goes through the dedicated PATCH /skills/{path}/upstream-headers
+    # endpoint (update_skill_upstream_headers).
+    for _hdr_field in (
+        "custom_headers",
+        "custom_headers_encrypted",
+        "custom_header_names",
+        "custom_header_overridable_names",
+    ):
+        updates.pop(_hdr_field, None)
+
     # Lifecycle status change requires change_lifecycle_status (Issue #1330).
     if "status" in updates:
         old_status = (getattr(existing, "status", None) or "active").lower()
@@ -1192,6 +1302,70 @@ async def update_skill(
     return updated
 
 
+@router.patch(
+    "/{skill_path:path}/upstream-headers",
+    response_model=SkillCard,
+    response_model_exclude=_SKILL_CARD_EXCLUDE,
+    summary="Rotate a skill's upstream proxy headers",
+)
+async def update_skill_upstream_headers(
+    http_request: Request,
+    body: UpstreamHeadersUpdateRequest,
+    user_context: Annotated[dict, Depends(nginx_proxied_auth)],
+    skill_path: str = Path(..., description="Skill path or name"),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
+) -> SkillCard:
+    """Replace a skill's upstream custom headers (the proxy-hop credentials).
+
+    Dedicated, narrowly-scoped mutation surface -- the mirror of PATCH
+    /servers/{path}/auth-credential -- so headers can be rotated after create
+    without re-registering, while the general PUT stays free of plaintext-secret
+    handling. Owner-or-admin + the modify_skill scope, same as PUT. An empty
+    ``custom_headers`` list clears all upstream headers. Fails with 400 on any
+    policy violation (reserved name, count cap, fixed Authorization, ...).
+    """
+    normalized_path = normalize_skill_path(skill_path)
+    set_audit_action(
+        http_request,
+        "update",
+        "skill_upstream_headers",
+        resource_id=normalized_path,
+        description=f"Rotate upstream headers for skill {normalized_path}",
+    )
+
+    service = get_skill_service()
+    existing = await service.get_skill(normalized_path)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Skill not found: {normalized_path}"
+        )
+    if not _user_can_modify_skill(existing, user_context):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    from ..utils.credential_encryption import build_custom_headers_storage_fields
+
+    # Pass the existing ciphertext so a blank submitted value preserves the stored
+    # secret (write-only value convention, same as the 3LO client_secret and the
+    # MCP-server custom-header edit path).
+    existing_encrypted = [
+        h.model_dump() if hasattr(h, "model_dump") else dict(h)
+        for h in (existing.custom_headers_encrypted or [])
+    ]
+    try:
+        updates = build_custom_headers_storage_fields(
+            body.custom_headers, existing_encrypted=existing_encrypted
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    updated = await service.update_skill(normalized_path, updates)
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Skill not found: {normalized_path}"
+        )
+    return updated
+
+
 @router.delete(
     "/{skill_path:path}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a skill"
 )
@@ -1199,6 +1373,7 @@ async def delete_skill(
     http_request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     skill_path: str = Path(..., description="Skill path or name"),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> None:
     """Delete a skill from the registry."""
     normalized_path = normalize_skill_path(skill_path)
@@ -1221,7 +1396,7 @@ async def delete_skill(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Skill not found: {normalized_path}"
         )
 
-    if not _user_can_modify_skill(existing, user_context):
+    if not _user_can_modify_skill(existing, user_context, action="delete"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     success = await service.delete_skill(normalized_path)
@@ -1270,7 +1445,7 @@ async def toggle_skill(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Skill not found: {normalized_path}"
         )
 
-    if not _user_can_modify_skill(existing, user_context):
+    if not _user_can_modify_skill(existing, user_context, action="toggle"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     success = await service.toggle_skill(normalized_path, request.enabled)
@@ -1289,6 +1464,7 @@ async def rate_skill(
     rating_request: RatingRequest,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     skill_path: str = Path(..., description="Skill path or name"),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> dict:
     """Submit a rating for a skill.
 
@@ -1380,8 +1556,37 @@ def _user_can_access_skill(
 def _user_can_modify_skill(
     skill: SkillCard,
     user_context: dict,
+    action: str = "modify",
 ) -> bool:
-    """Check if user can modify skill."""
+    """Check if the caller may perform a mutating ``action`` on ``skill``.
+
+    Dual gate: the caller must hold the canonical per-resource scope for this
+    action (``modify_skill`` / ``delete_skill`` / ``toggle_skill`` for the skill
+    name, or ``["all"]``) AND be an admin or the skill's owner. Previously this
+    was owner-or-admin ONLY, which silently ignored the seeded/grantable
+    skill-mutation scopes (they were inert). Admins bypass both checks via
+    ``user_has_asset_permission``.
+
+    The scope half brings skills to parity with every other family (all require
+    the canonical scope). For modify and delete the model is now uniform across
+    servers/agents/skills/custom entities (``scope AND (admin OR owner)``). The
+    one remaining divergence is TOGGLE: agent/server toggle admit a non-owner
+    holding an ``accessible_*`` (list-scope) grant, whereas skill toggle is
+    owner-only (skills have no ``accessible_skills`` toggle path). That toggle
+    non-uniformity is tracked as a follow-up; skills are stricter there, which is
+    fail-safe (over-deny, never over-grant).
+
+    Args:
+        skill: The skill being mutated.
+        user_context: The authenticated request context.
+        action: The logical mutation (``modify``/``delete``/``toggle``).
+
+    Returns:
+        True if both the scope check and the owner/admin check pass.
+    """
+    if not user_has_asset_permission("skill", action, skill.name, user_context):
+        return False
+
     if user_context.get("is_admin"):
         return True
 
@@ -1448,7 +1653,7 @@ async def _perform_skill_security_scan_on_registration(
         # scan_complete webhook (Issue #1330): safe or unsafe path.
         fire_scan_complete_event(
             skill.model_dump(),
-            result,
+            result,  # type: ignore[arg-type]  # SkillSecurityScanResult is structurally handled by the shared scan-complete emitter
             auto_disabled=auto_disabled,
             registration_type="skill",
         )

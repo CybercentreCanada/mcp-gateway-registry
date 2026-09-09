@@ -6,17 +6,21 @@ Common questions and answers about the MCP Gateway Registry.
 
 - [What is MCP and why do I need a gateway?](what-is-mcp-and-gateway.md)
 - [How do I deploy and register MCP servers and agents?](deploying-and-registering-servers-agents.md)
+- [What changes when I upgrade to a release with the gateway generic proxy?](gateway-proxy-backwards-compatibility.md)
 
 ## Tool and Agent Discovery
 
 - [How do I discover available MCP tools for my AI agent?](discovering-mcp-tools.md)
 - [How do I handle tool discovery when I don't know what tools are available?](agent-autonomous-tool-discovery.md)
 - [What filtering options are available for agents in the registry?](filtering-agents-by-tags-and-fields.md)
+- [How do I return only the metadata fields I need when listing or searching?](metadata-field-projection-search-listing.md)
 
 ## Connecting and Integration
 
 - [How do I get my AI coding assistant to work with this registry?](connect-ai-coding-assistant.md)
 - [How do I register commonly used third-party MCP servers like GitHub, Slack, and Atlassian?](registering-third-party-mcp-servers.md)
+- [How do I let my team call OpenAI or Bedrock through the gateway?](registering-model-inference-endpoints.md)
+- [How do I configure the Datadog MCP server with per-user egress OAuth (public client + PKCE)?](configuring-datadog-mcp-server.md)
 - [How do I connect my agent to multiple MCP servers through the gateway?](connecting-multiple-mcp-servers.md)
 - [How do I test my agent's integration with the MCP Gateway locally?](local-testing-agent-integration.md)
 
@@ -28,21 +32,26 @@ Common questions and answers about the MCP Gateway Registry.
 - [How do I rotate my MongoDB password and OpenBao token? (local Docker Compose, EC2/macOS)](rotate-mongodb-and-openbao-secrets.md)
 - [Why are some of my assets not showing up in semantic search?](fix-missing-search-embeddings.md)
 - [Why do I sometimes see search results for assets that no longer exist?](fix-stale-search-embeddings.md)
+- [How do I use a custom OpenAI-compatible embeddings endpoint (e.g. LiteLLM) that needs an IdP auth token?](idp-authenticated-embeddings-endpoint.md)
 
 ## Amazon Bedrock AgentCore
 
 - [How do I bulk-register all AgentCore Gateways and Runtimes from my AWS account?](agentcore-bulk-registration.md)
+- [How do I use a 3LO (per-user OAuth) AgentCore Gateway with the registry?](agentcore-3lo-per-user-oauth.md)
 
 ## Deployment Customization
 
 - [How do I add custom environment variables to the registry, auth-server, or mcpgw services?](adding-custom-env-vars.md)
+- [How do I register an asset with my own id instead of an auto-generated one?](caller-supplied-asset-id.md)
 
 ## Access Control and Visibility
 
+- [Why did the Skills or Agents tab go empty, and how do I grant a group discovery access?](granting-skill-and-agent-discovery-permissions.md)
 - [How do I restrict which agents a user can see based on their group?](group-restricted-agent-visibility.md)
 - [How do I restrict which MCP servers a user can see based on their Entra ID group?](restrict-server-visibility-by-entra-group.md)
 - [How do I create a non-admin group that can register servers and run health checks but cannot toggle, edit, or delete them?](read-write-non-admin-group.md)
 - [How do I set up a self-service workflow for AI assets (draft to review to active)?](self-service-asset-lifecycle-workflow.md)
+- [How do I quarantine a user, an agent, or an MCP server (kill switch)?](quarantine-a-caller-or-target.md)
 
 ## Authentication and API Access
 
@@ -50,4 +59,6 @@ Common questions and answers about the MCP Gateway Registry.
 - [Can I use an Entra ID token to call the registry API instead of the UI-generated token?](use-entra-token-for-registry-api.md)
 - [How do I register an M2M client and assign it groups without an IdP Admin API token?](registering-m2m-client-without-idp-admin-token.md)
 - [Registry API Authentication FAQ (static token, IdP JWT, coexistence)](registry-api-auth-faq.md)
+- [How do I generate an MCP access token that lasts longer than 8 hours?](generate-token-longer-than-8-hours.md)
 - [How do I pass an M2M token from Entra to the registration gate?](oauth2-token-for-registration-gate.md)
+- [How does an admin seed per-user egress PATs for a `pat` server?](seeding-per-user-egress-pats-as-admin.md)

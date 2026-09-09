@@ -142,14 +142,34 @@ variable "keycloak_database_username" {
   default     = "keycloak"
 }
 
+variable "allow_unsafe_password_chars" {
+  description = <<-EOT
+    Escape hatch for the URI/RDS-safe password character validation added in
+    #1354. Default false: keycloak_database_password and documentdb_admin_password
+    are rejected if they contain / @ " ' + : ? # & ! = % or spaces (these break
+    RDS/DocumentDB, connection-string/URI parsing, or curl form-encoding).
+
+    Set true ONLY for an EXISTING install whose databases were already created
+    with such a password (rotating a live master password is avoidable churn).
+    This does NOT make those characters safe; it suppresses the fail-fast check
+    so an existing deployment can keep applying without a forced password change.
+    New installs should leave this false and choose a compliant password.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "keycloak_database_password" {
   description = "Keycloak database password"
   type        = string
   sensitive   = true
 
   validation {
-    condition     = !can(regex("[/ @\"'+:?#&!=%]", var.keycloak_database_password))
-    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces."
+    # Reject URI/RDS-unsafe characters (#1354) unless the operator explicitly
+    # opts out via allow_unsafe_password_chars (for existing installs already
+    # running such a password). Safe by default.
+    condition     = var.allow_unsafe_password_chars || !can(regex("[/ @\"'+:?#&!=%]", var.keycloak_database_password))
+    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces. Set allow_unsafe_password_chars=true to override for an existing install."
   }
 }
 
@@ -180,19 +200,19 @@ variable "keycloak_log_level" {
 variable "registry_image_uri" {
   description = "Container image URI for registry service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/registry:1.26.0"
+  default     = "public.ecr.aws/p3v1o3c6/registry:1.30.0"
 }
 
 variable "auth_server_image_uri" {
   description = "Container image URI for auth server service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/auth-server:1.26.0"
+  default     = "public.ecr.aws/p3v1o3c6/auth-server:1.30.0"
 }
 
 variable "mcpgw_image_uri" {
   description = "Container image URI for mcpgw service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/mcpgw:1.26.0"
+  default     = "public.ecr.aws/p3v1o3c6/mcpgw:1.30.0"
 }
 
 variable "keycloak_image_uri" {
@@ -305,6 +325,55 @@ variable "embeddings_api_key" {
   sensitive   = true
 }
 
+variable "embeddings_auth_mode" {
+  description = "Auth strategy for the litellm embeddings provider. '' or 'static' = current behavior. 'idp' = fetch bearer via OAuth2 client credentials."
+  type        = string
+  default     = ""
+}
+
+variable "embeddings_idp_token_endpoint" {
+  description = "OAuth2 token endpoint URL (must be https://). Required when embeddings_auth_mode=idp."
+  type        = string
+  default     = ""
+}
+
+variable "embeddings_idp_client_id" {
+  description = "OAuth2 client id for embeddings IdP auth. Required when embeddings_auth_mode=idp."
+  type        = string
+  default     = ""
+}
+
+variable "embeddings_idp_client_secret" {
+  description = "OAuth2 client secret for embeddings IdP auth. Required when embeddings_auth_mode=idp."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "embeddings_idp_scope" {
+  description = "OAuth2 scope for embeddings IdP auth (e.g. 'api://<app-id>/.default'). Optional."
+  type        = string
+  default     = ""
+}
+
+variable "embeddings_idp_timeout_seconds" {
+  description = "HTTP timeout in seconds for the IdP token request."
+  type        = number
+  default     = 30
+}
+
+variable "embeddings_idp_allow_insecure" {
+  description = "Local dev only: permit an http:// (loopback) IdP token endpoint. Default false (https required)."
+  type        = bool
+  default     = false
+}
+
+variable "embeddings_response_format" {
+  description = "Response shape of the litellm embeddings endpoint. 'openai' (default) = standard envelope; 'raw_array' = endpoint returns a bare [[float]] array."
+  type        = string
+  default     = ""
+}
+
 
 #
 # Registration Deduplication Configuration
@@ -366,6 +435,12 @@ variable "session_cookie_domain" {
   default     = ""
 }
 
+variable "oauth2_allowed_redirect_uris" {
+  description = "Comma-separated exact-match allowlist of OAuth login/logout redirect URIs (open-redirect hardening). When set, an absolute redirect_uri is accepted only if it exactly matches an entry; relative paths are always allowed. Empty falls back to the weaker cookie-domain heuristic."
+  type        = string
+  default     = ""
+}
+
 variable "trusted_proxy_hops" {
   description = "Number of trusted reverse-proxy hops in front of the app. The audit client IP is taken from the Nth-from-the-right X-Forwarded-For entry, never the client-controlled left-most one. Default 1 (the bundled nginx). Raise it when additional trusted proxies (e.g. ALB + CloudFront) sit in front."
   type        = number
@@ -379,7 +454,7 @@ variable "trusted_external_hosts" {
 }
 
 variable "trusted_real_ip_cidrs" {
-  description = "Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front of the bundled nginx, used for nginx's set_real_ip_from so the audited client IP is the real end user rather than the load balancer's internal IP. Leave empty (default) for edge deployments where nginx is reached directly. Behind an ALB (EC2/ECS/EKS) set your VPC CIDR (e.g. 10.0.0.0/16); for CloudFront in front of an ALB list the VPC CIDR AND CloudFront's origin-facing ranges. Malformed entries are dropped (fail closed) and a spoofed left-most X-Forwarded-For is always ignored."
+  description = "Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front of the bundled nginx, used for nginx's set_real_ip_from so the audited client IP is the real end user rather than the load balancer's internal IP AND so the inbound rate-limit zones throttle per real client IP instead of collapsing to one global bucket at the ALB's IP. Leave EMPTY (the default) to auto-populate with this stack's VPC CIDR: ECS is always behind an ALB, so the module defaults set_real_ip_from to the VPC CIDR for you. Set it explicitly only to override (e.g. CloudFront in front of an ALB: list the VPC CIDR AND CloudFront's origin-facing ranges), or to a narrower range. Malformed entries are dropped (fail closed) and a spoofed left-most X-Forwarded-For is always ignored."
   type        = string
   default     = ""
 }
@@ -408,8 +483,12 @@ variable "documentdb_admin_password" {
   default     = ""
 
   validation {
-    condition     = var.documentdb_admin_password == "" || !can(regex("[/ @\"'+:?#&!=%]", var.documentdb_admin_password))
-    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces."
+    # Reject URI/RDS-unsafe characters (#1354) unless the operator explicitly
+    # opts out via allow_unsafe_password_chars (for existing installs already
+    # running such a password). Empty is allowed (only required for documentdb
+    # storage backend). Safe by default.
+    condition     = var.allow_unsafe_password_chars || var.documentdb_admin_password == "" || !can(regex("[/ @\"'+:?#&!=%]", var.documentdb_admin_password))
+    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces. Set allow_unsafe_password_chars=true to override for an existing install."
   }
 }
 
@@ -500,6 +579,56 @@ variable "documentdb_namespace" {
   default     = "default"
 }
 
+# Rate Limiting (issue #295). Application-level, identity/target-aware limits
+# enforced at the auth-server /validate hop. Off by default.
+variable "rate_limiting_enabled" {
+  description = "Master switch for application-level rate limiting"
+  type        = bool
+  default     = false
+}
+
+variable "rate_limit_backend" {
+  description = "Rate-limit counter backend (only 'documentdb' is implemented in v1)"
+  type        = string
+  default     = "documentdb"
+}
+
+variable "rate_limit_fail_open" {
+  description = "Global fail-open on rate-limit backend error (per-limit fail_closed overrides)"
+  type        = bool
+  default     = true
+}
+
+variable "rate_limit_quarantine_fail_closed" {
+  description = "Deny (fail closed) on a backend error reading quarantine membership (default fail-open)"
+  type        = bool
+  default     = false
+}
+
+variable "rate_limit_definitions_cache_ttl_seconds" {
+  description = "In-process cache TTL (seconds) for rate-limit definition reads"
+  type        = number
+  default     = 30
+}
+
+variable "rate_limit_backend_timeout_ms" {
+  description = "Hard per-op timeout (ms) for each rate-limit counter operation"
+  type        = number
+  default     = 250
+}
+
+variable "rate_limit_user_floor_per_min" {
+  description = "Minimum per-minute user limit a group may set on short windows (lockout safeguard)"
+  type        = number
+  default     = 20
+}
+
+variable "rate_limit_agent_floor_per_min" {
+  description = "Minimum per-minute agent limit a group may set on short windows (lockout safeguard)"
+  type        = number
+  default     = 10
+}
+
 variable "documentdb_use_tls" {
   description = "Use TLS for DocumentDB connections"
   type        = bool
@@ -526,6 +655,30 @@ variable "mongodb_connection_string" {
 
 variable "mongodb_connection_string_secret_arn" {
   description = "Optional Secrets Manager ARN for the full MongoDB connection string. Preferred over mongodb_connection_string when the URI contains credentials."
+  type        = string
+  default     = ""
+}
+
+# Base64-encoded HTML snippet served as /rum.js for frontend Real User
+# Monitoring (RUM). Empty disables RUM. Prefer registry_rum_snippet_secret_arn
+# when the snippet carries a vendor token, to avoid storing secrets in
+# Terraform state (mirrors the mongodb_connection_string plaintext-or-secret
+# pattern).
+variable "registry_rum_snippet_b64" {
+  description = "Optional base64-encoded HTML snippet served as /rum.js for frontend RUM (plain text). Empty disables RUM. Prefer registry_rum_snippet_secret_arn when the snippet contains a vendor token."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "registry_rum_snippet_secret_arn" {
+  description = "Optional Secrets Manager ARN for the base64-encoded RUM snippet. Preferred over registry_rum_snippet_b64 when the snippet contains a vendor token."
+  type        = string
+  default     = ""
+}
+
+variable "registry_rum_allowed_hosts" {
+  description = "Optional comma-separated allowlist of hosts the RUM snippet may reference (script src and beacon). When set, a snippet referencing any host not on the list is rejected at startup (fail closed). Empty disables the check."
   type        = string
   default     = ""
 }
@@ -633,6 +786,18 @@ variable "entra_graph_base_url" {
   default     = ""
 }
 
+variable "entra_scope_format" {
+  description = "Entra PRM scope form: 'v1' (api://<app-id>/<scope>) or 'v2' (bare, default). Set 'v1' only if the Entra app exposes v1-style api:// scopes (issue #990). Empty uses the app default (v2)."
+  type        = string
+  default     = ""
+}
+
+variable "entra_application_id_uri" {
+  description = "Application ID URI (e.g. api://<app-id>) registered on the Entra app. Used as the v1 scope prefix and accepted as a token audience. Empty defaults to api://<entra_client_id>."
+  type        = string
+  default     = ""
+}
+
 variable "idp_group_filter_prefix" {
   description = "Comma-separated list of prefixes to filter IdP groups in IAM > Groups page (e.g., 'mcp-,registry-'). Applies to all identity providers."
   type        = string
@@ -686,6 +851,12 @@ variable "cognito_client_secret" {
 
 variable "cognito_domain" {
   description = "Optional Cognito hosted UI domain prefix or custom domain. Leave empty to derive it from the User Pool ID (e.g. https://<pool-id-without-underscore>.auth.<region>.amazoncognito.com)."
+  type        = string
+  default     = ""
+}
+
+variable "cognito_m2m_client_ids" {
+  description = "Optional comma/space-separated allowlist of Cognito app-client ids that mint machine (client_credentials) access tokens the gateway should accept (COGNITO_M2M_CLIENT_IDS). Default-empty = fail closed."
   type        = string
   default     = ""
 }
@@ -948,6 +1119,28 @@ variable "max_tokens_per_user_per_hour" {
   default     = 100
 }
 
+variable "mcp_token_default_ttl_hours" {
+  description = "Default TTL (hours) for minted MCP tokens when the caller does not request one."
+  type        = number
+  default     = 8
+
+  validation {
+    condition     = var.mcp_token_default_ttl_hours >= 1
+    error_message = "mcp_token_default_ttl_hours must be at least 1"
+  }
+}
+
+variable "mcp_token_max_ttl_hours" {
+  description = "Maximum TTL (hours) a caller may request for a minted MCP token."
+  type        = number
+  default     = 24
+
+  validation {
+    condition     = var.mcp_token_max_ttl_hours >= 1
+    error_message = "mcp_token_max_ttl_hours must be at least 1"
+  }
+}
+
 # =============================================================================
 # REGISTRATION WEBHOOK (Issue #742)
 # =============================================================================
@@ -1040,6 +1233,16 @@ variable "batch_worker_lease_heartbeat_seconds" {
   description = "Interval at which a worker renews the lease on its in-flight job. Should be below batch_worker_lease_ttl_seconds."
   type        = number
   default     = 15
+}
+
+# =============================================================================
+# CALLER-SUPPLIED ASSET ID (Issue #1276)
+# =============================================================================
+
+variable "allow_caller_supplied_asset_id" {
+  description = "Allow callers to supply their own asset id on the public server/agent/skill registration routes. Fail-closed: OFF by default (supplied id rejected, ids auto-generate). Federation is not affected. Default: false."
+  type        = bool
+  default     = false
 }
 
 # =============================================================================
@@ -1164,6 +1367,25 @@ variable "aws_registry_federation_enabled" {
   default     = false
 }
 
+variable "aws_registry_federation_assume_role_arns" {
+  description = <<-EOT
+    IAM role ARNs the registry task may assume for cross-account AWS Agent
+    Registry federation. Leave empty (the default) to disable cross-account
+    access: the sts:AssumeRole grant is omitted entirely and only same-account
+    federation works. Fail-closed: an unset list grants no cross-account trust.
+  EOT
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for arn in var.aws_registry_federation_assume_role_arns :
+      can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:role/.+$", arn))
+    ])
+    error_message = "Each entry must be a full IAM role ARN (arn:aws:iam::<account-id>:role/<name>)."
+  }
+}
+
 # =============================================================================
 # ANS (AGENT NAMING SERVICE) CONFIGURATION
 # =============================================================================
@@ -1231,6 +1453,12 @@ variable "audit_log_ttl_days" {
     condition     = var.audit_log_ttl_days >= 1 && var.audit_log_ttl_days <= 365
     error_message = "Audit log TTL must be between 1 and 365 days"
   }
+}
+
+variable "audit_log_require_durable" {
+  description = "Require a durable audit sink (fail closed). When true (default), the registry refuses to start if audit logging is enabled but no durable store (MongoDB/DocumentDB) is available, instead of silently degrading to non-durable JSON log lines that can be lost on restart and are not queryable for forensics. Set to false only in environments where a non-durable audit trail is acceptable."
+  type        = bool
+  default     = true
 }
 
 # =============================================================================
@@ -1506,6 +1734,24 @@ variable "registry_mode" {
   }
 }
 
+variable "a2a_reverse_proxy_enabled" {
+  description = "Enable A2A agent reverse-proxy generation (opt-in; default off). When true, each enabled A2A agent gets nginx location blocks proxying its card + JSON-RPC through the gateway for centralized auth and metrics."
+  type        = bool
+  default     = false
+}
+
+variable "ssrf_allowed_hosts" {
+  description = "Comma-separated hostnames (or literal IPs) that may resolve to private addresses and still be accepted by the SSRF guard for MCP-server proxy_pass_url / A2A-agent URLs. The cloud metadata endpoint is never permitted."
+  type        = string
+  default     = ""
+}
+
+variable "ssrf_allowed_cidrs" {
+  description = "Comma-separated CIDR ranges the SSRF guard accepts for MCP-server / A2A-agent upstreams even though they are private. The cloud metadata address 169.254.169.254 is never permitted."
+  type        = string
+  default     = ""
+}
+
 variable "internal_only_deployment" {
   description = <<-EOT
     Marks this as one of our own internal/workshop deployments (not a community
@@ -1720,7 +1966,7 @@ variable "github_api_base_url" {
 # =============================================================================
 
 variable "enable_waf" {
-  description = "Enable WAFv2 Web ACLs for ALBs. Requires wafv2:* IAM permissions. Set to false if IAM permissions are not available."
+  description = "Enable WAFv2 Web ACLs for ALBs (AWS managed rule sets + WAF-level rate rules) as optional defense-in-depth. NOT required for per-client-IP rate limiting: the container nginx already rate-limits the auth-validation fan-out per real client IP (trusted_real_ip_cidrs defaults to the VPC CIDR, so nginx's realip module rewrites the limit key from the ALB IP to the real client out of the box). Defaults to false as a cost decision (WAFv2 has a per-Web-ACL and per-request cost and requires wafv2:* IAM permissions); set to true for an extra managed-rules layer (see terraform/aws-ecs/README.md)."
   type        = bool
   default     = false
 }
@@ -1764,18 +2010,66 @@ variable "ide_oauth_callback_port" {
   default     = 0
 }
 
+variable "ide_connect_scope" {
+  description = <<-EOT
+    Optional install scope for the Claude Code Connect snippet: local, project,
+    or user. When set, the generated `claude mcp add` command emits
+    `--scope <value>`. Empty (default) omits the flag. Display-only; passed
+    through to the mcp_gateway module.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "registry_extra_env" {
-  description = "Extra environment variables for the registry service. List of objects with 'name' and 'value' fields. Reserved names (listed in charts/registry/reserved-env-names.txt) should not be overridden here — use their canonical Terraform variable instead. For secrets, prefer AWS Secrets Manager ARNs wired into the task definition's secrets block (see mongodb_connection_string_secret_arn as a reference pattern)."
+  description = "Extra environment variables for the registry service. List of objects with 'name' and 'value' fields. AWS_EC2_METADATA_DISABLED is Terraform-managed and cannot be overridden. Reserved names (listed in charts/registry/reserved-env-names.txt) should not be overridden here — use their canonical Terraform variable instead. For secrets, prefer AWS Secrets Manager ARNs wired into the task definition's secrets block (see mongodb_connection_string_secret_arn as a reference pattern)."
   type        = list(object({ name = string, value = string }))
   default     = []
   sensitive   = true
+
+  validation {
+    condition = alltrue([
+      for entry in var.registry_extra_env : (
+        upper(trimspace(entry.name)) != "AWS_EC2_METADATA_DISABLED"
+        && !contains([
+          "GATEWAY_GENERIC_PROXY_ENABLED",
+          "GATEWAY_CANONICAL_NAMESPACE_ENABLED",
+          "GATEWAY_PROXY_ALLOW_PRIVATE_TARGETS",
+          "GATEWAY_GENERIC_CLIENT_MAX_BODY_SIZE",
+          "GATEWAY_PROXY_PREFIX",
+          "GATEWAY_GENERIC_STREAM_READ_TIMEOUT_SECONDS",
+        ], upper(trimspace(entry.name)))
+      )
+    ])
+    error_message = "registry_extra_env must not override Terraform-managed variables (AWS_EC2_METADATA_DISABLED or the canonical gateway_* generic-proxy variables; use the gateway_* variables instead)."
+  }
 }
 
 variable "auth_server_extra_env" {
-  description = "Extra environment variables for the auth-server service. List of objects with 'name' and 'value' fields. Reserved names (listed in charts/auth-server/reserved-env-names.txt) should not be overridden here — use their canonical Terraform variable instead. For secrets, prefer AWS Secrets Manager ARNs wired into the task definition's secrets block."
+  description = "Extra environment variables for the auth-server service. AWS_EC2_METADATA_DISABLED is Terraform-managed and cannot be overridden. For secrets, prefer AWS Secrets Manager ARNs wired into the task definition's secrets block."
   type        = list(object({ name = string, value = string }))
   default     = []
   sensitive   = true
+
+  validation {
+    condition = alltrue([
+      for entry in var.auth_server_extra_env : !contains([
+        "GATEWAY_GENERIC_PROXY_ENABLED",
+        "GENERIC_PROXY_TOKEN_TTL_SECONDS",
+        "GENERIC_PROXY_MAX_BODY_BYTES",
+        "GATEWAY_GENERIC_REQUIRE_BEARER_FOR_WRITES",
+        "GATEWAY_EGRESS_SELFCHECK_ENABLED",
+        "GATEWAY_GENERIC_TLS_VERIFY",
+        "GATEWAY_GENERIC_MAX_CONCURRENCY",
+        "GATEWAY_GENERIC_STREAM_MAX_CONCURRENCY",
+        "GATEWAY_GENERIC_ACQUIRE_TIMEOUT_SECONDS",
+        "GATEWAY_GENERIC_STREAM_MAX_DURATION_SECONDS",
+        "GATEWAY_GENERIC_STREAM_MAX_BYTES",
+        "AWS_EC2_METADATA_DISABLED",
+      ], upper(trimspace(entry.name)))
+    ])
+    error_message = "auth_server_extra_env must not override Terraform-managed generic-proxy or metadata-hardening variables; use the canonical variables instead."
+  }
 }
 
 variable "mcpgw_extra_env" {
@@ -1856,10 +2150,27 @@ variable "egress_obo_allowed_audiences" {
   default     = ""
 }
 
-variable "egress_registry_internal_url" {
-  description = "URL the auth-server uses to reach the registry internal vend endpoint."
+variable "egress_oauth_trusted_idp_hosts" {
+  description = <<-EOT
+    Optional comma-separated hostnames of operator-controlled OAuth/OIDC identity
+    providers whose token endpoints may resolve to private addresses. Empty (the
+    default) means the credentialed-OAuth SSRF profile permits no private-resolving
+    token endpoint. Set this when the IdP is self-hosted (Keycloak, or Entra reached
+    over Private Link), where the token endpoint legitimately resolves to RFC1918
+    and egress consent would otherwise fail as blocked by security policy. Exact
+    hostnames only: no CIDRs, no wildcards, and this does not inherit
+    ssrf_allowed_hosts, so a proxy-target bypass can never relax a token POST.
+    HTTPS stays required and metadata/link-local addresses stay denied. Entries
+    receive client secrets, refresh tokens and user assertions, so keep it tight.
+  EOT
   type        = string
-  default     = "http://registry:8080"
+  default     = ""
+}
+
+variable "egress_registry_internal_url" {
+  description = "URL the auth-server uses to reach the registry's dedicated internal egress-token vend listener. Served on a separate nginx port (8091) that the ALB never fronts; reached task-to-task via Service Connect (registry:8091), gated by the auth-server->registry security-group rule."
+  type        = string
+  default     = "http://registry:8091"
 }
 
 variable "egress_nginx_marker_secret" {
@@ -1879,4 +2190,138 @@ variable "egress_secrets_manager_path_prefix" {
   description = "Secrets Manager name prefix for the egress vault (also scopes the task IAM grant)."
   type        = string
   default     = "mcp/egress"
+}
+
+variable "egress_credential_encryption_key" {
+  description = "Optional AES-256-GCM key (registry-only) used to encrypt per-user egress credentials at rest before they reach Secrets Manager / OpenBao. Empty disables encryption (legacy plaintext); existing deployments keep working unchanged. Never auto-generated."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+# =============================================================================
+# GATEWAY GENERIC-PROXY FEATURE (ships disabled by default)
+# =============================================================================
+
+# Registry container settings
+variable "gateway_generic_proxy_enabled" {
+  description = "Master switch for the gateway generic-proxy feature (proxying arbitrary resources). Off by default = no behavior change for existing deployments."
+  type        = bool
+  default     = false
+}
+
+variable "gateway_canonical_namespace_enabled" {
+  description = "Enable canonical namespace handling for generic-proxied entities. Off by default."
+  type        = bool
+  default     = false
+}
+
+variable "gateway_proxy_allow_private_targets" {
+  description = "Allow the generic proxy to reach private/internal network targets. Off by default to keep the SSRF egress guard fail-closed."
+  type        = bool
+  default     = false
+}
+
+variable "gateway_generic_client_max_body_size" {
+  description = "Maximum client request body size accepted by the generic-proxy nginx location (nginx client_max_body_size syntax, e.g. '1m')."
+  type        = string
+  default     = "1m"
+}
+
+variable "gateway_proxy_prefix" {
+  description = "URL path prefix for auto-generated client-facing proxy routes (/{prefix}/{entity_type}/{name}). Single URL-safe path segment; the registry derives the client path automatically."
+  type        = string
+  default     = "gateway"
+}
+
+variable "gateway_generic_stream_read_timeout_seconds" {
+  description = "nginx proxy_read_timeout (seconds) for generic-proxy routes whose entity has proxy_streaming=true (SSE / token streams, e.g. an LLM proxied as a custom type). Only affects streaming routes."
+  type        = number
+  default     = 3600
+}
+
+# Auth-server container settings
+variable "generic_proxy_token_ttl_seconds" {
+  description = "Lifetime (seconds) of the auth-server-minted generic-proxy internal token; the replay-window cap."
+  type        = number
+  default     = 30
+}
+
+variable "generic_proxy_max_body_bytes" {
+  description = "Upper bound (in bytes) on a generic-proxy upstream response body that the auth-server hop will buffer. Default 10485760 (10 MiB)."
+  type        = number
+  default     = 10485760
+}
+
+variable "gateway_generic_require_bearer_for_writes" {
+  description = "Require a bearer token for write (non-GET) requests through the generic proxy. On by default (fail-closed)."
+  type        = bool
+  default     = true
+}
+
+variable "gateway_egress_selfcheck_enabled" {
+  description = "Enable the egress self-check that validates outbound connectivity before enabling generic-proxy targets. On by default (fail-closed)."
+  type        = bool
+  default     = true
+}
+
+variable "gateway_generic_tls_verify" {
+  description = "Whether the generic proxy verifies upstream TLS certificates. Defaults to 'true'; set to 'false' only for trusted internal targets with self-signed certs."
+  type        = string
+  default     = "true"
+}
+
+variable "gateway_generic_max_concurrency" {
+  description = "Maximum number of concurrent buffered generic-proxy requests handled by the auth-server."
+  type        = number
+  default     = 32
+
+  validation {
+    condition     = var.gateway_generic_max_concurrency >= 1
+    error_message = "gateway_generic_max_concurrency must be at least 1."
+  }
+}
+
+variable "gateway_generic_stream_max_concurrency" {
+  description = "Maximum number of concurrent long-lived generic-proxy streams; isolated from buffered request capacity."
+  type        = number
+  default     = 8
+
+  validation {
+    condition     = var.gateway_generic_stream_max_concurrency >= 1
+    error_message = "gateway_generic_stream_max_concurrency must be at least 1."
+  }
+}
+
+variable "gateway_generic_acquire_timeout_seconds" {
+  description = "Maximum seconds a generic request waits for either concurrency pool before returning 503."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.gateway_generic_acquire_timeout_seconds > 0
+    error_message = "gateway_generic_acquire_timeout_seconds must be greater than 0."
+  }
+}
+
+variable "gateway_generic_stream_max_duration_seconds" {
+  description = "Absolute lifetime in seconds for one generic-proxy stream, even while chunks continue to arrive."
+  type        = number
+  default     = 3600
+
+  validation {
+    condition     = var.gateway_generic_stream_max_duration_seconds >= 1
+    error_message = "gateway_generic_stream_max_duration_seconds must be at least 1."
+  }
+}
+
+variable "gateway_generic_stream_max_bytes" {
+  description = "Maximum raw response bytes forwarded by one generic-proxy stream."
+  type        = number
+  default     = 104857600
+
+  validation {
+    condition     = var.gateway_generic_stream_max_bytes >= 1024
+    error_message = "gateway_generic_stream_max_bytes must be at least 1024."
+  }
 }

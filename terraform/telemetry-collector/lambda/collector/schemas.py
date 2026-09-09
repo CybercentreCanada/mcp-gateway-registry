@@ -45,9 +45,7 @@ def _check_cloud_detection_consistency(cloud: str, method: str | None) -> None:
     if method is None:
         return
     if method == "ecs_meta" and cloud != "aws":
-        raise ValueError(
-            f"cloud_detection_method=ecs_meta requires cloud=aws, got cloud={cloud!r}"
-        )
+        raise ValueError(f"cloud_detection_method=ecs_meta requires cloud=aws, got cloud={cloud!r}")
     if method == "unknown" and cloud != "unknown":
         raise ValueError(
             f"cloud_detection_method=unknown requires cloud=unknown, got cloud={cloud!r}"
@@ -64,8 +62,7 @@ def _check_cloud_detection_consistency(cloud: str, method: str | None) -> None:
         )
     if method == "operator_declined" and cloud != "unknown":
         raise ValueError(
-            f"cloud_detection_method=operator_declined requires cloud=unknown, "
-            f"got cloud={cloud!r}"
+            f"cloud_detection_method=operator_declined requires cloud=unknown, got cloud={cloud!r}"
         )
     if cloud in ("on_premises", "other") and method not in ("operator_declared", "explicit"):
         raise ValueError(

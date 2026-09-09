@@ -278,6 +278,7 @@ async def rate_virtual_server(
     rating_request: RatingRequest,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     vs_path: str = Path(..., description="Virtual server path"),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> dict:
     """Submit or update a rating for a virtual server.
 
@@ -373,6 +374,7 @@ async def create_virtual_server(
     http_request: Request,
     request: CreateVirtualServerRequest,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> VirtualServerConfig:
     """Create a new virtual MCP server.
 
@@ -429,6 +431,7 @@ async def update_virtual_server(
     request: UpdateVirtualServerRequest,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     vs_path: str = Path(..., description="Virtual server path"),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> VirtualServerConfig:
     """Update an existing virtual MCP server.
 
@@ -489,6 +492,7 @@ async def delete_virtual_server(
     http_request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     vs_path: str = Path(..., description="Virtual server path"),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> None:
     """Delete a virtual MCP server.
 
@@ -599,11 +603,13 @@ async def get_tool_catalog(
     and available versions.
     """
     service = get_tool_catalog_service()
-    # Admin users bypass scope filtering (consistent with /api/servers)
-    user_scopes = None if user_context.get("is_admin") else user_context.get("scopes", [])
+    # The service enforces the canonical scope-based server-access check
+    # (user_can_access_server_from_doc) so the catalog only exposes tools
+    # from servers this caller may access. Admin / wildcard grants are
+    # handled inside that helper, matching /api/servers.
     catalog = await service.get_tool_catalog(
         server_path_filter=server_path,
-        user_scopes=user_scopes,
+        user_context=user_context,
     )
 
     # Group by server for convenience

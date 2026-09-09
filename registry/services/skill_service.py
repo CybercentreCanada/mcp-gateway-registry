@@ -18,9 +18,13 @@ from urllib.parse import urlparse
 
 import httpx
 
+from ..common.log_redaction import redact_url
 from ..core.config import settings
+from ..core.metrics import ASSET_ID_CONFLICT_TOTAL
 from ..exceptions import (
+    AssetIdConflictError,
     SkillUrlValidationError,
+    SkillValidationError,
     UrlValidationError,
 )
 from ..repositories.factory import (
@@ -30,6 +34,10 @@ from ..repositories.factory import (
 from ..repositories.interfaces import (
     SearchRepositoryBase,
     SkillRepositoryBase,
+)
+from ..schemas.proxy_mixin import (
+    clear_upstream_headers_on_repoint,
+    validate_and_pin_proxy_target,
 )
 from ..schemas.skill_models import (
     ContentIntegrity,
@@ -53,6 +61,7 @@ from ..utils.url_utils import (
     extract_repository_url,
     translate_skill_url,
 )
+from ._asset_id import resolve_asset_id
 from .github_auth import github_auth_provider as _github_auth
 
 # Configure logging
@@ -102,6 +111,53 @@ def _is_safe_url(
     except Exception as e:  # pragma: no cover - defensive, fail closed
         logger.warning("SSRF protection: Error validating URL: %s", e)
         return False
+
+
+def _unsafe_redirect_target(
+    response: httpx.Response,
+) -> str | None:
+    """Return the first redirect hop that fails SSRF validation, else None.
+
+    Only real redirects are examined. ``response.url`` cannot be used for this:
+    the guarded transport pins every request to a validated IP by rewriting the
+    URL host (``url_guard._rewrite_to_pinned_ip``), so ``response.url`` differs
+    from the requested URL on EVERY fetch and reads as an IP literal. Comparing
+    it rejected SKILL.md fetches from forges whose hostname is allowlisted via
+    ``github_extra_hosts`` but resolves to a private address -- no redirect
+    involved (issue #1740).
+
+    Identity, not the pinned address, is what needs checking. The transport
+    preserves the intended hostname in the ``Host`` header and the
+    ``sni_hostname`` extension, so each hop is validated under the name the
+    server was asked for. A hop whose host was already an IP literal (no
+    rewrite, so no ``Host`` override) is validated as-is.
+
+    This is defense in depth: the transport itself validates, resolves, and pins
+    every hop including redirects, so a redirect to a denied address raises
+    UrlValidationError before any connect. This adds a second, independent check
+    that the redirect CHAIN stayed within policy.
+
+    Args:
+        response: The completed httpx response, possibly with a redirect history.
+
+    Returns:
+        The offending URL (identity form) if a hop fails validation, else None.
+    """
+    if not response.history:
+        return None
+
+    for hop in (*response.history, response):
+        request = hop.request
+        # Recover the pre-pinning identity the transport stashed; fall back to
+        # the request URL when no rewrite happened (literal-IP targets).
+        hostname = request.extensions.get("sni_hostname") or request.headers.get("host")
+        identity_url = str(request.url)
+        if hostname:
+            host_only = str(hostname).rsplit(":", 1)[0] if ":" in str(hostname) else str(hostname)
+            identity_url = str(request.url.copy_with(host=host_only))
+        if not _is_safe_url(identity_url):
+            return identity_url
+    return None
 
 
 def _append_page_param(
@@ -356,7 +412,8 @@ async def _discover_skill_resources(
     tree_info = _resolve_tree_api(skill_md_url)
     if not tree_info:
         logger.debug(
-            "Cannot derive tree API URL from %s — skipping resource discovery", skill_md_url
+            "Cannot derive tree API URL from %s — skipping resource discovery",
+            redact_url(skill_md_url),
         )
         return None
 
@@ -377,7 +434,9 @@ async def _discover_skill_resources(
             resp = await client.get(tree_url, headers=merged_headers)
             if resp.status_code >= 400:
                 logger.warning(
-                    "Resource discovery failed: HTTP %s for %s", resp.status_code, tree_url
+                    "Resource discovery failed: HTTP %s for %s",
+                    resp.status_code,
+                    redact_url(tree_url),
                 )
                 return None
             payload = resp.json()
@@ -405,7 +464,7 @@ async def _discover_skill_resources(
                         tree_url,
                     )
     except Exception as e:
-        logger.warning("Resource discovery error for %s: %s", tree_url, e)
+        logger.warning("Resource discovery error for %s: %s", redact_url(tree_url), e)
         return None
 
     # GitHub's Trees API returns {"sha": ..., "url": ..., "tree": [...], "truncated": bool}.
@@ -534,12 +593,12 @@ async def _validate_skill_md_url(
                 timeout=URL_VALIDATION_TIMEOUT,
             )
 
-            final_url = str(response.url)
-            if final_url != fetch_url and not _is_safe_url(final_url):
+            unsafe_hop = _unsafe_redirect_target(response)
+            if unsafe_hop is not None:
                 logger.warning(
-                    f"SSRF protection: Blocked redirect from {url} to unsafe URL {final_url}"
+                    f"SSRF protection: Blocked redirect from {redact_url(url)} to unsafe URL {redact_url(unsafe_hop)}"
                 )
-                raise SkillUrlValidationError(url, f"Redirect to unsafe URL blocked: {final_url}")
+                raise SkillUrlValidationError(url, f"Redirect to unsafe URL blocked: {unsafe_hop}")
 
             if response.status_code >= 400:
                 raise SkillUrlValidationError(url, f"HTTP {response.status_code}")
@@ -631,13 +690,13 @@ async def _parse_skill_md_content(
                 fetch_url, headers=headers, follow_redirects=True, timeout=URL_VALIDATION_TIMEOUT
             )
 
-            # SSRF protection: validate final URL after redirects
-            final_url = str(response.url)
-            if final_url != str(raw_url) and not _is_safe_url(final_url):
+            # SSRF protection: validate every hop of a real redirect chain
+            unsafe_hop = _unsafe_redirect_target(response)
+            if unsafe_hop is not None:
                 logger.warning(
-                    f"SSRF protection: Blocked redirect from {raw_url} to unsafe URL {final_url}"
+                    f"SSRF protection: Blocked redirect from {redact_url(raw_url)} to unsafe URL {redact_url(unsafe_hop)}"
                 )
-                raise SkillUrlValidationError(url, f"Redirect to unsafe URL blocked: {final_url}")
+                raise SkillUrlValidationError(url, f"Redirect to unsafe URL blocked: {unsafe_hop}")
 
             if response.status_code >= 400:
                 raise SkillUrlValidationError(url, f"HTTP {response.status_code}")
@@ -761,7 +820,7 @@ async def _parse_skill_md_content(
                 result["name_slug"] = name_slug
 
             logger.info(
-                f"Parsed SKILL.md from {user_url} (raw: {raw_url}): "
+                f"Parsed SKILL.md from {redact_url(user_url)} (raw: {redact_url(raw_url)}): "
                 f"name={result.get('name')}, has_description={bool(result.get('description'))}"
             )
             return result
@@ -827,17 +886,17 @@ async def _check_skill_health(
                 timeout=URL_VALIDATION_TIMEOUT,
             )
 
-            # SSRF protection: validate final URL after redirects
-            final_url = str(response.url)
-            if final_url != str(url) and not _is_safe_url(final_url):
+            # SSRF protection: validate every hop of a real redirect chain
+            unsafe_hop = _unsafe_redirect_target(response)
+            if unsafe_hop is not None:
                 logger.warning(
-                    f"SSRF protection: Blocked redirect from {url} to unsafe URL {final_url}"
+                    f"SSRF protection: Blocked redirect from {redact_url(url)} to unsafe URL {redact_url(unsafe_hop)}"
                 )
                 response_time_ms = (time.perf_counter() - start_time) * 1000
                 return {
                     "healthy": False,
                     "status_code": None,
-                    "error": f"Redirect to unsafe URL blocked: {final_url}",
+                    "error": f"Redirect to unsafe URL blocked: {unsafe_hop}",
                     "response_time_ms": round(response_time_ms, 2),
                 }
 
@@ -851,7 +910,9 @@ async def _check_skill_health(
             }
 
     except UrlValidationError as e:
-        logger.warning("Skill health check blocked by SSRF guard for URL %s: %s", url, e)
+        logger.warning(
+            "Skill health check blocked by SSRF guard for URL %s: %s", redact_url(url), e
+        )
         response_time_ms = (time.perf_counter() - start_time) * 1000
         return {
             "healthy": False,
@@ -861,7 +922,7 @@ async def _check_skill_health(
         }
     except httpx.RequestError as e:
         # Log detailed exception on the server, but return a generic message to the client
-        logger.error("Error while checking skill health for URL %s: %s", url, e)
+        logger.error("Error while checking skill health for URL %s: %s", redact_url(url), e)
         response_time_ms = (time.perf_counter() - start_time) * 1000
         return {
             "healthy": False,
@@ -1017,9 +1078,9 @@ async def _fetch_authenticated_content(
                 timeout=timeout,
             )
 
-            final_url = str(response.url)
-            if final_url != fetch_url and not _is_safe_url(final_url):
-                raise SkillContentSSRFError(final_url)
+            unsafe_hop = _unsafe_redirect_target(response)
+            if unsafe_hop is not None:
+                raise SkillContentSSRFError(unsafe_hop)
 
             if response.status_code >= 400:
                 raise SkillContentFetchError(
@@ -1032,10 +1093,10 @@ async def _fetch_authenticated_content(
 
             return response
     except UrlValidationError as e:
-        logger.warning("Skill content fetch blocked by SSRF guard for %s: %s", url, e)
+        logger.warning("Skill content fetch blocked by SSRF guard for %s: %s", redact_url(url), e)
         raise SkillContentSSRFError(url) from e
     except httpx.RequestError as e:
-        logger.error("Failed to fetch from %s: %s", url, e)
+        logger.error("Failed to fetch from %s: %s", redact_url(url), e)
         raise SkillContentFetchError(url, str(e))
 
 
@@ -1161,8 +1222,33 @@ def _build_skill_card(
         auth_credential_encrypted = encrypt_credential(request.auth_credential)
         credential_updated_at = datetime.now(UTC)
 
+    # Encrypt static upstream auth headers (the proxy-hop credential, distinct
+    # from auth_credential above which is for the SKILL.md fetch). Reuses the
+    # shared server-dict encryptor: {name, value} -> {name, value_encrypted}.
+    custom_headers_encrypted = None
+    custom_header_names: list[str] = []
+    custom_header_overridable_names: list[str] = []
+    custom_headers_updated_at = None
+    if getattr(request, "custom_headers", None):
+        from ..utils.credential_encryption import (
+            encrypt_custom_headers_in_server_dict,
+            validate_custom_headers,
+        )
+
+        # Same header policy as the MCP-server route (reserved-name block + count
+        # cap, + the per-header overridable rules): a skill must not register a
+        # gateway-managed header for injection.
+        validate_custom_headers(request.custom_headers)
+        _ch: dict[str, Any] = {"custom_headers": request.custom_headers}
+        encrypt_custom_headers_in_server_dict(_ch)
+        custom_headers_encrypted = _ch.get("custom_headers_encrypted")
+        custom_header_names = _ch.get("custom_header_names", [])
+        custom_header_overridable_names = _ch.get("custom_header_overridable_names", [])
+        custom_headers_updated_at = _ch.get("custom_headers_updated_at")
+
     return SkillCard(
         path=path,
+        id=resolve_asset_id(request.id),
         name=request.name,
         description=request.description,
         skill_md_url=request.skill_md_url,
@@ -1190,6 +1276,15 @@ def _build_skill_card(
         content_integrity=content_integrity,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
+        # Gateway-proxy opt-in (validated on the request model; carried through).
+        is_proxied=request.is_proxied,
+        proxy_target_url=request.proxy_target_url,
+        proxy_streaming=getattr(request, "proxy_streaming", False),
+        # Static upstream auth headers for the proxy hop (encrypted above).
+        custom_headers_encrypted=custom_headers_encrypted,
+        custom_header_names=custom_header_names,
+        custom_header_overridable_names=custom_header_overridable_names,
+        custom_headers_updated_at=custom_headers_updated_at,
     )
 
 
@@ -1215,6 +1310,32 @@ class SkillService:
         if self._search_repo is None:
             self._search_repo = get_search_repository()
         return self._search_repo
+
+    async def _validate_and_pin_skill_proxy(
+        self,
+        skill: SkillCard,
+    ) -> None:
+        """Resolve+validate the skill's proxy target and pin the resolved IPs.
+
+        No-op when the skill is not proxied / has no resolvable target. Raises
+        (ValueError / EgressPolicyError, surfaced as a 4xx by the route) when the
+        target resolves to a denied IP, so a bad target is rejected at
+        registration rather than silently dropped at render. On success the
+        resolved IPs + host are written back onto the skill for pin bookkeeping.
+        """
+        if not skill.is_proxied:
+            return
+        pin = await validate_and_pin_proxy_target(
+            "skill",
+            {
+                "is_proxied": skill.is_proxied,
+                "proxy_target_url": skill.proxy_target_url,
+                "proxy_disabled_reason": skill.proxy_disabled_reason,
+            },
+        )
+        if pin:
+            skill.proxy_resolved_ips = pin["proxy_resolved_ips"]
+            skill.proxy_target_host = pin["proxy_target_host"]
 
     async def register_skill(
         self,
@@ -1281,20 +1402,39 @@ class SkillService:
         except Exception as e:
             logger.warning("Content integrity computation failed for %s: %s", request.name, e)
 
-        # Build SkillCard
-        skill = _build_skill_card(
-            request=request,
-            path=path,
-            owner=owner,
-            content_version=content_version,
-            content_updated_at=content_updated_at,
-            skill_md_raw_url=raw_url,
-            resource_manifest=resource_manifest,
-            content_integrity=content_integrity,
-        )
+        # Build SkillCard. _build_skill_card validates custom_headers against the
+        # gateway header policy (reserved-name block + count cap) and raises
+        # ValueError on violation; surface that as a 400, not a 500.
+        try:
+            skill = _build_skill_card(
+                request=request,
+                path=path,
+                owner=owner,
+                content_version=content_version,
+                content_updated_at=content_updated_at,
+                skill_md_raw_url=raw_url,
+                resource_manifest=resource_manifest,
+                content_integrity=content_integrity,
+            )
+        except ValueError as e:
+            raise SkillValidationError(str(e)) from e
+
+        # Gateway-proxy SSRF layer 2: when opting into proxying, resolve the target
+        # hostname and validate every resolved IP against the egress policy, then
+        # pin the resolved IPs. Rejects a metadata/private target at registration
+        # (clear error) rather than silently dropping the route at render.
+        await self._validate_and_pin_skill_proxy(skill)
 
         # Save to repository
         repo = self._get_repo()
+
+        # Id uniqueness pre-check (#1276): a caller-supplied id must not
+        # collide with an existing skill. Raise -> route maps to 409.
+        if skill.id and await repo.find_by_id(skill.id):
+            logger.warning(f"Skill registration rejected: id '{skill.id}' already exists")
+            ASSET_ID_CONFLICT_TOTAL.labels(asset_type="skill").inc()
+            raise AssetIdConflictError(asset_type="skill", asset_id=skill.id)
+
         created_skill = await repo.create(skill)
 
         # Index for search
@@ -1375,6 +1515,11 @@ class SkillService:
                 health_status=s.health_status,
                 last_checked_time=s.last_checked_time,
                 status=s.status,
+                # Gateway-proxy opt-in: carry through so listings show the badge
+                # and the edit modal populates (proxy_client_url is server-derived).
+                is_proxied=s.is_proxied,
+                proxy_target_url=s.proxy_target_url,
+                proxy_client_url=s.proxy_client_url,
             )
             for s in skills
         ]
@@ -1394,24 +1539,39 @@ class SkillService:
 
         Returns:
             List of SkillInfo visible to user
+
+        Authorization is two-layered, matching servers/agents/custom entities:
+        first the type-level ``list_skills`` discovery gate (a caller with no
+        ``list_skills`` grant sees zero skills — including public ones), then the
+        per-record visibility check (public/private-owner/group). The discovery
+        gate is defense-in-depth ON TOP of visibility, not a replacement.
         """
         all_skills = await self.list_skills(
             include_disabled=include_disabled,
             tag=tag,
         )
 
-        if not user_context:
-            # Anonymous - only public
-            return [s for s in all_skills if s.visibility == VisibilityEnum.PUBLIC]
-
-        if user_context.get("is_admin"):
+        if user_context and user_context.get("is_admin"):
             return all_skills
 
-        user_groups = set(user_context.get("groups", []))
-        username = user_context.get("username", "")
+        # Discovery gate (list_skills). accessible_skills is derived at auth time
+        # via the canonical accessible_resources_for("skill", ...): ["all"] or the
+        # named skills. Anonymous callers (no context) have no grant -> [] -> see
+        # nothing, which is the intended strict parity with list_service.
+        accessible_skills = (user_context or {}).get("accessible_skills") or []
+        discover_all = "all" in accessible_skills
+        if not discover_all and not accessible_skills:
+            return []
+
+        user_groups = set((user_context or {}).get("groups", []))
+        username = (user_context or {}).get("username", "")
 
         filtered = []
         for skill in all_skills:
+            # Type-level discovery gate first.
+            if not discover_all and skill.name not in accessible_skills:
+                continue
+            # Then per-record visibility (unchanged).
             if skill.visibility == VisibilityEnum.PUBLIC:
                 filtered.append(skill)
             elif skill.visibility == VisibilityEnum.PRIVATE:
@@ -1458,6 +1618,40 @@ class SkillService:
         """Update a skill."""
         normalized = normalize_skill_path(path)
         repo = self._get_repo()
+
+        # Gateway-proxy SSRF layer 2: if this update changes the proxy opt-in or
+        # target, resolve+validate the MERGED target (existing values overlaid with
+        # the update) and pin the resolved IPs, before persisting. Rejects a
+        # metadata/private target at update time. Only reads the DB when a proxy
+        # field is actually touched, so non-proxy updates pay no cost.
+        if "is_proxied" in updates or "proxy_target_url" in updates:
+            existing = await repo.get(normalized)
+            if existing is not None:
+                merged_is_proxied = updates.get("is_proxied", existing.is_proxied)
+                merged_target = updates.get("proxy_target_url", existing.proxy_target_url)
+                pin = await validate_and_pin_proxy_target(
+                    "skill",
+                    {
+                        "is_proxied": merged_is_proxied,
+                        "proxy_target_url": merged_target,
+                        # An update re-enabling proxying must clear a prior auto-disable.
+                        "proxy_disabled_reason": None,
+                    },
+                )
+                # Refresh the pin bookkeeping to match the (re)validated target, or
+                # clear it when the merged state is no longer a live proxy.
+                updates["proxy_resolved_ips"] = pin.get("proxy_resolved_ips", [])
+                updates["proxy_target_host"] = pin.get("proxy_target_host")
+                updates["proxy_disabled_reason"] = None
+                # Credential-misdirection guard: if the effective target changed,
+                # the create-time upstream headers were scoped to the OLD host --
+                # clear them so we never inject the old host's secret at the new
+                # host. (Headers are not settable on update; re-add for the new
+                # target via a fresh create.)
+                clear_upstream_headers_on_repoint(
+                    updates, existing_target=existing.proxy_target_url, new_target=merged_target
+                )
+
         updated = await repo.update(normalized, updates)
 
         if updated:

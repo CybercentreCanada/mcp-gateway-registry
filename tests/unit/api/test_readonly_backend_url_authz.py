@@ -340,6 +340,71 @@ class TestBackendUrlRedactionHelpers:
         assert doc["server_name"] == "s"
         assert doc["versions"][0]["version"] == "v1"
 
+    def test_redact_agent_strips_proxy_pass_url(self):
+        """The agent redactor removes proxy_pass_url (both spellings), keeps url."""
+        from registry.services.visibility import redact_agent_backend_fields
+
+        # snake_case (model_dump default)
+        snake = {
+            "name": "Flight Booking Agent",
+            "url": "https://gateway.example.com/agent/flight-booking-agent/",
+            "proxy_pass_url": "http://flight-booking-agent:9000/",
+        }
+        result = redact_agent_backend_fields(snake)
+        assert result is snake  # mutates in place
+        assert "proxy_pass_url" not in snake
+        # The gateway-facing url is preserved for the caller.
+        assert snake["url"] == "https://gateway.example.com/agent/flight-booking-agent/"
+
+        # camelCase (by_alias dump)
+        camel = {"url": "https://gw/agent/x/", "proxyPassUrl": "http://x:9000/"}
+        redact_agent_backend_fields(camel)
+        assert "proxyPassUrl" not in camel
+        assert camel["url"] == "https://gw/agent/x/"
+
+    def test_redact_proxy_target_for_non_admin_dict_and_model(self):
+        """proxy_target_url is stripped for a non-admin; is_proxied/client_url stay."""
+        from types import SimpleNamespace
+
+        from registry.services.visibility import redact_proxy_backend_url
+
+        with _force_with_gateway():
+            # dict shape (dumped read paths: agent get, custom list/get)
+            d = {
+                "is_proxied": True,
+                "proxy_target_url": "http://10.0.0.5:8080",
+                "proxy_client_url": "/gateway/skill/x",
+            }
+            assert redact_proxy_backend_url(d, {"is_admin": False}) is d  # in place
+            assert "proxy_target_url" not in d
+            # The client-facing path + opt-in flag remain visible.
+            assert d["proxy_client_url"] == "/gateway/skill/x"
+            assert d["is_proxied"] is True
+
+            # model shape (SkillInfo / AgentInfo list models)
+            m = SimpleNamespace(
+                proxy_target_url="http://10.0.0.5:8080",
+                proxy_client_url="/gateway/skill/x",
+                is_proxied=True,
+            )
+            redact_proxy_backend_url(m, {"is_admin": False})
+            assert m.proxy_target_url is None
+            assert m.proxy_client_url == "/gateway/skill/x"
+
+    def test_redact_proxy_target_noop_for_admin_and_registry_only(self):
+        """Admins and registry-only mode keep proxy_target_url (fail-open by design)."""
+        from registry.services.visibility import redact_proxy_backend_url
+
+        with _force_with_gateway():
+            d = {"proxy_target_url": "http://10.0.0.5:8080"}
+            redact_proxy_backend_url(d, {"is_admin": True})
+            assert d["proxy_target_url"] == "http://10.0.0.5:8080"
+
+        with _force_registry_only():
+            d2 = {"proxy_target_url": "http://10.0.0.5:8080"}
+            redact_proxy_backend_url(d2, {"is_admin": False})
+            assert d2["proxy_target_url"] == "http://10.0.0.5:8080"
+
 
 # =============================================================================
 # Sibling sweep: GET /server_details/{path}

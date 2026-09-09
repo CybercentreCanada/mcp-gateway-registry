@@ -12,6 +12,7 @@ key from SECRET_KEY instead of requiring a separate environment variable.
 import base64
 import hashlib
 import logging
+import re
 from datetime import UTC, datetime
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -33,6 +34,108 @@ ENCRYPTED_FIELD: str = "auth_credential_encrypted"
 CUSTOM_HEADERS_PLAINTEXT_FIELD: str = "custom_headers"
 CUSTOM_HEADERS_ENCRYPTED_FIELD: str = "custom_headers_encrypted"
 CUSTOM_HEADER_NAMES_FIELD: str = "custom_header_names"
+CUSTOM_HEADER_OVERRIDABLE_NAMES_FIELD: str = "custom_header_overridable_names"
+
+MAX_CUSTOM_HEADER_NAME_LENGTH: int = 256
+MAX_CUSTOM_HEADER_VALUE_LENGTH: int = 4096
+_RFC_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+
+def validate_custom_header_name(name: object) -> str:
+    """Return a bounded RFC token header name or raise ``ValueError``."""
+    if not isinstance(name, str):
+        raise ValueError("custom_headers entry name must be a string")
+    if not name:
+        raise ValueError("custom_headers entry requires a non-empty name")
+    if len(name) > MAX_CUSTOM_HEADER_NAME_LENGTH:
+        raise ValueError(
+            f"custom_headers entry name exceeds {MAX_CUSTOM_HEADER_NAME_LENGTH} characters"
+        )
+    if not _RFC_TOKEN_RE.fullmatch(name):
+        raise ValueError("custom_headers entry name must be a valid RFC token string")
+    return name
+
+
+def _validate_custom_header_value(value: object, *, allow_empty: bool = False) -> str:
+    """Return a bounded, control-free string header value."""
+    if not isinstance(value, str):
+        raise ValueError("custom_headers entry value must be a string")
+    if not value and not allow_empty:
+        raise ValueError("custom_headers entry requires a non-empty value")
+    if len(value) > MAX_CUSTOM_HEADER_VALUE_LENGTH:
+        raise ValueError(
+            f"custom_headers entry value exceeds {MAX_CUSTOM_HEADER_VALUE_LENGTH} characters"
+        )
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise ValueError("custom_headers entry value cannot contain control characters")
+    return value
+
+
+def _validate_custom_header_overridable(value: object) -> bool:
+    """Require an explicit boolean override flag; reject ambiguous truthy values."""
+    if not isinstance(value, bool):
+        raise ValueError("custom_headers entry overridable must be a boolean")
+    return value
+
+
+def validate_custom_headers(
+    raw: list[dict] | None,
+    *,
+    allow_empty_values: bool = False,
+) -> list[dict] | None:
+    """Validate bounded, control-free upstream headers and override metadata.
+
+    A fixed header requires an operator value. An ``overridable`` header may
+    instead be caller-only (no default value). Gateway-managed names remain
+    forbidden except ``Authorization``, which is accepted only as caller-
+    overridable; fixed credentials belong in the egress credential vault.
+    """
+    if raw is None:
+        return None
+
+    from registry.constants import (
+        CALLER_OVERRIDABLE_RESERVED_HEADER_NAMES,
+        MAX_CUSTOM_HEADERS_PER_SERVER,
+        RESERVED_CUSTOM_HEADER_NAMES,
+    )
+
+    if not isinstance(raw, list):
+        raise ValueError("custom_headers must be a list")
+    if len(raw) > MAX_CUSTOM_HEADERS_PER_SERVER:
+        raise ValueError(
+            f"Too many custom headers: got {len(raw)}, maximum is {MAX_CUSTOM_HEADERS_PER_SERVER}"
+        )
+
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("custom_headers entry must be an object")
+        name = validate_custom_header_name(item.get("name"))
+        value = item.get("value")
+        overridable = _validate_custom_header_overridable(item.get("overridable", False))
+        if value in (None, ""):
+            if not overridable and not allow_empty_values:
+                raise ValueError(
+                    f"custom_headers entry '{name}' has no value and is not overridable"
+                )
+        else:
+            _validate_custom_header_value(value)
+
+        lower = name.lower()
+        if lower in RESERVED_CUSTOM_HEADER_NAMES:
+            if lower not in CALLER_OVERRIDABLE_RESERVED_HEADER_NAMES:
+                raise ValueError(
+                    f"Header '{name}' is managed by the gateway and cannot be set as a custom header"
+                )
+            if not overridable:
+                raise ValueError(
+                    f"Header '{name}' may only be a caller-overridable header; "
+                    "fixed credentials belong in the egress credential vault"
+                )
+        if lower in seen:
+            raise ValueError(f"Duplicate custom header name: {name}")
+        seen.add(lower)
+    return raw
 
 
 def _derive_fernet_key(
@@ -172,101 +275,249 @@ def encrypt_credential_in_server_dict(
     return server_dict
 
 
+_SERVER_RESPONSE_SECRET_FIELDS: frozenset[str] = frozenset(
+    {
+        ENCRYPTED_FIELD,
+        PLAINTEXT_FIELD,
+        CUSTOM_HEADERS_ENCRYPTED_FIELD,
+        CUSTOM_HEADERS_PLAINTEXT_FIELD,
+        "client_secret",
+        "client_secret_encrypted",
+    }
+)
+
+
+def _token_free_projection(value: object) -> object:
+    """Recursively copy a response value while omitting known secret fields."""
+    if isinstance(value, dict):
+        return {
+            key: _token_free_projection(item)
+            for key, item in value.items()
+            if key not in _SERVER_RESPONSE_SECRET_FIELDS
+        }
+    if isinstance(value, list):
+        return [_token_free_projection(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_token_free_projection(item) for item in value)
+    return value
+
+
 def strip_credentials_from_dict(
     server_dict: dict,
 ) -> dict:
-    """Remove encrypted credentials from a server dict before returning in API responses.
+    """Return a recursive token-free copy for server API responses.
 
-    Args:
-        server_dict: Server config dictionary.
-
-    Returns:
-        Modified dict with credentials removed (original dict is mutated).
+    Top-level backend credentials, encrypted custom-header values, nested
+    per-version credentials, and ``egress_oauth.client_secret_encrypted`` are
+    removed. The input and all shared nested dictionaries/lists are left
+    untouched so redacting one response cannot corrupt repository/cache state.
     """
-    server_dict.pop(ENCRYPTED_FIELD, None)
-    server_dict.pop(PLAINTEXT_FIELD, None)
-    server_dict.pop(CUSTOM_HEADERS_ENCRYPTED_FIELD, None)
-    server_dict.pop(CUSTOM_HEADERS_PLAINTEXT_FIELD, None)
-    return server_dict
+    projected = _token_free_projection(server_dict)
+    if not isinstance(projected, dict):  # pragma: no cover - input type contract
+        return {}
+    return projected
 
 
 def encrypt_custom_headers_in_server_dict(
     server_dict: dict,
 ) -> dict:
-    """Encrypt custom_headers values in a server dict before storage.
-
-    Reads server_dict['custom_headers'] (list of {name, value}),
-    encrypts each value, writes server_dict['custom_headers_encrypted']
-    and server_dict['custom_header_names']. Removes the plaintext field.
-
-    Args:
-        server_dict: Server config dictionary.
-
-    Returns:
-        Modified dict with encrypted headers (mutated in place).
-
-    Raises:
-        ValueError: If a value is present but encryption fails.
-    """
-    raw = server_dict.pop(CUSTOM_HEADERS_PLAINTEXT_FIELD, None)
+    """Validate, encrypt defaults, and store caller-override header metadata."""
+    raw = server_dict.get(CUSTOM_HEADERS_PLAINTEXT_FIELD)
     if raw is None:
         return server_dict
+
+    # Validate before mutating the input so malformed data cannot leave a
+    # partially encrypted record behind.
+    validate_custom_headers(raw)
+    encrypted_list: list[dict[str, str]] = []
+    names: list[str] = []
+    overridable_names: list[str] = []
+    for item in raw:
+        name = validate_custom_header_name(item.get("name"))
+        value = item.get("value")
+        overridable = _validate_custom_header_overridable(item.get("overridable", False))
+        if value not in (None, ""):
+            value = _validate_custom_header_value(value)
+            encrypted_list.append({"name": name, "value_encrypted": encrypt_credential(value)})
+        names.append(name)
+        if overridable:
+            overridable_names.append(name)
+
+    server_dict[CUSTOM_HEADERS_ENCRYPTED_FIELD] = encrypted_list
+    server_dict[CUSTOM_HEADER_NAMES_FIELD] = names
+    server_dict[CUSTOM_HEADER_OVERRIDABLE_NAMES_FIELD] = overridable_names
+    server_dict["custom_headers_updated_at"] = datetime.now(UTC).isoformat()
+    server_dict.pop(CUSTOM_HEADERS_PLAINTEXT_FIELD, None)
+
+    logger.info(
+        f"Custom headers encrypted for storage (path: {server_dict.get('path', 'unknown')}, "
+        f"count: {len(names):d}, overridable: {len(overridable_names):d})"
+    )
+    return server_dict
+
+
+def build_custom_headers_storage_fields(
+    raw: list[dict] | None,
+    existing_encrypted: list[dict] | None = None,
+) -> dict:
+    """Validate + encrypt a plaintext header list into the four storage fields.
+
+    Shared by the dedicated header-rotation endpoints (skill + custom entity),
+    which -- unlike create -- must produce a self-contained ``$set`` of ALL header
+    storage fields, including the CLEAR case (an empty/None list removes every
+    stored header).
+
+    Write-only value convention (mirrors the 3LO egress ``client_secret`` and the
+    MCP-server custom-header edit path): stored header VALUES are never returned to
+    the client, so on edit each row arrives with a BLANK value. A blank value on a
+    row whose name already has a stored ciphertext means "keep the existing value"
+    -- the prior ciphertext is decrypted and carried forward, so an unchanged edit
+    does not wipe the secret. A blank value with NO prior ciphertext is only legal
+    when the row is ``overridable`` (a caller-only passthrough slot); otherwise it
+    is rejected (nothing to inject, nothing to preserve). After the preserve-merge,
+    the result is run through ``validate_custom_headers`` (full policy) and
+    encrypted.
+
+    Args:
+        raw: The plaintext ``[{name, value?, overridable?}, ...]`` list. An empty
+            list or None means "remove all upstream headers".
+        existing_encrypted: The entity's current ``custom_headers_encrypted`` list
+            (``[{name, value_encrypted}, ...]``), used to preserve a header whose
+            submitted value is blank. None/absent = no priors (every blank
+            non-overridable row is then a policy error).
+
+    Returns:
+        A dict with exactly these keys, safe to merge into an entity update:
+        ``custom_headers_encrypted`` (list, [] when cleared),
+        ``custom_header_names`` (list, [] when cleared),
+        ``custom_header_overridable_names`` (list, [] when cleared),
+        ``custom_headers_updated_at`` (ISO timestamp).
+
+    Raises:
+        ValueError: on any policy violation, a blank non-preservable value, or
+            encryption failure (the caller maps it to a 400).
+    """
+    now = datetime.now(UTC).isoformat()
+    if not raw:
+        # Clear case: remove every stored header (and stamp the update time).
+        return {
+            CUSTOM_HEADERS_ENCRYPTED_FIELD: [],
+            CUSTOM_HEADER_NAMES_FIELD: [],
+            CUSTOM_HEADER_OVERRIDABLE_NAMES_FIELD: [],
+            "custom_headers_updated_at": now,
+        }
+
     if not isinstance(raw, list):
         raise ValueError("custom_headers must be a list")
 
-    encrypted_list = []
-    names = []
-    seen: set[str] = set()
+    # Preserve-by-name merge: a blank value inherits the prior ciphertext's
+    # plaintext so an unchanged edit keeps the secret (write-only value UX).
+    existing_by_name: dict[str, dict] = {
+        e["name"]: e for e in (existing_encrypted or []) if isinstance(e, dict) and e.get("name")
+    }
+    merged: list[dict] = []
     for item in raw:
         if not isinstance(item, dict):
             raise ValueError("custom_headers entry must be an object")
         name = item.get("name")
         value = item.get("value")
-        if not name or not value:
-            raise ValueError("custom_headers entry requires non-empty name and value")
-        lower = name.lower()
-        if lower in seen:
-            raise ValueError(f"Duplicate custom header name: {name}")
-        seen.add(lower)
-        encrypted_list.append({"name": name, "value_encrypted": encrypt_credential(value)})
-        names.append(name)
+        overridable = _validate_custom_header_overridable(item.get("overridable", False))
+        if name and not value:
+            prior = existing_by_name.get(name)
+            if prior is not None:
+                plaintext = decrypt_credential(prior.get("value_encrypted", ""))
+                if plaintext is None:
+                    raise ValueError(f"Could not preserve the existing value for header '{name}'")
+                value = plaintext
+            # No prior: a blank overridable row is a legitimate caller-only slot
+            # (validate_custom_headers accepts it); a blank non-overridable row is
+            # rejected there. Leave value blank and let validation decide.
+        merged.append({"name": name, "value": value, "overridable": overridable})
 
-    server_dict[CUSTOM_HEADERS_ENCRYPTED_FIELD] = encrypted_list
-    server_dict[CUSTOM_HEADER_NAMES_FIELD] = names
-    server_dict["custom_headers_updated_at"] = datetime.now(UTC).isoformat()
-
-    logger.info(
-        f"Custom headers encrypted for storage "
-        f"(path: {server_dict.get('path', 'unknown')}, count: {len(names)})"
-    )
-    return server_dict
+    validate_custom_headers(merged)
+    tmp: dict = {CUSTOM_HEADERS_PLAINTEXT_FIELD: merged}
+    encrypt_custom_headers_in_server_dict(tmp)
+    return {
+        CUSTOM_HEADERS_ENCRYPTED_FIELD: tmp.get(CUSTOM_HEADERS_ENCRYPTED_FIELD, []),
+        CUSTOM_HEADER_NAMES_FIELD: tmp.get(CUSTOM_HEADER_NAMES_FIELD, []),
+        CUSTOM_HEADER_OVERRIDABLE_NAMES_FIELD: tmp.get(CUSTOM_HEADER_OVERRIDABLE_NAMES_FIELD, []),
+        "custom_headers_updated_at": now,
+    }
 
 
 def decrypt_custom_headers(
     encrypted_list: list[dict] | None,
+    *,
+    strict: bool = False,
 ) -> list[dict]:
-    """Decrypt a list of custom_headers_encrypted entries.
+    """Decrypt safe stored headers, optionally failing closed on any bad entry."""
+    from registry.constants import (
+        CALLER_OVERRIDABLE_RESERVED_HEADER_NAMES,
+        RESERVED_CUSTOM_HEADER_NAMES,
+    )
 
-    Args:
-        encrypted_list: Stored list of {name, value_encrypted} objects.
-
-    Returns:
-        List of {name, value} objects. Entries that fail to decrypt are
-        dropped and a warning is logged.
-    """
     if not encrypted_list:
         return []
-    out = []
+    if not isinstance(encrypted_list, list):
+        if strict:
+            raise ValueError("custom_headers_encrypted must be a list")
+        logger.warning("Stored custom headers are not a list; skipping.")
+        return []
+
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
     for item in encrypted_list:
-        name = item.get("name")
+        if not isinstance(item, dict):
+            if strict:
+                raise ValueError("stored custom header entry must be an object")
+            logger.warning("Stored custom header entry is not an object; skipping.")
+            continue
+        try:
+            name = validate_custom_header_name(item.get("name"))
+        except ValueError:
+            if strict:
+                raise ValueError("stored custom header has an invalid name") from None
+            logger.warning("Stored custom header has an invalid name; skipping.")
+            continue
+        lower = name.lower()
+        # Mirror validate_custom_headers: a reserved name is refused EXCEPT the
+        # sanctioned caller-overridable carve-out (Authorization), which may carry
+        # a stored operator default. Rejecting it here would fail-close every
+        # request for an entity registration already accepted.
+        if (
+            lower in RESERVED_CUSTOM_HEADER_NAMES
+            and lower not in CALLER_OVERRIDABLE_RESERVED_HEADER_NAMES
+        ):
+            if strict:
+                raise ValueError(f"stored custom header '{name}' is gateway-managed")
+            logger.warning(f"Stored custom header '{name}' is gateway-managed; skipping.")
+            continue
+        if lower in seen:
+            if strict:
+                raise ValueError(f"stored custom header '{name}' is duplicated")
+            logger.warning(f"Stored custom header '{name}' is duplicated; skipping.")
+            continue
         encrypted = item.get("value_encrypted")
-        if not name or not encrypted:
+        if not isinstance(encrypted, str) or not encrypted:
+            if strict:
+                raise ValueError(f"stored custom header '{name}' has no ciphertext")
+            logger.warning(f"Stored custom header '{name}' has no ciphertext; skipping.")
             continue
         value = decrypt_credential(encrypted)
-        if value is not None:
-            out.append({"name": name, "value": value})
-        else:
+        if value is None:
+            if strict:
+                raise ValueError(f"failed to decrypt stored custom header '{name}'")
             logger.warning(f"Failed to decrypt custom header '{name}'; skipping.")
+            continue
+        try:
+            _validate_custom_header_value(value, allow_empty=True)
+        except ValueError:
+            if strict:
+                raise ValueError(f"stored custom header '{name}' has an unsafe value") from None
+            logger.warning(f"Stored custom header '{name}' has an unsafe value; skipping.")
+            continue
+        seen.add(lower)
+        out.append({"name": name, "value": value})
     return out
 
 

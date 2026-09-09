@@ -66,7 +66,15 @@ services:
       - CODING_ASSISTANTS=${CODING_ASSISTANTS:-}
       # UI title override. Empty = deployment-mode-aware default.
       - UI_TITLE=${UI_TITLE:-}
+      # Base64-encoded HTML snippet served as /rum.js for frontend RUM. Empty disables RUM. May contain a vendor token.
+      - RUM_SNIPPET_B64=${RUM_SNIPPET_B64:-}
+      # Comma-separated host allowlist for the RUM snippet (fail-closed when set). Empty disables the check.
+      - RUM_ALLOWED_HOSTS=${RUM_ALLOWED_HOSTS:-}
       - GATEWAY_ADDITIONAL_SERVER_NAMES=${GATEWAY_ADDITIONAL_SERVER_NAMES:-}
+      # SSRF guard allowlist for internal MCP-server / A2A-agent upstreams at
+      # private IPs (e.g. docker-network hostnames); mirrors docker-compose.yml.
+      - SSRF_ALLOWED_HOSTS=${SSRF_ALLOWED_HOSTS:-}
+      - SSRF_ALLOWED_CIDRS=${SSRF_ALLOWED_CIDRS:-}
       # Registry Card Configuration
       - REGISTRY_URL=${REGISTRY_URL:-http://localhost}
       # Request-source trust (audit client IP + OAuth external-URL host allowlist)
@@ -84,6 +92,13 @@ services:
       - REGISTRY_DESCRIPTION=${REGISTRY_DESCRIPTION:-}
       - REGISTRY_CONTACT_EMAIL=${REGISTRY_CONTACT_EMAIL:-}
       - REGISTRY_CONTACT_URL=${REGISTRY_CONTACT_URL:-}
+      # Gateway generic-proxy feature (registry-consumed): ships disabled by default
+      - GATEWAY_GENERIC_PROXY_ENABLED=${GATEWAY_GENERIC_PROXY_ENABLED:-false}
+      - GATEWAY_CANONICAL_NAMESPACE_ENABLED=${GATEWAY_CANONICAL_NAMESPACE_ENABLED:-false}
+      - GATEWAY_PROXY_ALLOW_PRIVATE_TARGETS=${GATEWAY_PROXY_ALLOW_PRIVATE_TARGETS:-false}
+      - GATEWAY_GENERIC_CLIENT_MAX_BODY_SIZE=${GATEWAY_GENERIC_CLIENT_MAX_BODY_SIZE:-1m}
+      - GATEWAY_PROXY_PREFIX=${GATEWAY_PROXY_PREFIX:-gateway}
+      - GATEWAY_GENERIC_STREAM_READ_TIMEOUT_SECONDS=${GATEWAY_GENERIC_STREAM_READ_TIMEOUT_SECONDS:-3600}
       # BUILD_VERSION is NOT set here: it is baked into the image by the
       # publish pipeline (issue #919). Setting it at the compose level with
       # a "${BUILD_VERSION:-1.0.0}" default would stomp the image-baked
@@ -97,6 +112,9 @@ services:
       - EGRESS_TOKEN_REFRESH_SKEW_SECONDS=${EGRESS_TOKEN_REFRESH_SKEW_SECONDS:-300}
       - EGRESS_STATE_TTL_SECONDS=${EGRESS_STATE_TTL_SECONDS:-600}
       - EGRESS_OBO_ALLOWED_AUDIENCES=${EGRESS_OBO_ALLOWED_AUDIENCES:-}
+      - EGRESS_OAUTH_TRUSTED_IDP_HOSTS=${EGRESS_OAUTH_TRUSTED_IDP_HOSTS:-}
+      - EGRESS_CREDENTIAL_ENCRYPTION_KEY=${EGRESS_CREDENTIAL_ENCRYPTION_KEY:-}
+      - EGRESS_CREDENTIAL_ENCRYPTION_REQUIRE_ENCRYPTED=${EGRESS_CREDENTIAL_ENCRYPTION_REQUIRE_ENCRYPTED:-false}
       - AUTH_SERVER_NGINX_MARKER_SECRET=${AUTH_SERVER_NGINX_MARKER_SECRET:-}
       - AWS_SECRETS_REGION=${AWS_SECRETS_REGION:-}
       - SECRETS_MANAGER_KMS_KEY_ID=${SECRETS_MANAGER_KMS_KEY_ID:-}
@@ -140,6 +158,10 @@ services:
       - AUTH_PROVIDER=${AUTH_PROVIDER:-cognito}
       - KEYCLOAK_ENABLED=${KEYCLOAK_ENABLED:-false}
       - KEYCLOAK_URL=${KEYCLOAK_URL:-http://keycloak:8080}
+      # Externally reachable Keycloak URL. The registry serves the OAuth
+      # discovery documents, so without this it advertises the internal
+      # Docker DNS name and no external MCP client can complete the flow.
+      - KEYCLOAK_EXTERNAL_URL=${KEYCLOAK_EXTERNAL_URL:-http://localhost:8080}
       - KEYCLOAK_REALM=${KEYCLOAK_REALM:-mcp-gateway}
       - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-mcp-gateway-web}
       - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET}
@@ -218,6 +240,16 @@ services:
       - DOCUMENTDB_USE_IAM=${DOCUMENTDB_USE_IAM:-false}
       - DOCUMENTDB_REPLICA_SET=${DOCUMENTDB_REPLICA_SET:-rs0}
       - DOCUMENTDB_READ_PREFERENCE=${DOCUMENTDB_READ_PREFERENCE:-secondaryPreferred}
+      # Rate Limiting Configuration (issue #295). Off by default.
+      - RATE_LIMITING_ENABLED=${RATE_LIMITING_ENABLED:-false}
+      - RATE_LIMIT_BACKEND=${RATE_LIMIT_BACKEND:-documentdb}
+      - RATE_LIMIT_FAIL_OPEN=${RATE_LIMIT_FAIL_OPEN:-true}
+      - RATE_LIMIT_QUARANTINE_FAIL_CLOSED=${RATE_LIMIT_QUARANTINE_FAIL_CLOSED:-false}
+      - RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS=${RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS:-30}
+      - RATE_LIMIT_BACKEND_TIMEOUT_MS=${RATE_LIMIT_BACKEND_TIMEOUT_MS:-250}
+      # Lockout-safeguard floors (registry validates group definitions at config time).
+      - RATE_LIMIT_USER_FLOOR_PER_MIN=${RATE_LIMIT_USER_FLOOR_PER_MIN:-20}
+      - RATE_LIMIT_AGENT_FLOOR_PER_MIN=${RATE_LIMIT_AGENT_FLOOR_PER_MIN:-10}
       # Embeddings Configuration
       - EMBEDDINGS_PROVIDER=${EMBEDDINGS_PROVIDER:-sentence-transformers}
       - EMBEDDINGS_MODEL_NAME=${EMBEDDINGS_MODEL_NAME:-all-MiniLM-L6-v2}
@@ -225,6 +257,14 @@ services:
       - EMBEDDINGS_API_KEY=${EMBEDDINGS_API_KEY}
       - EMBEDDINGS_API_BASE=${EMBEDDINGS_API_BASE}
       - EMBEDDINGS_AWS_REGION=${EMBEDDINGS_AWS_REGION:-us-east-1}
+      # Embeddings IdP Auth (only when EMBEDDINGS_AUTH_MODE=idp)
+      - EMBEDDINGS_AUTH_MODE=${EMBEDDINGS_AUTH_MODE}
+      - EMBEDDINGS_IDP_TOKEN_ENDPOINT=${EMBEDDINGS_IDP_TOKEN_ENDPOINT}
+      - EMBEDDINGS_IDP_CLIENT_ID=${EMBEDDINGS_IDP_CLIENT_ID}
+      - EMBEDDINGS_IDP_CLIENT_SECRET=${EMBEDDINGS_IDP_CLIENT_SECRET}
+      - EMBEDDINGS_IDP_SCOPE=${EMBEDDINGS_IDP_SCOPE}
+      - EMBEDDINGS_IDP_TIMEOUT_SECONDS=${EMBEDDINGS_IDP_TIMEOUT_SECONDS:-30}
+      - EMBEDDINGS_IDP_ALLOW_INSECURE=${EMBEDDINGS_IDP_ALLOW_INSECURE:-false}
       # ANS (Agent Name Service) Configuration
       - ANS_INTEGRATION_ENABLED=${ANS_INTEGRATION_ENABLED:-false}
       - ANS_API_ENDPOINT=${ANS_API_ENDPOINT:-https://api.godaddy.com}
@@ -254,6 +294,8 @@ services:
       - BATCH_JOB_RETENTION_DAYS=${BATCH_JOB_RETENTION_DAYS:-7}
       - BATCH_WORKER_POLL_INTERVAL_SECONDS=${BATCH_WORKER_POLL_INTERVAL_SECONDS:-1.0}
       - BATCH_MAX_REQUEST_BYTES=${BATCH_MAX_REQUEST_BYTES:-4194304}
+      # Caller-supplied asset id (Issue #1276)
+      - ALLOW_CALLER_SUPPLIED_ASSET_ID=${ALLOW_CALLER_SUPPLIED_ASSET_ID:-false}
       # Registration Gate (Admission Control)
       - REGISTRATION_GATE_ENABLED=${REGISTRATION_GATE_ENABLED:-false}
       - REGISTRATION_GATE_URL=${REGISTRATION_GATE_URL:-}
@@ -269,6 +311,11 @@ services:
       # M2M Direct Registration
       - M2M_DIRECT_REGISTRATION_ENABLED=${M2M_DIRECT_REGISTRATION_ENABLED:-true}
       - MAX_TOKENS_PER_USER_PER_HOUR=${MAX_TOKENS_PER_USER_PER_HOUR:-100}
+      # MCP access-token lifetime (hours). Default when omitted / hard cap on
+      # requests. Read by the registry (validation); mirrored to auth-server
+      # (minting). Max is bounded to a 7-day ceiling in code. Issue #1477.
+      - MCP_TOKEN_DEFAULT_TTL_HOURS=${MCP_TOKEN_DEFAULT_TTL_HOURS:-8}
+      - MCP_TOKEN_MAX_TTL_HOURS=${MCP_TOKEN_MAX_TTL_HOURS:-24}
       # Telemetry Configuration
       # Disable all:       set MCP_TELEMETRY_DISABLED=1  to disable all telemetry (startup ping + heartbeat)
       # Heartbeat opt-out: set MCP_TELEMETRY_OPT_OUT=1   to disable daily heartbeat only
@@ -352,11 +399,23 @@ services:
       - TRUSTED_PROXY_HOPS=${TRUSTED_PROXY_HOPS:-1}
       - TRUSTED_EXTERNAL_HOSTS=${TRUSTED_EXTERNAL_HOSTS:-}
       - SECRET_KEY=${SECRET_KEY}
+      # MCP access-token lifetime (hours). auth-server mints + clamps to the
+      # configured max (bounded to a 7-day ceiling in code). Must match the
+      # registry's values. Issue #1477.
+      - MCP_TOKEN_DEFAULT_TTL_HOURS=${MCP_TOKEN_DEFAULT_TTL_HOURS:-8}
+      - MCP_TOKEN_MAX_TTL_HOURS=${MCP_TOKEN_MAX_TTL_HOURS:-24}
+      # Exact-match allowlist of OAuth login/logout redirect URIs (comma-separated
+      # absolute URLs). Empty (default) falls back to the weaker cookie-domain
+      # heuristic; set it to harden against open-redirect via a controlled subdomain.
+      - OAUTH2_ALLOWED_REDIRECT_URIS=${OAUTH2_ALLOWED_REDIRECT_URIS:-}
       # Per-user egress credential vault: auth-server only needs the feature flag,
       # the internal vend URL, and the nginx marker secret (it does NOT touch the
       # secret store, so no SECRET_STORE/AWS/OPENBAO vars here).
       - EGRESS_AUTH_ENABLED=${EGRESS_AUTH_ENABLED:-false}
-      - EGRESS_REGISTRY_INTERNAL_URL=${EGRESS_REGISTRY_INTERNAL_URL:-http://registry:8080}
+      - EGRESS_REGISTRY_INTERNAL_URL=${EGRESS_REGISTRY_INTERNAL_URL:-http://registry:8091}
+      # OBO (same-IdP) token exchange against a self-hosted IdP: allowlist its
+      # private-resolving token endpoint. Must match the registry's value.
+      - EGRESS_OAUTH_TRUSTED_IDP_HOSTS=${EGRESS_OAUTH_TRUSTED_IDP_HOSTS:-}
       - AUTH_SERVER_NGINX_MARKER_SECRET=${AUTH_SERVER_NGINX_MARKER_SECRET:-}
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
@@ -370,6 +429,18 @@ services:
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_ENABLED=${GOOGLE_ENABLED:-false}
+      # Gateway generic-proxy feature (auth-server-consumed): ships disabled by default
+      - GATEWAY_GENERIC_PROXY_ENABLED=${GATEWAY_GENERIC_PROXY_ENABLED:-false}
+      - GENERIC_PROXY_TOKEN_TTL_SECONDS=${GENERIC_PROXY_TOKEN_TTL_SECONDS:-30}
+      - GENERIC_PROXY_MAX_BODY_BYTES=${GENERIC_PROXY_MAX_BODY_BYTES:-10485760}
+      - GATEWAY_GENERIC_REQUIRE_BEARER_FOR_WRITES=${GATEWAY_GENERIC_REQUIRE_BEARER_FOR_WRITES:-true}
+      - GATEWAY_EGRESS_SELFCHECK_ENABLED=${GATEWAY_EGRESS_SELFCHECK_ENABLED:-true}
+      - GATEWAY_GENERIC_TLS_VERIFY=${GATEWAY_GENERIC_TLS_VERIFY:-true}
+      - GATEWAY_GENERIC_MAX_CONCURRENCY=${GATEWAY_GENERIC_MAX_CONCURRENCY:-32}
+      - GATEWAY_GENERIC_STREAM_MAX_CONCURRENCY=${GATEWAY_GENERIC_STREAM_MAX_CONCURRENCY:-8}
+      - GATEWAY_GENERIC_ACQUIRE_TIMEOUT_SECONDS=${GATEWAY_GENERIC_ACQUIRE_TIMEOUT_SECONDS:-5}
+      - GATEWAY_GENERIC_STREAM_MAX_DURATION_SECONDS=${GATEWAY_GENERIC_STREAM_MAX_DURATION_SECONDS:-3600}
+      - GATEWAY_GENERIC_STREAM_MAX_BYTES=${GATEWAY_GENERIC_STREAM_MAX_BYTES:-104857600}
       # Metrics configuration
       - METRICS_SERVICE_URL=http://metrics-service:8890
       - METRICS_API_KEY=${METRICS_API_KEY_AUTH_SERVER}
@@ -436,6 +507,13 @@ services:
       - DOCUMENTDB_USE_IAM=${DOCUMENTDB_USE_IAM:-false}
       - DOCUMENTDB_REPLICA_SET=${DOCUMENTDB_REPLICA_SET:-rs0}
       - DOCUMENTDB_READ_PREFERENCE=${DOCUMENTDB_READ_PREFERENCE:-secondaryPreferred}
+      # Rate Limiting Configuration (issue #295). Off by default; enforced here.
+      - RATE_LIMITING_ENABLED=${RATE_LIMITING_ENABLED:-false}
+      - RATE_LIMIT_BACKEND=${RATE_LIMIT_BACKEND:-documentdb}
+      - RATE_LIMIT_FAIL_OPEN=${RATE_LIMIT_FAIL_OPEN:-true}
+      - RATE_LIMIT_QUARANTINE_FAIL_CLOSED=${RATE_LIMIT_QUARANTINE_FAIL_CLOSED:-false}
+      - RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS=${RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS:-30}
+      - RATE_LIMIT_BACKEND_TIMEOUT_MS=${RATE_LIMIT_BACKEND_TIMEOUT_MS:-250}
       # Registry API static token auth
       - REGISTRY_STATIC_TOKEN_AUTH_ENABLED=${REGISTRY_STATIC_TOKEN_AUTH_ENABLED:-false}
       - REGISTRY_API_TOKEN=${REGISTRY_API_TOKEN:-}
@@ -627,6 +705,9 @@ services:
       # Logging
       KC_LOG_LEVEL: INFO
 
+      # Health endpoints (required for /health/ready on the management port)
+      KC_HEALTH_ENABLED: 'true'
+
     # start-dev serves plain HTTP with a bootstrap admin account, so the
     # published port is bound to loopback: the browser reaches it via
     # http://localhost:8080 on the same host, and in-cluster services use the
@@ -648,11 +729,23 @@ services:
       - ./keycloak/import:/opt/keycloak/data/import
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      # The Keycloak image deliberately ships without curl (upstream removes HTTP
+      # clients to cut attack surface), so a curl-based check can never succeed
+      # and leaves the container permanently unhealthy. Use bash's /dev/tcp
+      # redirection, which is what the Keycloak health guide documents for
+      # HEALTHCHECK. Since Keycloak 25 the health endpoints are served on the
+      # management port (9000), not on the main HTTP port.
+      test:
+        - CMD
+        - /bin/bash
+        - -c
+        - "{ printf 'HEAD /health/ready HTTP/1.0\\r\\n\\r\\n' >&0; grep 'HTTP/1.[01] 200'; } 0<>/dev/tcp/localhost/9000"
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      # First boot runs the Keycloak DB schema migration; a short start_period
+      # reports the container unhealthy during an otherwise normal startup.
+      start_period: 120s
 
   pingfederate:
     image: pingidentity/pingfederate:13.0.2

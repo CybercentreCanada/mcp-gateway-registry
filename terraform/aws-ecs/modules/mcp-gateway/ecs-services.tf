@@ -140,6 +140,13 @@ module "ecs_service_auth" {
           name  = "COGNITO_DOMAIN"
           value = var.cognito_domain
         },
+        # Cognito M2M (client_credentials) app-client id allowlist. Comma/space-
+        # separated; the auth-server accepts machine access tokens from these
+        # clients (their client_id claim). Default-empty = fail closed. Not a secret.
+        {
+          name  = "COGNITO_M2M_CLIENT_IDS"
+          value = var.cognito_m2m_client_ids
+        },
         # IDE OAuth login public client_id (PR #1224). The auth-server accepts
         # access tokens from this client (e.g. Cognito allowlist). Not a secret.
         {
@@ -185,6 +192,14 @@ module "ecs_service_auth" {
         {
           name  = "ENTRA_GRAPH_BASE_URL"
           value = var.entra_graph_base_url
+        },
+        {
+          name  = "ENTRA_SCOPE_FORMAT"
+          value = var.entra_scope_format
+        },
+        {
+          name  = "ENTRA_APPLICATION_ID_URI"
+          value = var.entra_application_id_uri
         },
         {
           name  = "IDP_GROUP_FILTER_PREFIX"
@@ -301,6 +316,13 @@ module "ecs_service_auth" {
           value = var.session_cookie_domain
         },
         {
+          # Exact-match allowlist of OAuth login/logout redirect URIs
+          # (open-redirect hardening). Empty falls back to the weaker
+          # cookie-domain heuristic.
+          name  = "OAUTH2_ALLOWED_REDIRECT_URIS"
+          value = var.oauth2_allowed_redirect_uris
+        },
+        {
           name  = "TRUSTED_PROXY_HOPS"
           value = tostring(var.trusted_proxy_hops)
         },
@@ -391,6 +413,34 @@ module "ecs_service_auth" {
           value = var.documentdb_namespace
         },
         {
+          name  = "RATE_LIMITING_ENABLED"
+          value = tostring(var.rate_limiting_enabled)
+        },
+        {
+          name  = "RATE_LIMIT_BACKEND"
+          value = var.rate_limit_backend
+        },
+        {
+          name  = "RATE_LIMIT_FAIL_OPEN"
+          value = tostring(var.rate_limit_fail_open)
+        },
+        {
+          name  = "RATE_LIMIT_QUARANTINE_FAIL_CLOSED"
+          value = tostring(var.rate_limit_quarantine_fail_closed)
+        },
+        {
+          name  = "RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS"
+          value = tostring(var.rate_limit_definitions_cache_ttl_seconds)
+        },
+        {
+          name  = "RATE_LIMIT_BACKEND_TIMEOUT_MS"
+          value = tostring(var.rate_limit_backend_timeout_ms)
+        },
+        # NOTE: the RATE_LIMIT_*_FLOOR_PER_MIN vars are intentionally NOT set on the
+        # auth-server -- only the registry reads them (it validates group definitions
+        # at config time). They are set on the registry container instead, matching
+        # the Helm chart (charts/registry only).
+        {
           name  = "DOCUMENTDB_USE_TLS"
           value = tostring(var.documentdb_use_tls)
         },
@@ -409,6 +459,10 @@ module "ecs_service_auth" {
         {
           name  = "AUDIT_LOG_MONGODB_TTL_DAYS"
           value = tostring(var.audit_log_ttl_days)
+        },
+        {
+          name  = "AUDIT_LOG_REQUIRE_DURABLE"
+          value = tostring(var.audit_log_require_durable)
         },
         {
           name  = "APP_LOG_CENTRALIZED_ENABLED"
@@ -463,6 +517,57 @@ module "ecs_service_auth" {
           name  = "INTERNAL_TOKEN_LEEWAY_SECONDS"
           value = tostring(var.internal_token_leeway_seconds)
         },
+        # Prevent AWS SDKs from falling back to EC2 IMDS. ECS task-role
+        # credentials remain available through the container credential URI.
+        {
+          name  = "AWS_EC2_METADATA_DISABLED"
+          value = "true"
+        },
+        # Gateway generic-proxy feature (ships disabled by default)
+        {
+          name  = "GATEWAY_GENERIC_PROXY_ENABLED"
+          value = tostring(var.gateway_generic_proxy_enabled)
+        },
+        {
+          name  = "GENERIC_PROXY_TOKEN_TTL_SECONDS"
+          value = tostring(var.generic_proxy_token_ttl_seconds)
+        },
+        {
+          name  = "GENERIC_PROXY_MAX_BODY_BYTES"
+          value = tostring(var.generic_proxy_max_body_bytes)
+        },
+        {
+          name  = "GATEWAY_GENERIC_REQUIRE_BEARER_FOR_WRITES"
+          value = tostring(var.gateway_generic_require_bearer_for_writes)
+        },
+        {
+          name  = "GATEWAY_EGRESS_SELFCHECK_ENABLED"
+          value = tostring(var.gateway_egress_selfcheck_enabled)
+        },
+        {
+          name  = "GATEWAY_GENERIC_TLS_VERIFY"
+          value = tostring(var.gateway_generic_tls_verify)
+        },
+        {
+          name  = "GATEWAY_GENERIC_MAX_CONCURRENCY"
+          value = tostring(var.gateway_generic_max_concurrency)
+        },
+        {
+          name  = "GATEWAY_GENERIC_STREAM_MAX_CONCURRENCY"
+          value = tostring(var.gateway_generic_stream_max_concurrency)
+        },
+        {
+          name  = "GATEWAY_GENERIC_ACQUIRE_TIMEOUT_SECONDS"
+          value = tostring(var.gateway_generic_acquire_timeout_seconds)
+        },
+        {
+          name  = "GATEWAY_GENERIC_STREAM_MAX_DURATION_SECONDS"
+          value = tostring(var.gateway_generic_stream_max_duration_seconds)
+        },
+        {
+          name  = "GATEWAY_GENERIC_STREAM_MAX_BYTES"
+          value = tostring(var.gateway_generic_stream_max_bytes)
+        },
         {
           name  = "METRICS_LEGACY_HTTP_POST"
           value = "false"
@@ -498,6 +603,12 @@ module "ecs_service_auth" {
         {
           name  = "EGRESS_REGISTRY_INTERNAL_URL"
           value = var.egress_registry_internal_url
+        },
+        {
+          # OBO (same-IdP) token exchange against a self-hosted IdP: allowlist its
+          # private-resolving token endpoint. Mirrors the registry container.
+          name  = "EGRESS_OAUTH_TRUSTED_IDP_HOSTS"
+          value = var.egress_oauth_trusted_idp_hosts
         }
         ],
         # PR #947: MongoDB connection string override (plain-text variant).
@@ -688,6 +799,16 @@ module "ecs_service_auth" {
   subnet_ids = var.private_subnet_ids
   # No ALB ingress rule needed: Service Connect proxy-to-proxy traffic is allowed
   # by the registry->auth rule defined separately below.
+  #
+  # The generic proxy may target operator-approved Internet endpoints, so this
+  # service needs broad egress. Security groups are allow-only and cannot express
+  # "0.0.0.0/0 except link-local". Fargate does not expose EC2 IMDS; the task's
+  # 169.254.170.2 container-credential endpoint must remain reachable for its IAM
+  # role. The auth task disables SDK EC2-IMDS fallback, and the proxy URL guard
+  # hard-denies 169.254.169.254, 169.254.170.2, 169.254.170.23,
+  # fd00:ec2::254, and fd00:ec2::23 before any allowlist relaxation. Deploy an
+  # AWS Network Firewall/NACL equivalent when network-layer deny rules are
+  # required for an EC2-backed capacity provider.
   security_group_egress_rules = {
     all = {
       ip_protocol = "-1"
@@ -778,14 +899,26 @@ module "ecs_service_registry" {
   # Enable Service Connect
   service_connect_configuration = {
     namespace = aws_service_discovery_private_dns_namespace.mcp.arn
-    service = [{
-      client_alias = {
-        port     = 8080 # Non-root nginx listens on 8080
-        dns_name = "registry"
+    service = [
+      {
+        client_alias = {
+          port     = 8080 # Non-root nginx listens on 8080
+          dns_name = "registry"
+        }
+        port_name      = "http"
+        discovery_name = "registry"
+      },
+      {
+        # Dedicated internal egress-token vend listener (nginx :8091). Advertised
+        # so the auth-server reaches it as registry:8091; never ALB-fronted.
+        client_alias = {
+          port     = 8091
+          dns_name = "registry"
+        }
+        port_name      = "egress-internal"
+        discovery_name = "registry-egress-internal"
       }
-      port_name      = "http"
-      discovery_name = "registry"
-    }]
+    ]
   }
 
   # Container definitions
@@ -814,6 +947,11 @@ module "ecs_service_registry" {
         {
           name          = "registry"
           containerPort = 7860
+          protocol      = "tcp"
+        },
+        {
+          name          = "egress-internal"
+          containerPort = 8091 # dedicated internal egress-token vend listener
           protocol      = "tcp"
         }
       ]
@@ -899,6 +1037,14 @@ module "ecs_service_registry" {
         {
           name  = "ENTRA_GRAPH_BASE_URL"
           value = var.entra_graph_base_url
+        },
+        {
+          name  = "ENTRA_SCOPE_FORMAT"
+          value = var.entra_scope_format
+        },
+        {
+          name  = "ENTRA_APPLICATION_ID_URI"
+          value = var.entra_application_id_uri
         },
         {
           name  = "IDP_GROUP_FILTER_PREFIX"
@@ -1035,6 +1181,34 @@ module "ecs_service_registry" {
           name  = "EMBEDDINGS_AWS_REGION"
           value = var.embeddings_aws_region
         },
+        {
+          name  = "EMBEDDINGS_AUTH_MODE"
+          value = var.embeddings_auth_mode
+        },
+        {
+          name  = "EMBEDDINGS_IDP_TOKEN_ENDPOINT"
+          value = var.embeddings_idp_token_endpoint
+        },
+        {
+          name  = "EMBEDDINGS_IDP_CLIENT_ID"
+          value = var.embeddings_idp_client_id
+        },
+        {
+          name  = "EMBEDDINGS_IDP_SCOPE"
+          value = var.embeddings_idp_scope
+        },
+        {
+          name  = "EMBEDDINGS_IDP_TIMEOUT_SECONDS"
+          value = tostring(var.embeddings_idp_timeout_seconds)
+        },
+        {
+          name  = "EMBEDDINGS_IDP_ALLOW_INSECURE"
+          value = tostring(var.embeddings_idp_allow_insecure)
+        },
+        {
+          name  = "EMBEDDINGS_RESPONSE_FORMAT"
+          value = var.embeddings_response_format
+        },
         # Registration deduplication. Advisory check; never blocks
         # registration. Reuses the embeddings model above.
         {
@@ -1126,6 +1300,41 @@ module "ecs_service_registry" {
           value = var.documentdb_namespace
         },
         {
+          name  = "RATE_LIMITING_ENABLED"
+          value = tostring(var.rate_limiting_enabled)
+        },
+        {
+          name  = "RATE_LIMIT_BACKEND"
+          value = var.rate_limit_backend
+        },
+        {
+          name  = "RATE_LIMIT_FAIL_OPEN"
+          value = tostring(var.rate_limit_fail_open)
+        },
+        {
+          name  = "RATE_LIMIT_QUARANTINE_FAIL_CLOSED"
+          value = tostring(var.rate_limit_quarantine_fail_closed)
+        },
+        {
+          name  = "RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS"
+          value = tostring(var.rate_limit_definitions_cache_ttl_seconds)
+        },
+        {
+          name  = "RATE_LIMIT_BACKEND_TIMEOUT_MS"
+          value = tostring(var.rate_limit_backend_timeout_ms)
+        },
+        # Floors are read by the REGISTRY (it validates group definitions at config
+        # time); the auth-server does not read them. Registry-only, matching the
+        # Helm chart (charts/registry only).
+        {
+          name  = "RATE_LIMIT_USER_FLOOR_PER_MIN"
+          value = tostring(var.rate_limit_user_floor_per_min)
+        },
+        {
+          name  = "RATE_LIMIT_AGENT_FLOOR_PER_MIN"
+          value = tostring(var.rate_limit_agent_floor_per_min)
+        },
+        {
           name  = "DOCUMENTDB_USE_TLS"
           value = tostring(var.documentdb_use_tls)
         },
@@ -1213,6 +1422,10 @@ module "ecs_service_registry" {
         {
           name  = "AUDIT_LOG_MONGODB_TTL_DAYS"
           value = tostring(var.audit_log_ttl_days)
+        },
+        {
+          name  = "AUDIT_LOG_REQUIRE_DURABLE"
+          value = tostring(var.audit_log_require_durable)
         },
         {
           name  = "APP_LOG_CENTRALIZED_ENABLED"
@@ -1308,6 +1521,12 @@ module "ecs_service_registry" {
           name  = "IDE_OAUTH_CALLBACK_PORT"
           value = tostring(var.ide_oauth_callback_port)
         },
+        # Optional Claude Code Connect snippet scope (local|project|user). Empty
+        # (default) omits --scope. Display-only; registry-read.
+        {
+          name  = "IDE_CONNECT_SCOPE"
+          value = var.ide_connect_scope
+        },
         {
           name  = "DEPLOYMENT_MODE"
           value = var.deployment_mode
@@ -1315,6 +1534,49 @@ module "ecs_service_registry" {
         {
           name  = "REGISTRY_MODE"
           value = var.registry_mode
+        },
+        # A2A reverse-proxy gateway (opt-in; default off). When true, each enabled
+        # A2A agent gets nginx location blocks proxying its card + JSON-RPC.
+        {
+          name  = "A2A_REVERSE_PROXY_ENABLED"
+          value = tostring(var.a2a_reverse_proxy_enabled)
+        },
+        # SSRF guard bypass for internal upstreams at private IPs. The health
+        # checker and proxy validate each MCP-server / A2A-agent upstream URL
+        # through the SSRF guard, which blocks private IPs by default. List exact
+        # hosts or CIDR ranges; the cloud metadata address is never permitted.
+        {
+          name  = "SSRF_ALLOWED_HOSTS"
+          value = var.ssrf_allowed_hosts
+        },
+        {
+          name  = "SSRF_ALLOWED_CIDRS"
+          value = var.ssrf_allowed_cidrs
+        },
+        # Gateway generic-proxy feature (ships disabled by default)
+        {
+          name  = "GATEWAY_GENERIC_PROXY_ENABLED"
+          value = tostring(var.gateway_generic_proxy_enabled)
+        },
+        {
+          name  = "GATEWAY_CANONICAL_NAMESPACE_ENABLED"
+          value = tostring(var.gateway_canonical_namespace_enabled)
+        },
+        {
+          name  = "GATEWAY_PROXY_ALLOW_PRIVATE_TARGETS"
+          value = tostring(var.gateway_proxy_allow_private_targets)
+        },
+        {
+          name  = "GATEWAY_GENERIC_CLIENT_MAX_BODY_SIZE"
+          value = tostring(var.gateway_generic_client_max_body_size)
+        },
+        {
+          name  = "GATEWAY_PROXY_PREFIX"
+          value = tostring(var.gateway_proxy_prefix)
+        },
+        {
+          name  = "GATEWAY_GENERIC_STREAM_READ_TIMEOUT_SECONDS"
+          value = tostring(var.gateway_generic_stream_read_timeout_seconds)
         },
         # Internal/workshop deployment classification (telemetry labels; issue #1216)
         {
@@ -1360,6 +1622,14 @@ module "ecs_service_registry" {
         {
           name  = "MAX_TOKENS_PER_USER_PER_HOUR"
           value = tostring(var.max_tokens_per_user_per_hour)
+        },
+        {
+          name  = "MCP_TOKEN_DEFAULT_TTL_HOURS"
+          value = tostring(var.mcp_token_default_ttl_hours)
+        },
+        {
+          name  = "MCP_TOKEN_MAX_TTL_HOURS"
+          value = tostring(var.mcp_token_max_ttl_hours)
         },
         # M2M direct client registration (issue #851)
         {
@@ -1424,6 +1694,11 @@ module "ecs_service_registry" {
         {
           name  = "BATCH_WORKER_LEASE_HEARTBEAT_SECONDS"
           value = tostring(var.batch_worker_lease_heartbeat_seconds)
+        },
+        # Caller-supplied asset id (issue #1276)
+        {
+          name  = "ALLOW_CALLER_SUPPLIED_ASSET_ID"
+          value = tostring(var.allow_caller_supplied_asset_id)
         },
         # Registration gate / admission control (issue #809)
         {
@@ -1599,6 +1874,14 @@ module "ecs_service_registry" {
           name  = "EGRESS_OBO_ALLOWED_AUDIENCES"
           value = var.egress_obo_allowed_audiences
         },
+        # Hosts whose OAuth token endpoints may resolve to private addresses, for a
+        # self-hosted IdP (Keycloak, Entra over Private Link). Exact hostnames only;
+        # does not inherit ssrf_allowed_hosts, so a proxy-target bypass can never
+        # relax a token POST. Empty by default, which permits none.
+        {
+          name  = "EGRESS_OAUTH_TRUSTED_IDP_HOSTS"
+          value = var.egress_oauth_trusted_idp_hosts
+        },
         # AUTH_SERVER_NGINX_MARKER_SECRET is injected via secrets/valueFrom below
         # (required unconditionally, not just for egress).
         {
@@ -1609,6 +1892,35 @@ module "ecs_service_registry" {
           name  = "SECRETS_MANAGER_PATH_PREFIX"
           value = var.egress_secrets_manager_path_prefix
         },
+        {
+          name  = "MCP_TOKEN_DEFAULT_TTL_HOURS"
+          value = tostring(var.mcp_token_default_ttl_hours)
+        },
+        {
+          name  = "MCP_TOKEN_MAX_TTL_HOURS"
+          value = tostring(var.mcp_token_max_ttl_hours)
+        },
+        # Prevent AWS SDKs from falling back to EC2 IMDS. ECS delivers task-role
+        # credentials through the container-credentials provider
+        # (AWS_CONTAINER_CREDENTIALS_RELATIVE_URI -> 169.254.170.2) on BOTH the
+        # Fargate and EC2 launch types; only the IMDS provider
+        # (169.254.169.254) is disabled. So task-role creds survive regardless
+        # of launch type — this cannot strip the registry's credentials. That is
+        # why there is no operator opt-out here (unlike the Helm charts, where an
+        # EKS node-instance-profile-only setup can legitimately need IMDS): on
+        # ECS the credential-only-via-IMDS footgun structurally cannot occur.
+        # The registry uses boto3 for Secrets Manager, DocumentDB IAM, Cognito,
+        # and AgentCore.
+        #
+        # This is NOT redundant with the url_guard egress SSRF check: boto3 uses
+        # its own urllib3 stack and never passes through GuardedTransport. The
+        # url_guard blocks the app being tricked into *fetching* a URL that
+        # redirects to IMDS; this env var closes boto3's own IMDS credential
+        # provider, a vector the url_guard structurally cannot see.
+        {
+          name  = "AWS_EC2_METADATA_DISABLED"
+          value = "true"
+        },
         ],
         # PR #947: MongoDB connection string override (plain-text variant).
         # Only emitted when var.mongodb_connection_string is non-empty and a
@@ -1618,6 +1930,24 @@ module "ecs_service_registry" {
           {
             name  = "MONGODB_CONNECTION_STRING"
             value = var.mongodb_connection_string
+          }
+        ] : [],
+        # Feature #1471: RUM snippet served as /rum.js (plain-text variant).
+        # Only emitted when var.registry_rum_snippet_b64 is non-empty and a
+        # Secrets Manager ARN was not provided. When empty, RUM is disabled.
+        var.registry_rum_snippet_b64 != "" && var.registry_rum_snippet_secret_arn == "" ? [
+          {
+            name  = "RUM_SNIPPET_B64"
+            value = var.registry_rum_snippet_b64
+          }
+        ] : [],
+        # Feature #1471: RUM host allowlist (plain text, not secret). Only
+        # emitted when non-empty; when set the snippet is rejected at startup
+        # (fail closed) if it references a host outside the list.
+        var.registry_rum_allowed_hosts != "" ? [
+          {
+            name  = "RUM_ALLOWED_HOSTS"
+            value = var.registry_rum_allowed_hosts
           }
         ] : [],
         # Extra environment variables from user (Issue #1000)
@@ -1649,14 +1979,36 @@ module "ecs_service_registry" {
           {
             name      = "EMBEDDINGS_API_KEY"
             valueFrom = aws_secretsmanager_secret.embeddings_api_key.arn
+          },
+          {
+            name      = "EMBEDDINGS_IDP_CLIENT_SECRET"
+            valueFrom = aws_secretsmanager_secret.embeddings_idp_client_secret.arn
           }
         ],
+        # Per-user egress credential vault encryption key (registry-only,
+        # optional). Injected as a true secret via Secrets Manager valueFrom;
+        # only present when an operator supplied a value (empty => feature off).
+        var.egress_credential_encryption_key != "" ? [
+          {
+            name      = "EGRESS_CREDENTIAL_ENCRYPTION_KEY"
+            valueFrom = aws_secretsmanager_secret.egress_credential_encryption_key[0].arn
+          }
+        ] : [],
         # PR #947: MongoDB connection string override (Secrets Manager variant).
         # Preferred when the URI contains credentials (avoids plain text in state).
         var.mongodb_connection_string_secret_arn != "" ? [
           {
             name      = "MONGODB_CONNECTION_STRING"
             valueFrom = var.mongodb_connection_string_secret_arn
+          }
+        ] : [],
+        # Feature #1471: RUM snippet served as /rum.js (Secrets Manager variant).
+        # Preferred when the snippet contains a vendor token (avoids plain text
+        # in state). The operator supplies the ARN of their own secret.
+        var.registry_rum_snippet_secret_arn != "" ? [
+          {
+            name      = "RUM_SNIPPET_B64"
+            valueFrom = var.registry_rum_snippet_secret_arn
           }
         ] : [],
         var.storage_backend == "documentdb" ? [
@@ -1818,16 +2170,20 @@ module "ecs_service_registry" {
       referenced_security_group_id = module.ecs_service_mcpgw.security_group_id
     }
     # Egress credential vault: the auth-server mcp_proxy calls the registry's
-    # internal egress-token vend endpoint (auth -> registry:8080 ->
+    # DEDICATED INTERNAL egress-token vend listener (auth -> registry:8091 ->
     # /_egress_internal/egress-token) to fetch a user's vaulted upstream token
-    # before proxying an MCP call. Without this the vend hop times out
-    # ("egress vend: registry unreachable"), no token is injected, and the
-    # upstream 3rd-party server 401s (surfacing in the client as
-    # "Protected resource ... does not match").
+    # before proxying an MCP call. The vend is served on nginx :8091 (never
+    # ALB-fronted), reached task-to-task via Service Connect (registry:8091).
+    # Without this the vend hop times out ("egress vend: registry unreachable"),
+    # no token is injected, and the upstream 3rd-party server 401s (surfacing in
+    # the client as "Protected resource ... does not match").
     auth_internal = {
-      description                  = "HTTP from auth-server for the egress-token vend hop (non-root nginx)"
-      from_port                    = 8080
-      to_port                      = 8080
+      # AWS restricts rule descriptions to "a-zA-Z0-9. _-:/()#,@[]+=&;{}!$*", so no
+      # ">" here. An arrow makes AuthorizeSecurityGroupIngress fail the whole apply
+      # with "InvalidParameterValue: Invalid rule description".
+      description                  = "auth-server to registry:8091 egress-token vend hop (dedicated internal nginx listener)"
+      from_port                    = 8091
+      to_port                      = 8091
       ip_protocol                  = "tcp"
       referenced_security_group_id = module.ecs_service_auth.security_group_id
     }

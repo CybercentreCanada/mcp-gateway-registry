@@ -75,9 +75,7 @@ class TestRunCheckOnce:
         assert get_state().latest is None
 
     @pytest.mark.asyncio
-    async def test_skips_when_current_version_unparseable(
-        self, monkeypatch, reset_state
-    ):
+    async def test_skips_when_current_version_unparseable(self, monkeypatch, reset_state):
         monkeypatch.setenv("BUILD_VERSION", "1.24.4")
         with (
             patch("registry.core.update_check.settings") as mock_settings,
@@ -207,9 +205,7 @@ class TestRunCheckOnce:
         monkeypatch.setenv("BUILD_VERSION", "1.24.3")
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.content = (
-            b'{"tag_name":"1.24.4","html_url":"javascript:alert(1)"}'
-        )
+        mock_response.content = b'{"tag_name":"1.24.4","html_url":"javascript:alert(1)"}'
         mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
         mock_client.__aenter__.return_value = mock_client

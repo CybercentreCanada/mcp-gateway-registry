@@ -79,3 +79,59 @@ class TestResolveProvider:
         assert cfg.scope_separator == ","
         assert cfg.token_endpoint_auth_style == TokenEndpointAuthStyle.BASIC_HEADER
         assert cfg.use_pkce is True
+
+    def test_custom_public_client_none_style(self):
+        # token_endpoint_auth_method=none (RFC 7591 public client, e.g. a
+        # DCR-minted Datadog MCP client): the style resolves and PKCE stays on.
+        cfg = resolve_provider(
+            {
+                "provider": "custom",
+                "custom_authorize_url": "https://app.datadoghq.com/oauth2/v1/authorize",
+                "custom_token_url": "https://app.datadoghq.com/api/v2/oauth2/token",
+                "custom_token_auth_style": "none",
+            }
+        )
+        assert cfg.token_endpoint_auth_style == TokenEndpointAuthStyle.NONE
+        assert cfg.use_pkce is True
+
+    def test_custom_invalid_auth_style_raises(self):
+        with pytest.raises(ValueError):
+            resolve_provider(
+                {
+                    "provider": "custom",
+                    "custom_authorize_url": "https://idp/auth",
+                    "custom_token_url": "https://idp/token",
+                    "custom_token_auth_style": "bogus_style",
+                }
+            )
+
+    def test_builtin_providers_are_confidential(self):
+        # No built-in may ever resolve to the public-client style.
+        for name, cfg in PROVIDER_REGISTRY.items():
+            assert cfg.token_endpoint_auth_style != TokenEndpointAuthStyle.NONE, name
+
+    def test_custom_resource_threaded(self):
+        # RFC 8707 resource indicator is carried onto the resolved config.
+        cfg = resolve_provider(
+            {
+                "provider": "custom",
+                "custom_authorize_url": "https://auth.atlassian.com/authorize",
+                "custom_token_url": "https://auth.atlassian.com/oauth/token",
+                "custom_resource": "https://mcp.atlassian.com/v1/mcp/authv2",
+            }
+        )
+        assert cfg.resource == "https://mcp.atlassian.com/v1/mcp/authv2"
+
+    def test_custom_resource_absent_is_none(self):
+        cfg = resolve_provider(
+            {
+                "provider": "custom",
+                "custom_authorize_url": "https://idp/auth",
+                "custom_token_url": "https://idp/token",
+            }
+        )
+        assert cfg.resource is None
+
+    def test_builtin_has_no_resource(self):
+        # Built-ins never carry a resource indicator (keeps their flow unchanged).
+        assert PROVIDER_REGISTRY["atlassian"].resource is None

@@ -283,6 +283,99 @@ class TestRegisterServerUrlValidation:
         assert result is True
         mock_server_repository.update.assert_called_once()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field_name", ["mcp_endpoint", "sse_endpoint"])
+    @pytest.mark.parametrize(
+        "bad_url",
+        [
+            "http://169.254.169.254/latest/meta-data/",  # cloud metadata literal
+            "http://10.0.0.1:8080/mcp",  # RFC-1918 literal
+            "http://127.0.0.1:8080/sse",  # loopback literal
+            "http://100.64.0.1/mcp",  # CGNAT (RFC 6598) literal
+            "ftp://acme.com/mcp",  # disallowed scheme
+            'http://acme.com/";} location /x { proxy_pass http://evil;',  # nginx injection
+            "http://acme.com/${SOME_VAR}",  # nginx variable sigil
+            "http://acme.com/a;b",  # directive terminator
+        ],
+    )
+    async def test_register_rejects_unsafe_endpoint_field(
+        self,
+        server_service: ServerService,
+        sample_server_dict: dict[str, Any],
+        mock_server_repository,
+        field_name,
+        bad_url,
+    ):
+        """An mcp_endpoint/sse_endpoint override gets the same guard as proxy_pass_url."""
+        from registry.exceptions import UrlValidationError
+
+        mock_server_repository.get.return_value = None
+        payload = {**sample_server_dict, field_name: bad_url}
+
+        with pytest.raises(UrlValidationError):
+            await server_service.register_server(payload)
+
+        mock_server_repository.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field_name", ["mcp_endpoint", "sse_endpoint"])
+    async def test_update_rejects_unsafe_endpoint_field(
+        self,
+        server_service: ServerService,
+        sample_server_dict: dict[str, Any],
+        mock_server_repository,
+        field_name,
+    ):
+        """Editing an endpoint override to a private target is rejected."""
+        from registry.exceptions import UrlValidationError
+
+        payload = {**sample_server_dict, field_name: "http://192.168.1.5/mcp"}
+
+        with pytest.raises(UrlValidationError):
+            await server_service.update_server(sample_server_dict["path"], payload)
+
+        mock_server_repository.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field_name", ["mcp_endpoint", "sse_endpoint"])
+    async def test_register_accepts_public_https_endpoint_field(
+        self,
+        server_service: ServerService,
+        sample_server_dict: dict[str, Any],
+        mock_server_repository,
+        mock_search_repository,
+        field_name,
+    ):
+        """A valid public https endpoint override is accepted."""
+        mock_server_repository.get.return_value = None
+        mock_server_repository.create.return_value = True
+        mock_server_repository.get_state.return_value = False
+
+        payload = {**sample_server_dict, field_name: "https://acme.example.com/mcp"}
+        result = await server_service.register_server(payload)
+
+        assert result["success"] is True
+        mock_server_repository.create.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_register_accepts_empty_endpoint_fields(
+        self,
+        server_service: ServerService,
+        sample_server_dict: dict[str, Any],
+        mock_server_repository,
+        mock_search_repository,
+    ):
+        """Empty/unset endpoint override fields are allowed (they are optional)."""
+        mock_server_repository.get.return_value = None
+        mock_server_repository.create.return_value = True
+        mock_server_repository.get_state.return_value = False
+
+        payload = {**sample_server_dict, "mcp_endpoint": "", "sse_endpoint": None}
+        result = await server_service.register_server(payload)
+
+        assert result["success"] is True
+        mock_server_repository.create.assert_called_once()
+
 
 class TestRegisterServer:
     """Test server registration functionality."""
@@ -311,6 +404,46 @@ class TestRegisterServer:
         mock_search_repository.index_server.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_register_server_rejects_duplicate_id(
+        self,
+        server_service: ServerService,
+        sample_server_dict: dict[str, Any],
+        mock_server_repository,
+        mock_search_repository,
+    ):
+        """A supplied id colliding with an existing asset -> id_conflict (#1276)."""
+        mock_server_repository.get.return_value = None  # path is free
+        mock_server_repository.find_by_id.return_value = {
+            "path": "/other",
+            "id": "arn:aws:x",
+        }
+
+        server_info = {**sample_server_dict, "id": "arn:aws:x"}
+        result = await server_service.register_server(server_info)
+
+        assert result["success"] is False
+        assert result["error_type"] == "id_conflict"
+        mock_server_repository.create.assert_not_called()
+
+    async def test_register_server_unique_id_proceeds(
+        self,
+        server_service: ServerService,
+        sample_server_dict: dict[str, Any],
+        mock_server_repository,
+        mock_search_repository,
+    ):
+        """A supplied id with no collision proceeds to create (#1276)."""
+        mock_server_repository.get.return_value = None
+        mock_server_repository.find_by_id.return_value = None
+        mock_server_repository.create.return_value = True
+        mock_server_repository.get_state.return_value = False
+
+        server_info = {**sample_server_dict, "id": "arn:aws:unique"}
+        result = await server_service.register_server(server_info)
+
+        assert result["success"] is True
+        mock_server_repository.create.assert_called_once()
+
     async def test_register_server_calls_repository_create(
         self,
         server_service: ServerService,
@@ -1535,7 +1668,13 @@ class TestEdgeCasesAndErrorHandling:
         mock_server_repository,
         mock_search_repository,
     ):
-        """Test handling empty or root path."""
+        """A root/slashes-only path is rejected (issue #1501).
+
+        After the trailing-slash location normalisation, a slashes-only path
+        would render as a gateway-wide ``location /`` block, so
+        ``validate_server_path`` rejects it and registration must fail closed
+        without writing anything.
+        """
         # Arrange
         root_server = {
             "path": "/",
@@ -1546,12 +1685,13 @@ class TestEdgeCasesAndErrorHandling:
         mock_server_repository.create.return_value = True
         mock_server_repository.get_state.return_value = False
 
-        # Act
-        result = await server_service.register_server(root_server)
+        from registry.exceptions import UrlValidationError
 
-        # Assert - result is now a dict
-        assert result["success"] is True
-        mock_server_repository.create.assert_called_once()
+        # Act / Assert - registration fails closed, nothing is persisted
+        with pytest.raises(UrlValidationError):
+            await server_service.register_server(root_server)
+
+        mock_server_repository.create.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_long_path_handling(
@@ -2068,3 +2208,39 @@ class TestServerVersionManagement:
         # Act & Assert
         with pytest.raises(ValueError, match="Server not found"):
             await server_service.get_server_versions("/nonexistent")
+
+
+class TestBuiltinServerEndpointIdentityBinding:
+    @pytest.mark.asyncio
+    async def test_registration_rejects_mismatched_builtin_mcp_endpoint(
+        self, server_service, mock_server_repository
+    ):
+        record = {
+            "path": "/airegistry-tools/",
+            "server_name": "AI Registry tools",
+            "proxy_pass_url": "http://mcpgw-server:8003/",
+            "mcp_endpoint": "https://public.example/mcp",
+        }
+        from registry.exceptions import UrlValidationError
+
+        with pytest.raises(UrlValidationError, match="exact built-in"):
+            await server_service.register_server(record)
+        mock_server_repository.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_rejects_mismatched_builtin_query(
+        self, server_service, mock_server_repository
+    ):
+        mock_server_repository.get.return_value = {
+            "path": "/airegistry-tools/",
+            "server_name": "AI Registry tools",
+            "proxy_pass_url": "http://mcpgw-server:8003/",
+        }
+        from registry.exceptions import UrlValidationError
+
+        with pytest.raises(UrlValidationError, match="exact built-in"):
+            await server_service.update_server(
+                "/airegistry-tools/",
+                {"mcp_endpoint": "http://mcpgw-server:8003/mcp?tenant=other"},
+            )
+        mock_server_repository.update.assert_not_called()

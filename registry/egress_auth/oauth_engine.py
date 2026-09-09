@@ -16,6 +16,7 @@ plus the operator ``client_id``/``client_secret``. Token material is returned as
 
 import base64
 import hashlib
+import json
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -29,7 +30,7 @@ from registry.egress_auth.schemas import (
     TokenEndpointAuthStyle,
 )
 from registry.exceptions import UrlValidationError
-from registry.utils.url_guard import PROXY_PROFILE, guarded_async_client
+from registry.utils.url_guard import CREDENTIALED_OAUTH_PROFILE, guarded_async_client
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,12 @@ def build_authorize_url(
     if cfg.use_pkce and pkce_challenge:
         params["code_challenge"] = pkce_challenge
         params["code_challenge_method"] = "S256"
+    # RFC 8707 resource indicator. Sent here on the authorize leg AND on the
+    # token/refresh legs (see exchange_code/refresh_token) -- providers like
+    # Atlassian's Rovo MCP require it on BOTH or they reject the flow. Set before
+    # extra_authorize_params so a built-in's static params still win a collision.
+    if cfg.resource:
+        params["resource"] = cfg.resource
     params.update(cfg.extra_authorize_params)
     return f"{cfg.authorize_url}?{urlencode(params)}"
 
@@ -145,21 +152,65 @@ def _parse_token_response(cfg: OAuthProviderConfig, payload: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def _expires_at(expires_in: int | None) -> str | None:
-    if not expires_in:
+def _jwt_exp(access_token: str | None) -> int | None:
+    """Best-effort ``exp`` (epoch seconds) from a JWT access token, else None.
+
+    Opaque (non-JWT) tokens and any decode/parse failure return None; the payload
+    is base64url-decoded WITHOUT signature verification purely to read the
+    provider-asserted lifetime, never to trust the token.
+    """
+    if not access_token or access_token.count(".") != 2:
         return None
-    return (datetime.now(UTC) + timedelta(seconds=int(expires_in))).isoformat()
+    payload_b64 = access_token.split(".")[1]
+    payload_b64 += "=" * (-len(payload_b64) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload_b64.encode("ascii")))
+    except (ValueError, TypeError):
+        return None
+    exp = claims.get("exp")
+    return int(exp) if isinstance(exp, int | float) and not isinstance(exp, bool) else None
+
+
+def _expires_at(expires_in: int | None, access_token: str | None = None) -> str | None:
+    """ISO expiry from ``expires_in`` when present, else the access token's JWT ``exp``.
+
+    Some providers (e.g. Salesforce) omit ``expires_in`` from the token response
+    but issue a JWT access token bounded by an ``exp`` claim. Without this
+    fallback ``expires_at`` stays None, the vend path treats the token as
+    long-lived and never fires the single-flight refresh, so the gateway keeps
+    injecting a token the upstream has already expired ("Invalid token").
+    """
+    if expires_in:
+        return (datetime.now(UTC) + timedelta(seconds=int(expires_in))).isoformat()
+    exp = _jwt_exp(access_token)
+    if exp is not None:
+        return datetime.fromtimestamp(exp, tz=UTC).isoformat()
+    return None
 
 
 def _build_token_request(
     cfg: OAuthProviderConfig,
     client_id: str,
-    client_secret: str,
+    client_secret: str | None,
     form: dict,
 ) -> tuple[dict, dict]:
-    """Return (form_data, headers), placing the client secret per the provider's style."""
+    """Return (form_data, headers), placing the client secret per the provider's style.
+
+    ``NONE`` (RFC 7591 ``token_endpoint_auth_method=none``) is a public client:
+    only ``client_id`` goes in the body and no secret exists anywhere in the
+    request. The confidential styles fail closed on a missing secret rather
+    than sending an empty one (which providers accept-then-misattribute).
+    """
     headers = {"Accept": "application/json"}
     data = dict(form)
+    if cfg.token_endpoint_auth_style == TokenEndpointAuthStyle.NONE:
+        data["client_id"] = client_id
+        return data, headers
+    if not client_secret:
+        raise OAuthEngineError(
+            f"provider {cfg.name!r} uses token_endpoint_auth_style="
+            f"{cfg.token_endpoint_auth_style.value!r} but no client_secret is configured"
+        )
     if cfg.token_endpoint_auth_style == TokenEndpointAuthStyle.BASIC_HEADER:
         basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
         headers["Authorization"] = f"Basic {basic}"
@@ -177,18 +228,21 @@ async def _post_token(cfg: OAuthProviderConfig, data: dict, headers: dict) -> di
     # pins the connection to a validated public IP at connect time (blocking a
     # post-registration DNS rebind to a private/metadata address) and rejects a
     # non-http(s) scheme, so the credential can never be exfiltrated to an
-    # internal target. Built-in providers resolve to public hosts and pass
-    # through unchanged.
+    # internal target. The dedicated profile has an empty allowlist and
+    # requires HTTPS, so proxy allowlist entries cannot weaken this path.
+    # Built-in providers resolve to public HTTPS hosts and pass unchanged.
     try:
-        async with guarded_async_client(profile=PROXY_PROFILE, timeout=_HTTP_TIMEOUT) as client:
+        async with guarded_async_client(
+            profile=CREDENTIALED_OAUTH_PROFILE,
+            timeout=_HTTP_TIMEOUT,
+        ) as client:
             resp = await client.post(cfg.token_url, data=data, headers=headers)
     except UrlValidationError as exc:
-        # The pinned guard rejected the target (private/metadata IP, bad scheme,
-        # or a post-registration DNS rebind). Fail closed WITHOUT having sent the
-        # client_secret/refresh_token; surface it in the engine's own contract.
-        raise OAuthEngineError(f"token endpoint blocked by SSRF guard: {exc}") from exc
+        # The pinned guard rejected the target before sending any credential.
+        # Keep the wrapped detail out of higher-level logs and browser responses.
+        raise OAuthEngineError("token endpoint blocked by security policy") from exc
     except httpx.HTTPError as exc:
-        raise OAuthEngineError(f"token endpoint unreachable: {exc}") from exc
+        raise OAuthEngineError("token endpoint unreachable") from exc
 
     try:
         payload = resp.json()
@@ -224,7 +278,7 @@ def _to_stored_token(
         # the prior one (some don't re-send it on refresh).
         refresh_token=parsed.get("refresh_token") or fallback_refresh,
         token_type=parsed.get("token_type", "Bearer"),
-        expires_at=_expires_at(parsed.get("expires_in")),
+        expires_at=_expires_at(parsed.get("expires_in"), access),
         scopes=[s for s in scopes if s],
         status="active",
         client_id=client_id,
@@ -236,7 +290,7 @@ def _to_stored_token(
 async def exchange_code(
     cfg: OAuthProviderConfig,
     client_id: str,
-    client_secret: str,
+    client_secret: str | None,
     code: str,
     redirect_uri: str,
     pkce_verifier: str | None = None,
@@ -249,6 +303,10 @@ async def exchange_code(
     }
     if cfg.use_pkce and pkce_verifier:
         form["code_verifier"] = pkce_verifier
+    # RFC 8707: the resource indicator MUST match the one sent on authorize, or a
+    # resource server like Atlassian's Rovo MCP rejects the exchange.
+    if cfg.resource:
+        form["resource"] = cfg.resource
     data, headers = _build_token_request(cfg, client_id, client_secret, form)
     payload = await _post_token(cfg, data, headers)
     return _to_stored_token(cfg, payload, client_id)
@@ -257,7 +315,7 @@ async def exchange_code(
 async def refresh_token(
     cfg: OAuthProviderConfig,
     client_id: str,
-    client_secret: str,
+    client_secret: str | None,
     refresh_token_value: str,
 ) -> StoredToken:
     """Exchange a refresh token for a new access token (and possibly new refresh token).
@@ -269,6 +327,10 @@ async def refresh_token(
         "grant_type": "refresh_token",
         "refresh_token": refresh_token_value,
     }
+    # RFC 8707: carry the resource indicator on refresh too so the rotated access
+    # token stays bound to the same protected resource.
+    if cfg.resource:
+        form["resource"] = cfg.resource
     data, headers = _build_token_request(cfg, client_id, client_secret, form)
     payload = await _post_token(cfg, data, headers)
     return _to_stored_token(cfg, payload, client_id, fallback_refresh=refresh_token_value)

@@ -437,7 +437,7 @@ Environment Variables Required (numbered configuration sets 1-100):
   EGRESS_OAUTH_SCOPE_N             # OAuth scopes (optional, uses provider defaults)
   EGRESS_PROVIDER_NAME_N           # Provider name (atlassian, google, github, etc.)
   EGRESS_MCP_SERVER_NAME_N         # MCP server name for token file naming
-  
+
   Where N is a number from 1 to 100 (e.g., EGRESS_OAUTH_CLIENT_ID_1)
 """,
     )

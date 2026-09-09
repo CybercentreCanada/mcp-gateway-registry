@@ -44,7 +44,7 @@ the gateway to call a third party **as** the user.
 | **Vend** | The internal call that hands a valid third-party access token to the proxy hop at request time. |
 | **AS facade** | The gateway's own session-verified "connect" front door (`/oauth2/egress/connect`) that brokers consent — the MCP client itself performs no OAuth. |
 | **Marker secret** | A shared secret nginx force-injects on the `/validate` subrequest so a direct `:8888` caller cannot mint an egress-capable token. |
-| **Elicitation** | The MCP `elicitation/create` mechanism the gateway uses to ask the client to open the consent URL in a browser. |
+| **Elicitation** | The MCP URL-mode elicitation mechanism (`2025-11-25` `URLElicitationRequiredError`, JSON-RPC error `-32042`) the gateway uses to ask the client to open the consent URL in a browser. |
 
 ---
 
@@ -92,7 +92,7 @@ graph TB
     SVC --> OB
     SVC --> SM
     SVC -.->|"on miss: consent_required<br/>+ connect_url"| PROXY
-    PROXY -->|"3. 401 + elicitation/create (url)"| IDE
+    PROXY -->|"3. JSON-RPC -32042 URLElicitationRequiredError (url)"| IDE
     IDE -->|"4. open connect_url in browser"| FACADE
     FACADE -->|"5. 302 authorize"| PROV
     PROV -->|"6. callback?code=..&state=.."| CB
@@ -134,8 +134,8 @@ sequenceDiagram
     autonumber
     participant C as MCP Client / IDE
     participant N as nginx
-    participant A as auth-server
-    participant P as mcp_proxy (registry)
+    participant A as auth-server /validate
+    participant P as mcp_proxy (auth-server)
     participant V as vend endpoint (registry)
     participant S as EgressAuthService
     participant K as Secret Store
@@ -147,14 +147,15 @@ sequenceDiagram
     C->>N: MCP request to /[server]
     N->>A: auth_request /validate (+ X-Validate-Source-Secret marker)
     A-->>N: mints mcp-proxy token (upstream_url, canonical auth_method)
-    N->>P: forward with X-Internal-Token
-    P->>V: POST /api/internal/egress-token (server_path)
+    N->>P: forward to /mcp-proxy/[server] with X-Internal-Token
+    P->>V: POST /_egress_internal/egress-token (server_path)
     V->>S: get_valid_token(auth_method, user, provider, server)
     S->>K: read vault entry
     K-->>S: miss
     S-->>V: consent_required + authorize_url + connect_url + request_state
     V-->>P: EgressTokenResponse(consent_required=true)
-    P-->>C: 401 + elicitation/create(mode=url, url=connect_url)
+    Note over P,C: -32042 elicitation fires only on token-requiring methods<br/>(tools/call, prompts/get, resources/read). Other methods get a plain JSON-RPC error.
+    P-->>C: JSON-RPC -32042 URLElicitationRequiredError (mode=url, url=connect_url)
 
     Note over C,TP: User consents (browser)
     C->>B: open connect_url
@@ -208,8 +209,9 @@ Key points:
 The vend response actually carries **two** URLs: `authorize_url` (the
 provider-direct OAuth URL) and `connect_url` (the gateway's own
 `/oauth2/egress/connect` front door). The mcp_proxy hop deliberately puts
-**`connect_url`** — not `authorize_url` — in the `elicitation/create` `url`
-field. A natural question is: since the callback returns to the gateway anyway,
+**`connect_url`** (not `authorize_url`) in the `-32042`
+URLElicitationRequiredError `url` field. A natural question is: since the
+callback returns to the gateway anyway,
 why not just hand the client the provider's authorize URL directly? Three
 reasons make the gateway hop mandatory rather than incidental:
 
@@ -328,7 +330,7 @@ prefix; the AS facade is mounted at root and registered only when
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
-| `POST` | `/api/servers/{server_path}/egress-auth` | proxied auth + admin | Configure egress OAuth on a server (provider, client_id, write-only encrypted client_secret, scopes, custom URLs). |
+| `POST` | `/api/servers/{server_path}/egress-auth` | proxied auth + admin | Configure egress OAuth on a server (provider, client_id, write-only encrypted client_secret, scopes, custom URLs, optional RFC 8707 `custom_resource`). |
 | `GET` | `/api/servers/{server_path}/egress-auth` | proxied auth + admin | Read the non-secret egress config (secret stripped). |
 
 ### End-user
@@ -362,8 +364,10 @@ and `AUTH_SERVER_NGINX_MARKER_SECRET`.
 | `EGRESS_TOKEN_REFRESH_SKEW_SECONDS` | `300` | Refresh a vaulted token this many seconds before expiry. |
 | `EGRESS_REFRESH_WORKER_INTERVAL_SECONDS` | `120` | Background proactive-refresh scan interval; `0` disables the sweep. |
 | `EGRESS_STATE_TTL_SECONDS` | `600` | Lifetime of the AEAD-encrypted OAuth consent state. |
-| `EGRESS_REGISTRY_INTERNAL_URL` | `http://registry:8080` | URL the auth-server uses to reach the registry's internal vend endpoint. |
+| `EGRESS_REGISTRY_INTERNAL_URL` | `http://registry:8091` | URL the auth-server uses to reach the registry's dedicated internal vend listener (never exposed to the host / public Ingress). |
 | `AUTH_SERVER_NGINX_MARKER_SECRET` | _(required)_ | Shared secret nginx force-sets on `/validate`; the auth-server only mints an mcp-proxy token when it matches. **Required at startup** (auth-server and registry refuse to start without it) and must be identical across both. Set a strong random value. **(secret)** |
+| `EGRESS_CREDENTIAL_ENCRYPTION_KEY` | `""` | Application-layer root key. When set (>= 32 chars), `StoredToken` payloads are AES-256-GCM encrypted under a per-principal HKDF-derived key before reaching either backend, so the vault holds ciphertext. Empty = plaintext at rest (legacy). Backend-independent; legacy plaintext entries are re-encrypted on first read. Must live **outside** the secret-store trust boundary it protects. **(secret)** |
+| `EGRESS_CREDENTIAL_ENCRYPTION_REQUIRE_ENCRYPTED` | `false` | Terminal strict mode. When `true` (and the key is set), reads **reject** any remaining legacy plaintext entry instead of accepting it, closing the plaintext-downgrade/injection hole against a write-capable backend. Enable only after read-repair has migrated all entries. |
 | `AWS_SECRETS_REGION` | `""` | AWS region (required when `SECRET_STORE_BACKEND=secrets-manager`). |
 | `SECRETS_MANAGER_KMS_KEY_ID` | `""` | Optional CMK for envelope encryption; empty uses the AWS-managed key. **(secret)** |
 | `SECRETS_MANAGER_PATH_PREFIX` | `mcp/egress` | Secret-name prefix; also scopes the ECS task IAM grant. |
@@ -489,8 +493,10 @@ curl -X POST "https://mcpgateway.example.com/api/servers/github-mcp/mcp/egress-a
       }'
 ```
 
-- `egress_auth_mode`: `none` (default, feature off for this server) or
-  `oauth_user` (per-user OBO).
+- `egress_auth_mode`: `none` (default, feature off for this server),
+  `oauth_user` (per-user 3LO OAuth), `obo_exchange` (on-behalf-of token
+  exchange, nothing vaulted), or `pat` (per-user static PAT / API key vaulted
+  with a bounded TTL). See [egress modes](design/egress-auth-design.md#the-egress-modes).
 - `client_secret` is **write-only** — it is Fernet-encrypted with the gateway
   `SECRET_KEY` at rest and never returned by the `GET` endpoint. Rotating
   `SECRET_KEY` invalidates stored secrets.
@@ -511,22 +517,143 @@ For a custom OIDC provider:
 }
 ```
 
+> For a fully worked, verified custom-OIDC example against an Amazon Bedrock
+> AgentCore Gateway (Cognito + Claude Code), including the separate 3LO app
+> client and the common scope-formatting pitfall, see the
+> [FAQ: How do I use a 3LO (per-user OAuth) AgentCore Gateway with the registry?](faq/agentcore-3lo-per-user-oauth.md).
+
+- `custom_scope_separator` (default `" "`) and `custom_token_auth_style`
+  (`post_body` default, `basic_header`, or `none`) tune the wire format for
+  providers that deviate from the common case.
+- `custom_token_auth_style: "none"` is [RFC 7591](https://www.rfc-editor.org/rfc/rfc7591)
+  `token_endpoint_auth_method=none`: a **public client** with no client secret at
+  all, as minted by an MCP resource server's Dynamic Client Registration endpoint
+  (for example **Datadog's MCP server**, whose authorization server advertises
+  `token_endpoint_auth_methods_supported: ["none"]` and `pkce_required: true`, so
+  it issues public clients only). The gateway sends `client_id` plus the PKCE
+  `S256` verifier on the code exchange and refresh grants and never sends a
+  `client_secret`; `client_id` becomes required and no secret is stored (a
+  previously stored secret is dropped on the switch). PKCE remains mandatory.
+  Example (Datadog MCP, US1, via `custom`) — for the end-to-end walkthrough,
+  including the redirect-URL allow-list step that must be done inside Datadog,
+  see the
+  [FAQ: How do I configure the Datadog MCP server with per-user egress OAuth?](faq/configuring-datadog-mcp-server.md):
+
+```jsonc
+{
+  "egress_auth_mode": "oauth_user",
+  "egress_provider": "custom",
+  "client_id": "<client_id returned by Datadog DCR>",
+  "scopes": ["mcp_all"],
+  "custom_authorize_url": "https://app.datadoghq.com/oauth2/v1/authorize",
+  "custom_token_url": "https://app.datadoghq.com/api/v2/oauth2/token",
+  "custom_token_auth_style": "none",
+  "custom_resource": "https://mcp.datadoghq.com"
+}
+```
+- `custom_resource` (optional) is an [RFC 8707](https://www.rfc-editor.org/rfc/rfc8707)
+  **resource indicator** — an absolute `https` URI (no fragment). When set, the
+  gateway sends it as the `resource` parameter on the authorize request **and**
+  both token grants (code exchange + refresh), binding the minted token to that
+  one protected resource. This is required by resource servers that issue
+  per-resource tokens: for example **Atlassian's Rovo MCP**
+  (`https://mcp.atlassian.com/v1/mcp/authv2`) rejects the authorize flow with
+  *"Invalid context provided"* if the indicator is absent, and rejects a token
+  whose audience is the generic `api.atlassian.com` REST API rather than the MCP
+  resource. Built-in providers never emit `resource`, so their flows are
+  unchanged. Example (Atlassian Rovo MCP via `custom`):
+
+```jsonc
+{
+  "egress_auth_mode": "oauth_user",
+  "egress_provider": "custom",
+  "client_id": "<atlassian-app-client-id>",
+  "client_secret": "<atlassian-app-secret>",
+  "scopes": ["read:jira-work", "read:jira-user", "write:jira-work", "offline_access"],
+  "custom_authorize_url": "https://auth.atlassian.com/authorize",
+  "custom_token_url": "https://auth.atlassian.com/oauth/token",
+  "custom_resource": "https://mcp.atlassian.com/v1/mcp/authv2"
+}
+```
+
+<a id="choosing-token-auth-style"></a>
+### Choosing `custom_token_auth_style`
+
+Do not guess this value: the provider publishes it. Work through the steps in
+order and stop at the first one that answers.
+
+**1. Is `egress_provider` a built-in?** (`github`, `google`, `atlassian`,
+`microsoft`, `slack`) Then there is nothing to set. `resolve_provider()` returns
+the built-in provider row verbatim and never reads `custom_token_auth_style`, so
+the field is ignored on those servers. Every built-in is confidential.
+
+**2. For `custom`, read the provider's authorization-server metadata**
+([RFC 8414](https://www.rfc-editor.org/rfc/rfc8414)). Start from the MCP server's
+protected-resource metadata and follow it to the authorization server:
+
+```bash
+# 1) the MCP server names its authorization server(s)
+curl -s https://<mcp-host>/.well-known/oauth-protected-resource
+
+# 2) the authorization server declares how clients authenticate
+curl -s https://<as-host>/.well-known/oauth-authorization-server
+# (some providers publish it at .../.well-known/openid-configuration instead)
+```
+
+Map `token_endpoint_auth_methods_supported` straight onto the setting:
+
+| Published value | Set `custom_token_auth_style` to |
+|---|---|
+| `["none"]` | `none` — public client; the PKCE verifier replaces the secret |
+| contains `client_secret_post` | `post_body` (the default) |
+| `client_secret_basic` only | `basic_header` |
+
+**3. Nothing published?** Then the app client's own configuration decides. The
+common case is **Amazon Cognito**, which does not serve discovery on its
+`*.auth.<region>.amazoncognito.com` domain: an app client **with** a secret must
+send it as HTTP Basic (`basic_header`), while a **public** app client with no
+secret sends only `client_id` (`none`). Cognito does not accept
+`client_secret_post` for confidential clients.
+
+**4. Already working?** An `active` entry for the server in
+`GET /api/egress-auth/connections` is proof that the current style is correct.
+Leave it alone.
+
+Guessing wrong is safe and loud: the provider rejects the token request with
+`invalid_client`, the gateway surfaces an `OAuthEngineError`, and no token is
+stored. When probing by hand, `invalid_grant` means client authentication
+**succeeded** (only the code or refresh token was bad), whereas `invalid_client`
+means the style is wrong.
+
+Verified examples of each value:
+
+| Upstream | Style | Evidence |
+|---|---|---|
+| Datadog MCP (`mcp.datadoghq.com`) | `none` | AS metadata publishes `token_endpoint_auth_methods_supported: ["none"]` with `pkce_required: true` |
+| Slack MCP (`mcp.slack.com`) | `post_body` | AS metadata publishes `["client_secret_post"]` |
+| Cognito app client that has a secret | `basic_header` | no discovery document; Cognito requires HTTP Basic for confidential clients |
+
+A public client also changes what the **admin form** asks for: once the style is
+`none` the Client Secret field disappears, `client_id` becomes required, and any
+previously stored secret is dropped on save.
+
 ---
 
 <a id="setup-ide"></a>
 ## Setup: the IDE / MCP client experience
 
 No special client configuration is required beyond connecting the MCP server
-through the gateway as usual. The client must support MCP **elicitation**
-(`elicitation/create` with `mode: "url"`), which is how the gateway asks the user
-to open the consent page.
+through the gateway as usual. The client must support MCP **URL-mode elicitation**
+(the `2025-11-25` `URLElicitationRequiredError`, JSON-RPC error code `-32042`),
+which is how the gateway asks the user to open the consent page.
 
 End-user flow:
 
 1. The user invokes a tool on an egress-configured server through their IDE
    (Cursor, Claude Code, VS Code, etc.).
-2. On the first call the gateway returns a `401` carrying an `elicitation/create`
-   with the gateway-issued **connect URL**. The client opens it in a browser.
+2. On the first token-requiring call (`tools/call`, `prompts/get`,
+   `resources/read`) the gateway returns a `-32042` `URLElicitationRequiredError`
+   carrying the gateway-issued **connect URL**. The client opens it in a browser.
 3. If the user has no live gateway session, the connect page bounces them to the
    gateway login (e.g. Keycloak) first, then continues.
 4. The user approves at the provider's consent screen. The browser shows
@@ -548,10 +675,33 @@ Users can review and revoke their connections in the UI at **Connected Accounts*
   **required at startup** (both auth-server and registry refuse to start without
   it); an empty marker — which would mint unconditionally — is rejected rather than
   silently disabling the check.
+- **Dedicated internal vend listener (network boundary).** The vend endpoint
+  `/_egress_internal/egress-token` is served on a separate nginx listener
+  (`registry:8091`) that is NEVER published to the host (Compose) nor routed by
+  the public Ingress (K8s: a ClusterIP-only Service port gated by a
+  NetworkPolicy that admits only the auth-server pod). It is removed from the
+  internet-facing `8080`/`8443` listeners entirely, so the app-level token gate
+  is no longer the sole defense against a reachable caller.
+  - **Deployment requirement:** because the public listeners now return `404`
+    for the whole `/api/internal/` prefix, the auth-server **must** point
+    `EGRESS_REGISTRY_INTERNAL_URL` at the internal listener (`http://registry:8091`,
+    the chart default). If it is still set to the public listener
+    (`registry:8000` / `:8080`), the vend returns `404` and egress auth fails.
+    On Helm, set `registry.egressAuth.enabled=true` so the `:8091` Service port
+    and NetworkPolicy are rendered.
 - **Upstream cross-check.** The vend endpoint re-verifies the internal token and
   confirms the token's `upstream_url` falls within the registered server's
   `proxy_pass_url` (and version allowlist) before vending — a forged upstream is
   rejected.
+- **Destination binding (write-time).** Each stored credential records the
+  server's registered upstream base URLs — and, for a custom provider, the OAuth
+  token endpoint — as they stood at consent / PAT-submit time. The vend requires
+  the request's destination to be a member of that stored set. The live
+  cross-check above reads the *current* server record, so an operator who
+  repoints `proxy_pass_url` (or `custom_token_url`) moves both sides of that
+  check together; the write-time binding does **not** move, so the vend
+  fail-closes to re-consent instead of shipping the credential to the new host.
+  See `registry/egress_auth/upstream_binding.py`.
 - **Anti-phishing consent.** The connect URL points at the gateway, not the
   provider. The AS facade requires a live gateway session and stores the token
   under the **session** principal, not any client-asserted identity.
@@ -566,6 +716,36 @@ Users can review and revoke their connections in the UI at **Connected Accounts*
 - **Secret-at-rest.** OAuth app client secrets are Fernet-encrypted with
   `SECRET_KEY`. Per-user tokens live only in the vault backend (OpenBao /
   Secrets Manager), never in the app database.
+- **Application-layer credential encryption (optional, defense in depth).** When
+  `EGRESS_CREDENTIAL_ENCRYPTION_KEY` is set, the whole `StoredToken` (access
+  token, refresh token, client_id, scopes, expiry/status metadata) is AES-256-GCM
+  encrypted in a common codec (`registry/secrets/credential_codec.py`) before it
+  reaches either backend, so Secrets Manager / OpenBao contain a versioned
+  ciphertext envelope, not usable credentials. A per-`(auth_method, user_id)`
+  key is derived from the root key with HKDF-SHA256 (the root key is never used
+  directly), and the AEAD associated data binds the full
+  `(auth_method, user_id, provider, server_path)` address — a ciphertext copied
+  to another user or server fails authentication; the envelope's
+  `version`/`algorithm`/`key_id` are bound into the AAD too, so metadata cannot
+  be tampered to steer decryption. Reads recognize both the new envelope and
+  legacy plaintext; a legacy entry is transparently re-encrypted on first read
+  (**read-repair**, a non-blocking compare-and-set — Secrets Manager under the
+  principal mutation lease, OpenBao via KV v2 `cas` — so a migration never
+  clobbers a concurrent token refresh), so an in-place upgrade migrates without
+  re-consent. A missing/wrong key **fails closed** — credentials are never
+  returned or re-persisted as plaintext, and no plaintext/key material is logged.
+  Set `EGRESS_CREDENTIAL_ENCRYPTION_REQUIRE_ENCRYPTED=true` after migration to
+  make reads **reject** any lingering plaintext (blocks a write-capable backend
+  from downgrading an envelope to plaintext or injecting a plaintext token).
+  **Key custody:** the root key must live outside the secret-store trust boundary
+  it protects; storing it in the same AWS account's Secrets Manager as the egress
+  credentials defeats the isolation. This protects confidentiality against
+  vault/storage compromise; it is not integrity against a compromised application
+  runtime that can read plaintext. **Rotation is a destructive cutover today**
+  (a single active key): changing the key makes existing ciphertext
+  undecryptable (fail-closed) and forces affected users to reconnect — the
+  envelope carries a `key_id` so a future multi-key keyring can decrypt-old /
+  encrypt-new without re-consent, but that keyring is not yet implemented.
 
 ---
 
@@ -575,13 +755,16 @@ Users can review and revoke their connections in the UI at **Connected Accounts*
 |---------|--------------------|
 | Startup fails: "requires a Mongo-family STORAGE_BACKEND" | `EGRESS_AUTH_ENABLED=true` with `STORAGE_BACKEND=file`. Switch to a Mongo-family backend. |
 | Startup fails: "requires EGRESS_OAUTH_CALLBACK_BASE_URL" | Set the public callback base URL. |
-| Client never gets a consent prompt | The MCP client must support `elicitation/create` (url mode). Check the server's `egress_auth_mode` is `oauth_user`. |
+| Client never gets a consent prompt | The MCP client must support URL-mode elicitation (`-32042` `URLElicitationRequiredError`), and the elicitation only fires on token-requiring methods (`tools/call`, `prompts/get`, `resources/read`). Check the server's `egress_auth_mode` is `oauth_user`. |
 | Consent loops (re-asked every call) | Usually an `auth_method` mismatch between consent-write and vend-read — confirm the IdP method canonicalizes to `oauth2`. Or the stored refresh token is dead (provider revoked it) → re-consent. |
 | Connected once, but tools still show empty / vend logs "has no token" | The consent-write and vend paths keyed the vault on different `user_id`s. Since keying moved to the OIDC `sub` (see [Vault key scheme](#vault-key-scheme)), an existing connection created under the old display-name key is invisible to the new `sub`-keyed lookup. Fix: **disconnect and reconnect once** (from Connected Accounts), which re-writes the entry under the `sub`. On Entra this reconnect must follow a fresh gateway login so the session carries the persisted `subject`. |
+| Connected, but a `tools/call` asks to reconnect after a backend URL change | Destination binding: changing a server's `proxy_pass_url` (or a custom provider's `custom_token_url`) invalidates credentials bound to the old destination. **Reconnect once** (from Connected Accounts) to rebind. Adding a *new version* whose base URL differs only requires a reconnect for calls routed to that new version; existing routes are unaffected. |
+| After upgrading to the destination-binding release, every connection asks to reconnect once | Credentials stored before the upgrade carry an empty binding, which never matches — a deliberate one-time forced reconnect (`oauth_user` → connect nudge, `pat` → "submit a PAT"), mirroring the `sub`-keying migration above. |
 | "Connection failed" on the consent callback; registry logs `state user mismatch` | The account-swap guard saw the consent-initiate principal differ from the callback's live-session principal. Almost always the session predates the `sub`-persisting login — **log out and back in**, then reconnect, so the cookie session carries the `subject` the initiate leg bound the state to. |
 | Vend returns 401 from auth-server | Marker secret mismatch. Ensure `AUTH_SERVER_NGINX_MARKER_SECRET` matches on registry + auth-server, and nginx sets it on `/validate`. |
 | OpenBao reads fail with permission denied | The role token lapsed. The store re-authenticates and retries once; persistent failure means a real policy/role gap — verify the `mcp-egress` policy and the role binding to the registry ServiceAccount. |
 | `decrypt` errors on client secret | `SECRET_KEY` was rotated after the server's egress config was saved. Re-save the egress config with the client secret. |
+| Vend/list fails: "Egress credential failed authentication" or "is encrypted but ... not set" | `EGRESS_CREDENTIAL_ENCRYPTION_KEY` is missing, was changed, or does not match the key entries were encrypted under. The store fails closed rather than returning/overwriting plaintext. Restore the original key (rotation needs the old key available to decrypt existing entries). |
 
 ### Related documentation
 

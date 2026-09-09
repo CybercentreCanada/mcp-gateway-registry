@@ -13,6 +13,29 @@ Audit logging captures two types of events:
 
 Sensitive data such as authentication tokens, session cookies, and passwords are never logged. Credentials are masked to show only the last 6 characters as a hint for debugging.
 
+## Durability and Attribution
+
+### Durable-by-default (fail closed)
+
+An audit trail is only dependable if it lands in a durable store (MongoDB/DocumentDB). Best-effort JSON log lines are not a durable audit trail: they can be lost on container restart, are not queryable for forensics, and are rotated away.
+
+When audit logging is enabled (`AUDIT_LOG_ENABLED=true`) but no durable sink is available (MongoDB disabled or unreachable), the registry **refuses to start** rather than silently degrading to non-durable log lines. This is controlled by `AUDIT_LOG_REQUIRE_DURABLE` (default `true`).
+
+- `AUDIT_LOG_REQUIRE_DURABLE=true` (default): fail closed at startup if no durable sink is available.
+- `AUDIT_LOG_REQUIRE_DURABLE=false`: allow startup with a non-durable (best-effort log-line) trail, emitting a loud startup warning. Use only in local/dev.
+
+### Per-instance attribution
+
+Each audit record carries an `instance_id` identifying the registry replica that produced it, and internal service tokens embed the same per-instance identifier in their subject (`<service>@<instance_id>`) so an internal action is attributable to a specific caller/replica rather than a shared service identity. The identifier is resolved from `AUDIT_INSTANCE_ID`, then `HOSTNAME` (set per-container by Docker and per-pod by Kubernetes), then the host name.
+
+### Runtime write failures
+
+Startup fails closed on a missing durable sink (see above), but a transient durable-write failure at request time (e.g. a momentary MongoDB unavailability) does not fail the API request — failing every call on an audit blip would be a self-inflicted denial of service. Instead, a dropped record is surfaced as a distinct `CRITICAL` `AUDIT RECORD DROPPED` log event (carrying identifying context, never the full record) so the loss is loud and alertable. A retry/dead-letter buffer that guarantees no record is lost on a transient failure is planned follow-up hardening.
+
+### Tamper-evidence (roadmap)
+
+Audit records are currently protected by the durable store's access controls but do not carry a per-record integrity seal (e.g. an HMAC hash chain) or an application-enforced append-only guarantee. A stronger tamper-evident guarantee is best provided by shipping the trail to an append-only external store (for example, AWS CloudWatch Logs with log-group immutability / log integrity validation) rather than by in-process hashing alone. This is planned infrastructure hardening and is tracked separately.
+
 ## Security and Privacy
 
 ### Data That Is NOT Logged

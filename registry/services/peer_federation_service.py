@@ -18,7 +18,12 @@ from threading import Lock as ThreadingLock
 from typing import Any, Literal, Optional
 
 from ..constants import DeploymentType
-from ..core.metrics import PEER_SYNC_DURATION_SECONDS, PEER_SYNC_FAILURES
+from ..core.metrics import (
+    ASSET_ID_FEDERATION_CONFLICT_TOTAL,
+    PEER_SYNC_DURATION_SECONDS,
+    PEER_SYNC_FAILURES,
+)
+from ..exceptions import AssetIdConflictError
 from ..repositories.factory import (
     get_peer_federation_repository,
     get_search_repository,
@@ -32,11 +37,19 @@ from ..schemas.peer_federation_schema import (
     SyncHistoryEntry,
     SyncResult,
 )
+from ..schemas.proxy_mixin import strip_proxy_fields
 from .agent_service import agent_service
 from .federation.peer_registry_client import PeerRegistryClient
 from .server_service import server_service
 
 logger = logging.getLogger(__name__)
+
+
+def _as_dict(record: Any) -> dict[str, Any]:
+    """Return a plain dict for a repository record (Pydantic model or dict)."""
+    if hasattr(record, "model_dump"):
+        return record.model_dump()
+    return record
 
 
 def _resolves_only_to_public_ips(
@@ -79,7 +92,8 @@ def _resolves_only_to_public_ips(
         if not addr_info:
             return False
         for _family, _socktype, _proto, _canon, sockaddr in addr_info:
-            if _is_blocked_ip(sockaddr[0], federation_allowlist):
+            ip_str = str(sockaddr[0])
+            if _is_blocked_ip(ip_str, federation_allowlist):
                 return False
         return True
     except Exception as e:
@@ -314,7 +328,7 @@ class PeerFederationService:
                 try:
                     existing_peer = await repo.get_peer(peer_id)
                     had_token_before = existing_peer and existing_peer.federation_token is not None
-                except Exception:
+                except Exception:  # nosec B110 - best-effort check of prior token state
                     pass  # Continue with update even if we can't check existing state
 
             # Update via repository (handles validation)
@@ -1106,7 +1120,7 @@ class PeerFederationService:
         # Find all local agents with sync_metadata.source_peer_id == peer_id
         all_agents = await agent_service.get_all_agents()
         for agent in all_agents:
-            agent_dict = agent.model_dump() if hasattr(agent, "model_dump") else agent
+            agent_dict = _as_dict(agent)
             sync_metadata = agent_dict.get("sync_metadata") or {}
             path = agent_dict.get("path", "")
 
@@ -1451,8 +1465,13 @@ class PeerFederationService:
                     "original_path": original_path,
                 }
 
-                # Create a copy to avoid modifying original
-                server_data = server.copy()
+                # Create a copy to avoid modifying original, and STRIP any
+                # proxy fields the peer sent: a federated entity is never a local
+                # gateway route (owner decision), and this prevents a peer from
+                # planting an SSRF proxy_target_url. Stripping (not force-false)
+                # leaves a local admin's opt-in on the existing record untouched
+                # on re-sync. See strip_proxy_fields.
+                server_data = strip_proxy_fields(server.copy())
                 server_data["path"] = prefixed_path
                 server_data["sync_metadata"] = sync_metadata
 
@@ -1489,6 +1508,15 @@ class PeerFederationService:
                             stored_count += 1
                             # Explicitly index for search (embeddings)
                             await self._index_server_for_search(prefixed_path, server_data)
+                        elif result.get("error_type") == "id_conflict":
+                            # Federation id collision (#1276): a peer asset's id
+                            # already exists locally. Log + skip this one asset;
+                            # the rest of the batch continues.
+                            logger.warning(
+                                f"Federation: skipping server from peer '{peer_id}' "
+                                f"- id '{server_data.get('id')}' already exists locally"
+                            )
+                            ASSET_ID_FEDERATION_CONFLICT_TOTAL.labels(asset_type="server").inc()
                         else:
                             logger.error(f"Failed to register server: {prefixed_path}")
 
@@ -1547,8 +1575,11 @@ class PeerFederationService:
                     "original_path": original_path,
                 }
 
-                # Create a copy to avoid modifying original
-                agent_data = agent.copy()
+                # Create a copy to avoid modifying original, and STRIP any proxy
+                # fields the peer sent (see _store_synced_servers for rationale:
+                # federated entities are never local gateway routes; strip, not
+                # force-false, to preserve a local admin's opt-in on re-sync).
+                agent_data = strip_proxy_fields(agent.copy())
                 agent_data["path"] = prefixed_path
                 agent_data["sync_metadata"] = sync_metadata
 
@@ -1590,6 +1621,14 @@ class PeerFederationService:
                         else:
                             logger.error(f"Failed to register agent: {prefixed_path}")
 
+                except AssetIdConflictError:
+                    # Federation id collision (#1276): a peer agent's id already
+                    # exists locally. Log + skip this one asset; the batch continues.
+                    logger.warning(
+                        f"Federation: skipping agent from peer '{peer_id}' "
+                        f"- id '{agent_data.get('id')}' already exists locally"
+                    )
+                    ASSET_ID_FEDERATION_CONFLICT_TOTAL.labels(asset_type="agent").inc()
                 except ValueError as e:
                     # Validation errors
                     logger.error(f"Validation error storing agent '{prefixed_path}': {e}")

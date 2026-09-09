@@ -82,8 +82,10 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
             except TimeoutError:
-                # Send ping to keep connection alive
-                await websocket.ping()
+                # No client message within the window. Starlette manages
+                # protocol-level keepalive, so just loop again and keep
+                # waiting (Starlette's WebSocket exposes no ping() method).
+                continue
 
     except WebSocketDisconnect:
         logger.debug(f"WebSocket client disconnected: {websocket.client}")

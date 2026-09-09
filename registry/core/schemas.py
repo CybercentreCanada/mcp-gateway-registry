@@ -1,12 +1,22 @@
 import re
 from datetime import datetime
-from typing import Any, Literal
-from uuid import UUID, uuid4
+from typing import Any, Literal, cast
+from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from registry.constants import DeploymentType, LocalRuntimeType, TransportType
 from registry.schemas.agent_models import AgentProvider
+
+# CustomHeaderEncrypted is imported (and thereby re-exported) from proxy_mixin:
+# it moved there so ProxyableMixin can carry custom_headers_encrypted without a
+# schemas<->proxy_mixin import cycle. Existing
+# `from registry.core.schemas import CustomHeaderEncrypted` callers keep working.
+from registry.schemas.proxy_mixin import (
+    ProxyableMixin,
+    assert_proxy_target_resolvable,
+    egress_guard_validator,
+)
 from registry.schemas.registry_card import LifecycleStatus
 
 _IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -334,13 +344,6 @@ class CustomHeader(BaseModel):
         return v
 
 
-class CustomHeaderEncrypted(BaseModel):
-    """Stored form: header name + Fernet-encrypted value."""
-
-    name: str
-    value_encrypted: str
-
-
 class EgressOAuthConfig(BaseModel):
     """Per-server egress OAuth config for the egress credential paths.
 
@@ -383,6 +386,7 @@ class EgressOAuthConfig(BaseModel):
     custom_token_url: str | None = None
     custom_scope_separator: str | None = None
     custom_token_auth_style: str | None = None
+    custom_resource: str | None = None
     updated_at: str | None = None
 
 
@@ -526,12 +530,22 @@ class LocalRuntime(BaseModel):
         return self
 
 
-class ServerInfo(BaseModel):
-    """Server information model."""
+class ServerInfo(ProxyableMixin):
+    """Server information model.
 
-    id: UUID = Field(
-        default_factory=uuid4,
-        description="Unique identifier (UUID) for this server",
+    Inherits ``is_proxied`` / ``proxy_target_url`` from ``ProxyableMixin``. For an
+    MCP server the effective proxy target falls back to ``proxy_pass_url`` when
+    ``proxy_target_url`` is unset; a ``local`` (stdio) deployment is never proxied.
+    """
+
+    id: str = Field(
+        default_factory=lambda: str(uuid4()),
+        min_length=1,
+        max_length=512,
+        description=(
+            "Unique identifier for this server. Any non-empty string "
+            "(UUID, ARN, URN, ...). Auto-generated UUID if not supplied."
+        ),
     )
     server_name: str
     description: str = ""
@@ -656,19 +670,9 @@ class ServerInfo(BaseModel):
         default=None, description="ISO timestamp of last credential update."
     )
 
-    # Custom HTTP headers (encrypted values, names public)
-    custom_header_names: list[str] = Field(
-        default_factory=list,
-        description="Names of custom HTTP headers defined for this server.",
-    )
-    custom_headers_encrypted: list[CustomHeaderEncrypted] | None = Field(
-        default=None,
-        description="List of {name, value_encrypted} pairs. Never serialized to API consumers.",
-    )
-    custom_headers_updated_at: str | None = Field(
-        default=None,
-        description="ISO timestamp of last custom-headers update.",
-    )
+    # Custom HTTP headers (encrypted values, names public) are inherited from
+    # ProxyableMixin (custom_header_names / custom_headers_encrypted /
+    # custom_headers_updated_at) so every proxyable entity shares one definition.
 
     # Per-user egress credential vault (third-party OBO). Default 'none' keeps
     # today's behavior; the registration write path is not yet implemented.
@@ -705,7 +709,7 @@ class ServerInfo(BaseModel):
         description="Tags from external/source system (separate from local tags)",
     )
     deployment: Literal["remote", "local"] = Field(
-        default=DeploymentType.REMOTE,
+        default=cast(Literal["remote", "local"], DeploymentType.REMOTE),
         description=(
             "Deployment model: 'remote' (HTTP-reachable, registry proxies) or "
             "'local' (stdio, runs on developer's machine via launch recipe)."
@@ -782,6 +786,27 @@ class ServerInfo(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _validate_proxy_target(self) -> "ServerInfo":
+        """If proxied, require a resolvable backend (proxy_target_url or proxy_pass_url).
+
+        Passes only the scalars the check reads (not a full model_dump) — this
+        validator runs on every construction, including every read that rebuilds
+        the model from a stored doc.
+        """
+        assert_proxy_target_resolvable(
+            "mcp_server",
+            {
+                "is_proxied": self.is_proxied,
+                "proxy_target_url": self.proxy_target_url,
+                "proxy_disabled_reason": self.proxy_disabled_reason,
+                "proxy_pass_url": self.proxy_pass_url,
+                "deployment": self.deployment,
+            },
+            read_safe=True,  # storage model: reconstructed on read, log-not-raise
+        )
+        return self
+
+    @model_validator(mode="after")
     def _validate_egress_auth(self) -> "ServerInfo":
         """Enforce per-mode egress config invariants.
 
@@ -796,10 +821,10 @@ class ServerInfo(BaseModel):
           rather than at the first live request.
         """
         mode = self.egress_auth_mode
-        if mode not in ("none", "oauth_user", "obo_exchange"):
+        if mode not in ("none", "oauth_user", "obo_exchange", "pat"):
             raise ValueError(
                 f"invalid egress_auth_mode {mode!r}; expected 'none', 'oauth_user', "
-                "or 'obo_exchange'"
+                "'obo_exchange', or 'pat'"
             )
         if mode == "none":
             return self
@@ -808,6 +833,12 @@ class ServerInfo(BaseModel):
         if mode == "oauth_user":
             if not self.egress_oauth.provider:
                 raise ValueError("egress_auth_mode='oauth_user' requires egress_oauth.provider")
+            return self
+        if mode == "pat":
+            # pat needs a provider only as a vault-namespace/display key; no OAuth
+            # endpoints, client_id, or secret are required.
+            if not self.egress_oauth.provider:
+                raise ValueError("egress_auth_mode='pat' requires egress_oauth.provider")
             return self
         # mode == "obo_exchange"
         target = (self.egress_oauth.target_audience or "").strip()
@@ -901,8 +932,13 @@ class SessionData(BaseModel):
     provider: str = "local"
 
 
-class ServiceRegistrationRequest(BaseModel):
-    """Service registration request model."""
+class ServiceRegistrationRequest(ProxyableMixin):
+    """Service registration request model.
+
+    Inherits the ``is_proxied`` / ``proxy_target_url`` opt-in from
+    ``ProxyableMixin`` so the registration API accepts them; the SSRF egress
+    guard runs on ``proxy_target_url`` via the mixin's field validator.
+    """
 
     name: str = Field(..., min_length=1)
     description: str = ""
@@ -950,6 +986,12 @@ class ServiceRegistrationRequest(BaseModel):
         default=LifecycleStatus.ACTIVE,
         description="Lifecycle status: active, deprecated, draft, or beta",
     )
+
+    @field_validator("proxy_target_url")
+    @classmethod
+    def _guard_proxy_target_url(cls, v: str | None) -> str | None:
+        """API-edge SSRF fast-fail (the mixin no longer raises; storage is read-safe)."""
+        return egress_guard_validator(v)
 
 
 class AuthCredentialUpdateRequest(BaseModel):

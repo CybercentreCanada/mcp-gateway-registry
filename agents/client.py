@@ -28,7 +28,7 @@ Example with environment variables (create a .env file):
     COGNITO_CLIENT_SECRET=your_client_secret
     COGNITO_USER_POOL_ID=your_user_pool_id
     AWS_REGION=us-east-1
-    
+
     python client.py --generate-token --scopes "read write"
 """
 

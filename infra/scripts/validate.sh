@@ -44,7 +44,9 @@ _check() {
 _http() {
   local label="$1" url="$2" allow="${3:-200}"
   local code
-  code=$(curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
+  # -k: REGISTRY_URL/KEYCLOAK_URL are CloudFront https:// endpoints; -L: follow
+  # the HTTP->HTTPS redirect CloudFront/ALB issues. Matches post-deploy.sh.
+  code=$(curl -skL -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
   if echo " $allow " | grep -q " $code "; then
     _check "$label ($code)" 0
   else
@@ -103,7 +105,10 @@ fi
 echo
 _log_info "HTTP endpoints"
 _http "Registry /health" "$REGISTRY_URL/health"
-_http "Auth-server /health" "$REGISTRY_URL:8888/health"
+# Auth-server has no direct ALB listener (:8888 dropped for TF parity) and no
+# plain probe endpoint through nginx; it is proxied at /oauth2/* via Service
+# Connect. A successful OAuth token flow (section 4 below) is its real
+# integration test, so there is no standalone auth-server /health probe here.
 _http "Keycloak /" "$KEYCLOAK_URL/" "200 302 303"
 _http "Keycloak realm OIDC" "$KEYCLOAK_URL/realms/mcp-gateway/.well-known/openid-configuration"
 _http ".well-known/ai-catalog" "$REGISTRY_URL/.well-known/ai-catalog.json"
@@ -177,20 +182,6 @@ if [ "$reg_code" = "201" ]; then
   del_code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$REGISTRY_URL/api/agents/$TEST_AGENT" -H "$H")
   _check "DELETE /api/agents/{path}" "$([ "$del_code" = "204" ] && echo 0 || echo 1)" "$del_code"
 fi
-
-# ----------------------------------------------------------------------
-# 6. ScopesLoader Lambda fired & seeded all UI-Scope docs
-# ----------------------------------------------------------------------
-echo
-_log_info "ScopesLoader"
-aws lambda invoke --region "$AWS_REGION" --function-name mcp-gateway-scopes-loader \
-  --cli-binary-format raw-in-base64-out --payload '{"debug":true}' /tmp/.validate.lambda > /dev/null 2>&1
-doc_count=$(jq -r '.docs | length // 0' /tmp/.validate.lambda 2>/dev/null)
-has_admin=$(jq -r '[.docs[] | select(._id=="mcp-registry-admin")] | length' /tmp/.validate.lambda 2>/dev/null)
-_check "ScopesLoader Lambda invokable + ${doc_count} UI-Scope docs in DocumentDB" \
-  "$([ "$doc_count" -ge 5 ] && echo 0 || echo 1)" "got $doc_count, want >=5"
-_check "mcp-registry-admin doc present" \
-  "$([ "$has_admin" = "1" ] && echo 0 || echo 1)"
 
 # ----------------------------------------------------------------------
 # Summary

@@ -24,7 +24,6 @@ from registry.auth.tool_filter import (
     tool_allowed_for_user,
 )
 
-
 # =============================================================================
 # FIXTURES
 # =============================================================================
@@ -327,9 +326,7 @@ def test_filter_drops_non_dict_entries(mock_audit, restricted_user_context):
 
 
 @patch("registry.auth.tool_filter._emit_tool_filter_audit")
-def test_filter_emits_audit_event_when_prunes(
-    mock_audit, restricted_user_context, sample_tools
-):
+def test_filter_emits_audit_event_when_prunes(mock_audit, restricted_user_context, sample_tools):
     """When tools are pruned, the audit emitter is invoked once with the prune details."""
     # Act
     filter_tools_for_user(
@@ -351,9 +348,7 @@ def test_filter_emits_audit_event_when_prunes(
 
 
 @patch("registry.auth.tool_filter._emit_tool_filter_audit")
-def test_filter_does_not_emit_audit_event_when_admin(
-    mock_audit, admin_user_context, sample_tools
-):
+def test_filter_does_not_emit_audit_event_when_admin(mock_audit, admin_user_context, sample_tools):
     """Admin bypass path never triggers the audit emitter."""
     # Act
     filter_tools_for_user("current_time", sample_tools, admin_user_context)
@@ -383,9 +378,7 @@ def test_filter_does_not_emit_audit_event_when_nothing_pruned(mock_audit):
     mock_audit.assert_not_called()
 
 
-def test_filter_audit_failure_does_not_break_request(
-    restricted_user_context, sample_tools
-):
+def test_filter_audit_failure_does_not_break_request(restricted_user_context, sample_tools):
     """A failing audit sink does not propagate out of filter_tools_for_user.
 
     Simulates the realistic failure path: the sink module raises while
@@ -433,9 +426,7 @@ def test_tool_allowed_for_user_true(mock_audit, restricted_user_context):
 def test_tool_allowed_for_user_false_restricted(mock_audit, restricted_user_context):
     """Disallowed tool returns False."""
     # Act
-    allowed = tool_allowed_for_user(
-        "current_time", "current_time_utc", restricted_user_context
-    )
+    allowed = tool_allowed_for_user("current_time", "current_time_utc", restricted_user_context)
 
     # Assert
     assert allowed is False
@@ -445,9 +436,7 @@ def test_tool_allowed_for_user_false_restricted(mock_audit, restricted_user_cont
 def test_tool_allowed_for_user_admin_bypass(mock_audit, admin_user_context):
     """Admin always sees every tool."""
     # Act
-    allowed = tool_allowed_for_user(
-        "current_time", "never_declared_tool", admin_user_context
-    )
+    allowed = tool_allowed_for_user("current_time", "never_declared_tool", admin_user_context)
 
     # Assert
     assert allowed is True

@@ -5,7 +5,7 @@
 repos:
   # Ruff - Fast Python linter and formatter
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.2
+    rev: v0.11.13
     hooks:
       # Run the linter with auto-fixes
       - id: ruff
@@ -36,12 +36,15 @@ repos:
       - id: check-yaml
         name: Check YAML
         description: Validate YAML file syntax
-        exclude: ^(docker/|\.github/)
+        # charts/ holds Helm templates (Go templating is not valid YAML).
+        exclude: ^(docker/|\.github/|charts/)
 
       # Check JSON syntax
       - id: check-json
         name: Check JSON
         description: Validate JSON file syntax
+        # Vendored LiteLLM cost map; upstream ships duplicate keys.
+        exclude: ^cli/src/utils/cost\.json$
 
       # Prevent large files from being committed
       - id: check-added-large-files
@@ -58,6 +61,8 @@ repos:
       - id: detect-private-key
         name: Detect private keys
         description: Check for private SSH keys
+        # Example/docs files contain PEM placeholders (BEGIN...\n...\nEND), not real keys.
+        exclude: ^(\.env\.example|docs/configuration\.md|terraform/aws-ecs/terraform\.tfvars\.example)$
 
       # Check for case conflicts in filenames
       - id: check-case-conflict
@@ -75,6 +80,15 @@ repos:
         description: Check for pdb and ipdb debugger statements
 
   # Detect-secrets - Prevent secrets from being committed
+  #
+  # NOTE: .secrets.baseline is a SLIM baseline (no line numbers, no
+  # generated_at timestamp). This is deliberate: a non-slim baseline pins each
+  # allowlisted secret to a line number, so any edit that adds or removes a
+  # line above a secret shifts those numbers and makes the hook rewrite the
+  # baseline, failing CI on PRs that never touched a secret. A slim baseline
+  # is immune to line shifts while still blocking genuinely new secrets.
+  # When regenerating, always keep it slim:
+  #   detect-secrets scan --slim --exclude-files '^(tests/|docs/|cli/examples/)' > .secrets.baseline
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
     hooks:
@@ -93,11 +107,13 @@ repos:
         description: Scan for security vulnerabilities
         args: ['-c', 'pyproject.toml']
         additional_dependencies: ['bandit[toml]']
-        exclude: ^tests/
+        # Skip test code: the tests/ tree plus test_*/*_test files that live
+        # outside it (asserts are expected in tests, B101 would fire on all).
+        exclude: '^tests/|(^|/)(test_[^/]+|[^/]+_test)\.py$'
 
   # MyPy - Static type checker
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.11.2
+    rev: v1.15.0
     hooks:
       - id: mypy
         name: MyPy type checking
@@ -107,19 +123,27 @@ repos:
           - types-PyYAML
           - pydantic
         args: [--ignore-missing-imports, --no-strict-optional]
+        # Scope type checking to the importable application packages. Script
+        # trees (api/, cli/, servers/, credentials-provider/, terraform/,
+        # infra/ lambdas, sample agents) reuse module basenames without
+        # __init__.py, which collide under a single mypy invocation.
+        files: ^(registry|auth_server|metrics-service)/
         exclude: ^(tests/|scripts/)
 
   # Local hooks for project-specific checks
   - repo: local
     hooks:
-      # Run fast unit tests
+      # Run fast unit tests. Only triggers when Python files are staged
+      # (types: [python]); pass_filenames: false so it still runs the whole
+      # suite rather than just the changed files. Dropping always_run lets the
+      # file-type filter apply, so a docs- or chart-only commit skips it.
       - id: pytest-fast
         name: Run fast tests
         entry: uv run --frozen pytest -m "not slow" --tb=short
         language: system
         pass_filenames: false
-        always_run: true
-        stages: [commit]
+        types: [python]
+        stages: [pre-commit]
 
       # Python syntax check
       - id: python-syntax
@@ -137,7 +161,7 @@ repos:
         exclude: ^(docker/|scripts/setup/)
 
 # Default stages
-default_stages: [commit]
+default_stages: [pre-commit]
 
 # Default language version
 default_language_version:

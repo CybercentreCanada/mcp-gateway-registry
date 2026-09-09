@@ -5,7 +5,6 @@ Handles validation, CRUD operations, tool resolution, and nginx config
 regeneration for virtual servers that aggregate tools from multiple backends.
 """
 
-import asyncio
 import logging
 import re
 from datetime import UTC, datetime

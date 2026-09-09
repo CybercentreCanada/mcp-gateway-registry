@@ -32,6 +32,7 @@ from ..observability.meters import (
 from ..repositories.factory import get_federation_config_repository, get_skill_repository
 from ..schemas.federation_schema import AiCatalogFederationConfig, AiCatalogSourceConfig
 from ..schemas.peer_federation_schema import SyncResult
+from ..schemas.proxy_mixin import strip_proxy_fields
 from ..schemas.skill_models import SkillCard
 from .ard_ingest_mapping import entry_to_record, entry_to_skill_data
 from .ard_trust import host_identity_domain, verify_entry_trust
@@ -94,7 +95,9 @@ class ArdIngestionService:
         """Ingest a single source. Never raises; failures return a failed SyncResult."""
         lock = self._lock_for(source.source_id)
         if lock.locked():
-            logger.info("ARD ingestion for source %s already in progress; skipping", source.source_id)
+            logger.info(
+                "ARD ingestion for source %s already in progress; skipping", source.source_id
+            )
             return SyncResult(
                 success=False,
                 peer_id=source.source_id,
@@ -151,10 +154,14 @@ class ArdIngestionService:
             ard_ingestion_entries_total.add(indexed, {"source_id": sid, "outcome": "indexed"})
             if rejected:
                 ard_ingestion_entries_total.add(rejected, {"source_id": sid, "outcome": "rejected"})
-                ard_trust_mismatch_total.add(rejected, {"source_id": sid, "policy": cfg.trust_enforcement})
+                ard_trust_mismatch_total.add(
+                    rejected, {"source_id": sid, "policy": cfg.trust_enforcement}
+                )
             orphaned_total = len(orphaned_servers) + len(orphaned_agents) + skills_orphaned
             if orphaned_total:
-                ard_ingestion_entries_total.add(orphaned_total, {"source_id": sid, "outcome": "orphaned"})
+                ard_ingestion_entries_total.add(
+                    orphaned_total, {"source_id": sid, "outcome": "orphaned"}
+                )
             self._state[source.source_id] = {
                 "generation": generation,
                 "last_synced_at": datetime.now(UTC).isoformat(),
@@ -171,8 +178,16 @@ class ArdIngestionService:
             logger.info(
                 "ARD ingestion source=%s gen=%d servers=%d agents=%d skills=%d rejected=%d "
                 "orphaned=%d/%d/%d elapsed_ms=%.1f",
-                source.source_id, generation, servers_stored, agents_stored, skills_stored, rejected,
-                len(orphaned_servers), len(orphaned_agents), skills_orphaned, duration * 1000,
+                source.source_id,
+                generation,
+                servers_stored,
+                agents_stored,
+                skills_stored,
+                rejected,
+                len(orphaned_servers),
+                len(orphaned_agents),
+                skills_orphaned,
+                duration * 1000,
             )
             return SyncResult(
                 success=True,
@@ -184,21 +199,23 @@ class ArdIngestionService:
                 duration_seconds=duration,
                 new_generation=generation,
             )
-        except Exception as e:  # noqa: BLE001 - never let one source kill the scheduler
-            logger.error("ARD ingestion failed for source %s: %s", source.source_id, e, exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - never let one source kill the scheduler
+            error_type = type(exc).__name__
+            logger.error(f"ARD ingestion failed source={source.source_id} type={error_type}")
             ard_ingestion_runs_total.add(1, {"source_id": source.source_id, "status": "error"})
             failures = int(prev.get("consecutive_failures", 0)) + 1
+            public_error = f"ingestion failed ({error_type})"
             self._state[source.source_id] = {
                 **prev,
                 "generation": prev.get("generation", 0),
                 "consecutive_failures": failures,
-                "last_error": str(e),
+                "last_error": public_error,
                 "last_attempt_at": datetime.now(UTC).isoformat(),
             }
             return SyncResult(
                 success=False,
                 peer_id=source.source_id,
-                error_message=str(e),
+                error_message=public_error,
                 duration_seconds=time.time() - start,
                 new_generation=prev.get("generation", 0),
             )
@@ -222,7 +239,9 @@ class ArdIngestionService:
             trust = manifest.host.trust_manifest
             host_domain = host_identity_domain(trust.identity) if trust else None
             for entry in manifest.entries:
-                accept, reason = verify_entry_trust(entry, host_domain, source, cfg.trust_enforcement)
+                accept, reason = verify_entry_trust(
+                    entry, host_domain, source, cfg.trust_enforcement
+                )
                 if not accept:
                     rejected += 1
                     continue
@@ -251,6 +270,10 @@ class ArdIngestionService:
         repo = get_skill_repository()
         stored = 0
         for skill_data in skills:
+            # Peer content (ARD catalog crawl): strip proxy fields so a federated
+            # skill can never become a local gateway route. Matches the AgentCore
+            # skill-ingest path; not relying on the mapper allowlist alone.
+            skill_data = strip_proxy_fields(skill_data)
             path = skill_data["path"]
             try:
                 try:
@@ -262,8 +285,8 @@ class ArdIngestionService:
                     }
                     await repo.update(path, update_fields)
                 stored += 1
-            except Exception as e:  # noqa: BLE001 - one bad skill must not fail the run
-                logger.error("Failed to ingest skill %s: %s", path, e)
+            except Exception as exc:  # noqa: BLE001 - one bad skill must not fail the run
+                logger.error(f"Failed to ingest skill {path} type={type(exc).__name__}")
         return stored
 
     async def _reconcile_skill_orphans(
@@ -275,8 +298,10 @@ class ArdIngestionService:
         repo = get_skill_repository()
         try:
             existing = await repo.list_filtered(include_disabled=True, registry_name=source_id)
-        except Exception as e:  # noqa: BLE001
-            logger.error("Skill orphan reconcile failed to list for %s: %s", source_id, e)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                f"Skill orphan reconcile failed to list for {source_id} type={type(exc).__name__}",
+            )
             return 0
         removed = 0
         for skill in existing:
@@ -284,8 +309,10 @@ class ArdIngestionService:
                 try:
                     await repo.delete(skill.path)
                     removed += 1
-                except Exception as e:  # noqa: BLE001
-                    logger.error("Failed to remove orphaned skill %s: %s", skill.path, e)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        f"Failed to remove orphaned skill {skill.path} type={type(exc).__name__}",
+                    )
         return removed
 
 

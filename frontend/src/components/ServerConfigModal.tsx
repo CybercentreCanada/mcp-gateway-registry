@@ -1,10 +1,17 @@
 import React, { useCallback, useState, useEffect } from 'react';
 import { ClipboardDocumentIcon, KeyIcon } from '@heroicons/react/24/outline';
+import PlugIcon from './icons/PlugIcon';
 import axios from 'axios';
 import type { Server } from './ServerCard';
 import { useRegistryConfig } from '../hooks/useRegistryConfig';
 import useEscapeKey from '../hooks/useEscapeKey';
 import { getBaseURL } from '../utils/basePath';
+import { isSafeUrl } from '../utils/safeUrl';
+import {
+  initiateConsent,
+  disconnect as disconnectEgress,
+  type EgressCardState,
+} from '../utils/egressAuth';
 
 const IDE_LABELS = {
   'cursor': 'Cursor',
@@ -30,6 +37,142 @@ interface ServerConfigModalProps {
    * server. Used to build the `resource` field on /api/tokens/generate.
    */
   resourceType?: 'server' | 'virtual_server';
+  // Per-user egress state for this server (undefined => no callout). Shared with
+  // the card icon so the two surfaces never disagree.
+  egressConnect?: EgressCardState;
+  // Refresh the dashboard's egress state after a connect/disconnect here.
+  onEgressChanged?: () => void;
+}
+
+
+/**
+ * The issue #1495 "Connect your account" callout, shown at the top of the
+ * connect modal for a per-user-egress server. Roomier than the card icon, so it
+ * carries the full treatment: connect / connected+disconnect / reconnect on a
+ * dead token. Reuses the same initiate()/disconnect() client the Connected
+ * Accounts page uses.
+ */
+function EgressConnectCallout({
+  serverPath,
+  state,
+  onEgressChanged,
+  onShowToast,
+}: {
+  serverPath: string;
+  state: EgressCardState;
+  onEgressChanged?: () => void;
+  onShowToast?: (message: string, type: 'success' | 'error') => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const providerLabel = state.provider
+    ? state.provider.charAt(0).toUpperCase() + state.provider.slice(1)
+    : 'account';
+
+  const startConnect = async () => {
+    setBusy(true);
+    try {
+      // Prefer the same initiate() the Connected Accounts page uses; fall back
+      // to the server-built connect_url front door. Both are opened, never fetched.
+      let url = '';
+      try {
+        url = await initiateConsent(serverPath);
+      } catch {
+        url = state.connectUrl;
+      }
+      // MANDATORY isSafeUrl guard before window.open (fail closed on unsafe/empty).
+      if (!isSafeUrl(url)) {
+        onShowToast?.('Cannot open the connect URL for this server.', 'error');
+        return;
+      }
+      window.open(url, '_blank', 'noopener,noreferrer');
+      // The callback tab vaults the token; refresh so the card/callout flip to
+      // "Connected" when the user returns.
+      onEgressChanged?.();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    setBusy(true);
+    try {
+      await disconnectEgress(state.provider, serverPath);
+      onShowToast?.(`Disconnected ${providerLabel}.`, 'success');
+      onEgressChanged?.();
+    } catch {
+      onShowToast?.(`Could not disconnect ${providerLabel}.`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // PAT server: no OAuth redirect — point at the token form on Connected Accounts.
+  if (state.mode === 'pat') {
+    return (
+      <div className="flex items-center gap-3 rounded-lg border border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-900/20 p-4">
+        <PlugIcon className="h-5 w-5 flex-shrink-0 text-purple-600 dark:text-purple-400" />
+        <span className="text-sm text-purple-900 dark:text-purple-100">
+          This server needs a personal access token before its tools appear.
+        </span>
+        <a
+          href={`/connected-accounts?server=${encodeURIComponent(serverPath)}`}
+          className="ml-auto text-sm font-medium text-purple-700 dark:text-purple-300 hover:underline"
+        >
+          Submit token
+        </a>
+      </div>
+    );
+  }
+
+  // 3LO: not connected / needs reconnect / connected.
+  if (!state.connected || state.needsReconnect) {
+    const warn = state.needsReconnect;
+    return (
+      <div
+        className={`flex items-center gap-3 rounded-lg border p-4 ${
+          warn
+            ? 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20'
+            : 'border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-900/20'
+        }`}
+      >
+        <PlugIcon
+          className={`h-5 w-5 flex-shrink-0 ${
+            warn ? 'text-amber-500' : 'text-purple-600 dark:text-purple-400'
+          }`}
+        />
+        <span className="text-sm text-gray-900 dark:text-gray-100">
+          {warn
+            ? `Your ${providerLabel} connection expired or failed — reconnect to restore this server's tools.`
+            : `This server acts on your behalf. Connect your ${providerLabel} account before copying the config.`}
+        </span>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={startConnect}
+          className="ml-auto flex-shrink-0 rounded-md bg-purple-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-purple-500"
+        >
+          {busy ? 'Opening…' : warn ? `Reconnect ${providerLabel}` : `Connect ${providerLabel} account`}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-3 rounded-lg border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20 p-4">
+      <PlugIcon className="h-5 w-5 flex-shrink-0 text-green-600 dark:text-green-400" />
+      <span className="text-sm text-green-900 dark:text-green-100">
+        Connected to {providerLabel}. This server can act on your behalf.
+      </span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={handleDisconnect}
+        className="ml-auto flex-shrink-0 rounded-md px-3 py-1.5 text-sm font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-red-500"
+      >
+        {busy ? 'Working…' : 'Disconnect'}
+      </button>
+    </div>
+  );
 }
 
 const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
@@ -38,8 +181,13 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
   onClose,
   onShowToast,
   resourceType = 'server',
+  egressConnect,
+  onEgressChanged,
 }) => {
   const [jwtToken, setJwtToken] = useState<string | null>(null);
+  // Actual token lifetime in hours, derived from the response's expires_in
+  // (seconds) rather than hardcoded, since the default is operator-configurable.
+  const [tokenExpiresInHours, setTokenExpiresInHours] = useState<number | null>(null);
   const [tokenLoading, setTokenLoading] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -89,6 +237,11 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
   // literally (Okta/Entra/Cognito), the operator sets a fixed port and we emit
   // --callback-port so the IDE does not use a random port the IdP rejects.
   const [oauthCallbackPort, setOauthCallbackPort] = useState<number | null>(null);
+  // Optional scope for the Claude Code Connect snippet (local|project|user).
+  // null/'' => omit --scope, keeping Claude Code's default (local). Operators set
+  // ide_connect_scope=user so the copied command installs the server for every
+  // project, not just the current directory.
+  const [connectScope, setConnectScope] = useState<string | null>(null);
   // Per-server override for the trailing '/mcp' transport segment on the gateway
   // URL. null = auto-detect from proxy_pass_url.
   const [appendMcpPath, setAppendMcpPath] = useState<boolean | null>(null);
@@ -110,6 +263,7 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
     if (isOpen && !isRegistryOnly && server.deployment !== 'local') {
       // Reset token state when modal opens
       setJwtToken(null);
+      setTokenExpiresInHours(null);
       setTokenError(null);
       fetchJwtToken();
     }
@@ -123,6 +277,7 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
     setCustomHeaders([]);
     setOauthClientId('');
     setOauthCallbackPort(null);
+    setConnectScope(null);
     setAppendMcpPath(null);
     const serverPath = server.path.replace(/^\/+/, '');
     // Fetch CSRF token first, then include it as header for the GET request
@@ -142,6 +297,11 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
         setOauthClientId(resp.data.oauth_client_id ?? '');
         setOauthCallbackPort(
           typeof resp.data.oauth_callback_port === 'number' ? resp.data.oauth_callback_port : null
+        );
+        setConnectScope(
+          typeof resp.data.connect_scope === 'string' && resp.data.connect_scope
+            ? resp.data.connect_scope
+            : null
         );
         setAppendMcpPath(
           typeof resp.data.append_mcp_path === 'boolean' ? resp.data.append_mcp_path : null
@@ -179,9 +339,11 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
     setTokenLoading(true);
     setTokenError(null);
     try {
+      // Omit expires_in_hours so the server applies the configured default
+      // lifetime (MCP_TOKEN_DEFAULT_TTL_HOURS). Hardcoding a value here breaks
+      // when an operator lowers the max below it. Issue #1477.
       const body: Record<string, unknown> = {
         description: `Generated for MCP configuration (${server.name})`,
-        expires_in_hours: 8,
       };
       // ai-registry-tools (mcpgw) needs a user token because it calls registry
       // APIs internally (/api/search/semantic, /api/servers, etc.) which require
@@ -201,6 +363,10 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
         const accessToken = response.data.tokens?.access_token || response.data.access_token;
         if (accessToken) {
           setJwtToken(accessToken);
+          const expiresInSeconds = response.data.tokens?.expires_in ?? response.data.expires_in;
+          setTokenExpiresInHours(
+            typeof expiresInSeconds === 'number' ? Math.round(expiresInSeconds / 3600) : null,
+          );
         } else {
           setTokenError('Token not found in response');
         }
@@ -278,18 +444,21 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
   //   1. mcp_endpoint (explicit full-URL override) - always wins
   //   2. proxy_pass_url (registry-only mode - client reaches the server directly)
   //   3. gateway URL = origin + base + server.path, optionally + "/mcp"
-  // The trailing "/mcp" transport segment is auto-detected from proxy_pass_url
-  // but can be forced on/off per-server via append_mcp_path (e.g. root-endpoint
-  // servers like AWS Knowledge that serve MCP at the server path itself).
+  // The trailing "/mcp" transport segment is appended UNLESS a server explicitly
+  // sets append_mcp_path=false (e.g. root-endpoint servers like AWS Knowledge
+  // that serve MCP at the server path itself). This mirrors the server-side PRM
+  // resource, which is built as `append_mcp_path is not False` (append when
+  // unset), so the advertised connection URL always equals the PRM resource.
+  // RFC 9728 requires the client's connection URL and the PRM resource to match,
+  // so the two MUST be derived identically. Do NOT reintroduce a proxy_pass_url
+  // heuristic here: the upstream URL shape says nothing about the gateway path.
   const buildConnectUrl = useCallback(() => {
     if (server.mcp_endpoint) return server.mcp_endpoint;
     if (isRegistryOnly && server.proxy_pass_url) return server.proxy_pass_url;
 
     const baseUrl = `${window.location.origin}${getBaseURL()}`;
     const cleanPath = server.path.replace(/\/+$/, '').replace(/^\/+/, '/');
-    const proxyUrl = server.proxy_pass_url || '';
-    const hasMcpPath = /\/(mcp|sse|v1)(\/.*)?$/.test(proxyUrl);
-    const shouldAppend = appendMcpPath ?? !hasMcpPath;
+    const shouldAppend = appendMcpPath ?? true;
     return shouldAppend ? `${baseUrl}${cleanPath}/mcp` : `${baseUrl}${cleanPath}`;
   }, [server.mcp_endpoint, server.proxy_pass_url, server.path, isRegistryOnly, appendMcpPath]);
 
@@ -580,6 +749,12 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
   const generateClaudeCodeCommand = useCallback(() => {
     const serverName = server.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
+    // Optional install scope (local|project|user). When the operator sets
+    // ide_connect_scope, emit `--scope <value>` so the copied command installs
+    // the server at the intended scope (e.g. `user` = every project) instead of
+    // Claude Code's default (local = current directory only). Empty => omitted.
+    const scopeFlag = connectScope ? ` --scope ${connectScope}` : '';
+
     // Local (stdio) servers: emit `claude mcp add` with stdio transport.
     if (isLocal) {
       const spec = buildLocalLaunchSpec();
@@ -590,7 +765,7 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
         .map(([k, v]) => `-e ${k}=${JSON.stringify(v)}`)
         .join(' ');
       const argsStr = spec.args.map(a => JSON.stringify(a)).join(' ');
-      let command = `claude mcp add ${serverName}`;
+      let command = `claude mcp add${scopeFlag} ${serverName}`;
       if (envFlags) command += ` ${envFlags}`;
       command += ` -- ${spec.command}`;
       if (argsStr) command += ` ${argsStr}`;
@@ -607,7 +782,7 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
     // A configured callback port is emitted as --callback-port so the IDE uses a
     // fixed loopback port (required for Okta/Entra/Cognito, which match the
     // redirect_uri literally including the port).
-    let command = `claude mcp add --transport http`;
+    let command = `claude mcp add${scopeFlag} --transport http`;
     if (useOAuthLogin) {
       command += ` --client-id ${oauthClientId}`;
       if (oauthCallbackPort) {
@@ -639,7 +814,7 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
     }
 
     return command;
-  }, [server.name, server.auth_scheme, server.auth_header_name, isRegistryOnly, isDCR, useOAuthLogin, egressManaged, oauthClientId, oauthCallbackPort, jwtToken, customHeaders, buildConnectUrl]);
+  }, [server.name, server.auth_scheme, server.auth_header_name, isRegistryOnly, isDCR, useOAuthLogin, egressManaged, oauthClientId, oauthCallbackPort, connectScope, jwtToken, customHeaders, buildConnectUrl]);
 
 
   const copyConfigToClipboard = useCallback(async () => {
@@ -722,6 +897,18 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
         </div>
 
         <div className="space-y-4">
+          {/* Egress "Connect your account" callout (#1495): shown before the
+              config the user copies, so per-user-auth servers stop silently
+              returning "0 tools". Only rendered when eligible. */}
+          {egressConnect && (
+            <EgressConnectCallout
+              serverPath={server.path}
+              state={egressConnect}
+              onEgressChanged={onEgressChanged}
+              onShowToast={onShowToast}
+            />
+          )}
+
           <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
             <h4 className="font-medium text-blue-900 dark:text-blue-100 mb-2">
               How to use this configuration:
@@ -812,7 +999,10 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
                 </p>
               ) : jwtToken ? (
                 <p className="text-sm text-green-800 dark:text-green-200">
-                  JWT token has been automatically added to the configuration below. You can copy and paste it directly into your mcp.json file. Token expires in 8 hours.
+                  JWT token has been automatically added to the configuration below. You can copy and paste it directly into your mcp.json file.
+                  {tokenExpiresInHours
+                    ? ` Token expires in ${tokenExpiresInHours} hour${tokenExpiresInHours === 1 ? '' : 's'}.`
+                    : ''}
                 </p>
               ) : tokenError ? (
                 <p className="text-sm text-red-800 dark:text-red-200">
@@ -896,6 +1086,8 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
                   'so Claude Code runs the OAuth login flow — no gateway token is embedded.'}
                 {useOAuthLogin && oauthCallbackPort ? ' --callback-port pins the OAuth redirect ' +
                   'port so it matches what the identity provider has registered.' : ''}
+                {connectScope ? ` --scope ${connectScope} installs the server at the "${connectScope}" ` +
+                  'scope so it is available beyond the current directory.' : ''}
               </p>
             </div>
           ) : selectedIDE === 'codex' ? (

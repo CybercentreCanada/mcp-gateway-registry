@@ -47,6 +47,12 @@ from registry.observability.meters import (
     embedding_removal_failures_total as EMBEDDING_REMOVAL_FAILURES_TOTAL,
 )
 from registry.observability.meters import (
+    gateway_egress_policy_unverified as GATEWAY_EGRESS_POLICY_UNVERIFIED,
+)
+from registry.observability.meters import (
+    gateway_generic_blocks_dropped_total as GATEWAY_GENERIC_BLOCKS_DROPPED,
+)
+from registry.observability.meters import (
     m2m_orphan_cleanups_total as M2M_ORPHAN_CLEANUPS_TOTAL,
 )
 from registry.observability.meters import (
@@ -63,6 +69,18 @@ from registry.observability.meters import (
 )
 from registry.observability.meters import (
     peer_sync_failures_total as PEER_SYNC_FAILURES,
+)
+from registry.observability.meters import (
+    registry_asset_id_conflict_total as ASSET_ID_CONFLICT_TOTAL,
+)
+from registry.observability.meters import (
+    registry_asset_id_federation_conflict_total as ASSET_ID_FEDERATION_CONFLICT_TOTAL,
+)
+from registry.observability.meters import (
+    registry_asset_id_index_build_failed_total as ASSET_ID_INDEX_BUILD_FAILED_TOTAL,
+)
+from registry.observability.meters import (
+    registry_asset_id_supplied_total as ASSET_ID_SUPPLIED_TOTAL,
 )
 from registry.observability.meters import (
     telemetry_sends_total,
@@ -102,11 +120,17 @@ __all__ = [
     "CONFIG_VIEW_REQUESTS",
     "DEPLOYMENT_MODE_INFO",
     "EMBEDDING_REMOVAL_FAILURES_TOTAL",
+    "GATEWAY_EGRESS_POLICY_UNVERIFIED",
+    "GATEWAY_GENERIC_BLOCKS_DROPPED",
     "M2M_ORPHAN_CLEANUPS_TOTAL",
     "MODE_BLOCKED_REQUESTS",
     "NGINX_CONFIG_WRITES",
     "NGINX_UPDATES_SKIPPED",
     "PEER_SYNC_DURATION_SECONDS",
     "PEER_SYNC_FAILURES",
+    "ASSET_ID_SUPPLIED_TOTAL",
+    "ASSET_ID_CONFLICT_TOTAL",
+    "ASSET_ID_FEDERATION_CONFLICT_TOTAL",
+    "ASSET_ID_INDEX_BUILD_FAILED_TOTAL",
     "telemetry_sends_total",
 ]

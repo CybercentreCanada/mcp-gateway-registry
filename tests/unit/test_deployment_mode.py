@@ -89,6 +89,78 @@ class TestNginxUpdatesEnabled:
         assert settings.nginx_updates_enabled is False
 
 
+@pytest.mark.unit
+class TestA2AReverseProxyEffective:
+    """Test a2a_reverse_proxy_effective (flag AND with-gateway)."""
+
+    def test_effective_when_flag_on_and_gateway(self):
+        settings = Settings(
+            deployment_mode=DeploymentMode.WITH_GATEWAY,
+            a2a_reverse_proxy_enabled=True,
+        )
+        assert settings.a2a_reverse_proxy_effective is True
+
+    def test_inert_when_flag_on_but_registry_only(self):
+        """Flag on but registry-only: routing is force-disabled."""
+        settings = Settings(
+            deployment_mode=DeploymentMode.REGISTRY_ONLY,
+            a2a_reverse_proxy_enabled=True,
+        )
+        assert settings.a2a_reverse_proxy_effective is False
+
+    def test_inert_when_flag_off_with_gateway(self):
+        settings = Settings(
+            deployment_mode=DeploymentMode.WITH_GATEWAY,
+            a2a_reverse_proxy_enabled=False,
+        )
+        assert settings.a2a_reverse_proxy_effective is False
+
+    def test_flag_off_with_gateway_not_effective(self):
+        """Flag explicitly off is not effective even in with-gateway mode."""
+        settings = Settings(
+            deployment_mode=DeploymentMode.WITH_GATEWAY,
+            a2a_reverse_proxy_enabled=False,
+        )
+        assert settings.a2a_reverse_proxy_effective is False
+
+
+@pytest.mark.unit
+class TestA2AReverseProxyModeBanner:
+    """The startup banner fires only when the flag is set but inert."""
+
+    def test_banner_prints_when_flag_on_but_registry_only(self, capsys):
+        from registry.core.config import print_a2a_reverse_proxy_mode_banner
+
+        settings = Settings(
+            deployment_mode=DeploymentMode.REGISTRY_ONLY,
+            a2a_reverse_proxy_enabled=True,
+        )
+        print_a2a_reverse_proxy_mode_banner(settings)
+        out = capsys.readouterr().out
+        assert "A2A_REVERSE_PROXY_ENABLED=true" in out
+        assert "registry-only" in out.lower()
+
+    def test_banner_silent_when_effective(self, capsys):
+        from registry.core.config import print_a2a_reverse_proxy_mode_banner
+
+        settings = Settings(
+            deployment_mode=DeploymentMode.WITH_GATEWAY,
+            a2a_reverse_proxy_enabled=True,
+        )
+        print_a2a_reverse_proxy_mode_banner(settings)
+        assert capsys.readouterr().out == ""
+
+    def test_banner_silent_when_flag_off(self, capsys):
+        from registry.core.config import print_a2a_reverse_proxy_mode_banner
+
+        settings = Settings(
+            deployment_mode=DeploymentMode.REGISTRY_ONLY,
+            a2a_reverse_proxy_enabled=False,
+        )
+        print_a2a_reverse_proxy_mode_banner(settings)
+        assert capsys.readouterr().out == ""
+
+
 # =============================================================================
 # TEST CLASS: Effective UI Title
 # =============================================================================
@@ -110,9 +182,7 @@ class TestEffectiveUiTitle:
 
     def test_override_with_gateway(self):
         """Set UI_TITLE wins over with-gateway default."""
-        settings = Settings(
-            deployment_mode=DeploymentMode.WITH_GATEWAY, ui_title="Acme Portal"
-        )
+        settings = Settings(deployment_mode=DeploymentMode.WITH_GATEWAY, ui_title="Acme Portal")
         assert settings.effective_ui_title == "Acme Portal"
 
     def test_override_registry_only(self):
@@ -183,9 +253,7 @@ class TestVersionEndpointUiTitle:
 
     def test_override_wins_over_mode_default(self, monkeypatch):
         """UI_TITLE='Acme Portal' is returned regardless of deployment_mode."""
-        client = self._patched_client(
-            monkeypatch, DeploymentMode.REGISTRY_ONLY, "Acme Portal"
-        )
+        client = self._patched_client(monkeypatch, DeploymentMode.REGISTRY_ONLY, "Acme Portal")
         response = client.get("/api/version")
         assert response.status_code == 200
         assert response.json()["ui_title"] == "Acme Portal"

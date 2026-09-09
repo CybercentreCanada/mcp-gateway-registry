@@ -15,13 +15,11 @@ import json
 import logging
 import os
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-CONSOLE_FORMAT = (
-    "%(asctime)s,p%(process)s,{%(filename)s:%(lineno)d},%(levelname)s,%(message)s"
-)
+CONSOLE_FORMAT = "%(asctime)s,p%(process)s,{%(filename)s:%(lineno)d},%(levelname)s,%(message)s"
 DEFAULT_LOG_DIR = "/var/log/containers/ai-registry"
 SERVICE_NAME = "ai-registry-tools"
 
@@ -45,9 +43,7 @@ class JsonlFormatter(logging.Formatter):
         record: logging.LogRecord,
     ) -> str:
         payload: dict = {
-            "timestamp": datetime.fromtimestamp(
-                record.created, tz=timezone.utc
-            ).isoformat(),
+            "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "service": self._service_name,
             "level": record.levelname,
             "logger": record.name,
@@ -61,9 +57,7 @@ class JsonlFormatter(logging.Formatter):
             exc_type, exc_value, _ = record.exc_info
             payload["exc_type"] = exc_type.__name__ if exc_type else "Unknown"
             payload["exc_message"] = str(exc_value) if exc_value else ""
-            payload["stack_trace"] = "".join(
-                traceback.format_exception(*record.exc_info)
-            )
+            payload["stack_trace"] = "".join(traceback.format_exception(*record.exc_info))
 
         return json.dumps(payload, default=str, ensure_ascii=False)
 

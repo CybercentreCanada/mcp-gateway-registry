@@ -21,6 +21,7 @@ from ..schemas.federation_schema import (
     AwsRegistryConfig,
     FederationConfig,
 )
+from ..schemas.proxy_mixin import strip_proxy_fields
 
 logging.basicConfig(
     level=logging.INFO,
@@ -897,7 +898,7 @@ async def _deregister_agents_from_registry(
     agent_repo = get_agent_repository()
 
     # Primary: query by metadata
-    matching_paths = set()
+    matching_paths: set[str] = set()
     by_metadata = await agent_repo.find_with_filter({"metadata.agentcore_registry_id": registry_id})
     matching_paths.update(by_metadata.keys())
 
@@ -944,9 +945,9 @@ async def _deregister_skills_from_registry(
     skill_service = get_skill_service()
     all_skills = await skill_repo.list_all()
 
-    matching_paths = set()
+    matching_paths: set[str] = set()
     for skill in all_skills:
-        meta = skill.metadata or {}
+        meta: Any = skill.metadata or {}
         extra = meta.extra if hasattr(meta, "extra") else {}
         meta_dict = meta if isinstance(meta, dict) else {}
 
@@ -1058,6 +1059,10 @@ async def sync_federation(
 
             for server_data in servers:
                 try:
+                    # Strip peer-supplied proxy fields: federated entities are
+                    # never local gateway routes (owner decision), and this blocks
+                    # a peer planting an SSRF proxy_target_url. See strip_proxy_fields.
+                    server_data = strip_proxy_fields(server_data)
                     server_path = server_data.get("path")
                     if not server_path:
                         logger.warning(
@@ -1197,6 +1202,7 @@ async def sync_federation(
             # Register servers (MCP records)
             for srv in records["servers"]:
                 try:
+                    srv = strip_proxy_fields(srv)  # peer content: no proxying federated entities
                     srv_path = srv.get("path")
                     if not srv_path:
                         continue
@@ -1219,6 +1225,7 @@ async def sync_federation(
             # Register agents (A2A + CUSTOM records)
             for agent_data in records["agents"]:
                 try:
+                    agent_data = strip_proxy_fields(agent_data)  # peer content: no proxying
                     agent_path = agent_data.get("path")
                     if not agent_path:
                         continue
@@ -1238,6 +1245,7 @@ async def sync_federation(
             skill_repo = get_skill_repository()
             for skill_data in records["skills"]:
                 try:
+                    skill_data = strip_proxy_fields(skill_data)  # peer content: no proxying
                     skill_path = skill_data.get("path")
                     if not skill_path:
                         continue

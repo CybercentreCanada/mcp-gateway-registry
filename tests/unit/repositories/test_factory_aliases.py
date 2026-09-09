@@ -133,6 +133,3 @@ class TestFactoryAliasRouting:
             f"{actual_class!r} but mongodb-ce baseline returned "
             f"{baseline_class!r}. This is the silent-fallback bug (#954)."
         )
-
-
-

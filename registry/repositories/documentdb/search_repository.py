@@ -666,6 +666,31 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
         if self._embedding_model is None:
             from ...embeddings import create_embeddings_client
 
+            token_provider = None
+            if (
+                settings.embeddings_provider.lower() == "litellm"
+                and (settings.embeddings_auth_mode or "").lower() == "idp"
+            ):
+                from ...embeddings.token_provider import (
+                    EmbeddingsTokenProvider,
+                    _require_idp_settings,
+                )
+
+                _require_idp_settings(
+                    token_endpoint=settings.embeddings_idp_token_endpoint,
+                    client_id=settings.embeddings_idp_client_id,
+                    client_secret=settings.embeddings_idp_client_secret,
+                    allow_insecure=settings.embeddings_idp_allow_insecure,
+                )
+                token_provider = EmbeddingsTokenProvider(
+                    token_endpoint=settings.embeddings_idp_token_endpoint,
+                    client_id=settings.embeddings_idp_client_id,
+                    client_secret=settings.embeddings_idp_client_secret,
+                    scope=settings.embeddings_idp_scope,
+                    timeout_seconds=settings.embeddings_idp_timeout_seconds,
+                    allow_insecure=settings.embeddings_idp_allow_insecure,
+                ).get_token
+
             self._embedding_model = create_embeddings_client(
                 provider=settings.embeddings_provider,
                 model_name=settings.embeddings_model_name,
@@ -674,6 +699,8 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
                 api_base=settings.embeddings_api_base,
                 aws_region=settings.embeddings_aws_region,
                 embedding_dimension=settings.embeddings_model_dimensions,
+                token_provider=token_provider,
+                response_format=settings.embeddings_response_format,
             )
         return self._embedding_model
 
@@ -797,11 +824,14 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
             server_info.get("description", ""),
         ]
 
-        tags = server_info.get("tags", [])
+        # Coerce null to empty: a server updated via PUT can carry an explicit
+        # tags/tool_list of None, and dict.get(key, default) returns None (not
+        # the default) when the key is present-but-None.
+        tags = server_info.get("tags") or []
         if tags:
             text_parts.append("Tags: " + ", ".join(tags))
 
-        for tool in server_info.get("tool_list", []):
+        for tool in server_info.get("tool_list") or []:
             text_parts.append(tool.get("name", ""))
             text_parts.append(tool.get("description", ""))
 
@@ -848,7 +878,7 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
             "path": path,
             "name": server_info.get("server_name", ""),
             "description": server_info.get("description", ""),
-            "tags": server_info.get("tags", []),
+            "tags": server_info.get("tags") or [],
             "metadata_text": metadata_text,
             "is_enabled": is_enabled,
             "status": server_info.get("status", "active"),
@@ -863,7 +893,7 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
                     # Support both "inputSchema" (MCP standard) and "schema" (legacy)
                     "inputSchema": t.get("inputSchema") or t.get("schema", {}),
                 }
-                for t in server_info.get("tool_list", [])
+                for t in server_info.get("tool_list") or []
             ],
             "metadata": server_info,
             "indexed_at": server_info.get("updated_at", server_info.get("registered_at")),
@@ -2296,9 +2326,13 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
         if not settings.custom_entity_types_enabled:
             return scope
         try:
-            from ..factory import get_custom_type_repository
+            from typing import cast
 
-            descriptors = await get_custom_type_repository().cache.list_descriptors()
+            from ..factory import get_custom_type_repository
+            from .custom_type_repository import DocumentDBCustomTypeRepository
+
+            type_repo = cast(DocumentDBCustomTypeRepository, get_custom_type_repository())
+            descriptors = await type_repo.cache.list_descriptors()
             scope.extend(d.name for d in descriptors)
         except Exception as e:
             logger.warning(f"Could not append custom types to search scope: {e}")

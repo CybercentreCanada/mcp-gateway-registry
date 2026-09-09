@@ -34,8 +34,8 @@ export interface ServerEditForm {
   deployment: 'remote' | 'local';
   local_runtime: LocalRuntimeFormData;
   custom_headers: Array<{ name: string; value: string }>;
-  // Egress auth to the upstream (admin config). 'none' | 'oauth_user' | 'obo_exchange'.
-  egress_auth_mode: 'none' | 'oauth_user' | 'obo_exchange';
+  // Egress auth to the upstream (admin config). 'none' | 'oauth_user' | 'obo_exchange' | 'pat'.
+  egress_auth_mode: 'none' | 'oauth_user' | 'obo_exchange' | 'pat';
   // oauth_user (3LO vault) fields:
   egress_provider: string;
   egress_client_id: string;
@@ -43,8 +43,12 @@ export interface ServerEditForm {
   egress_scopes: string; // comma/space separated
   egress_custom_authorize_url: string;
   egress_custom_token_url: string;
+  // 'post_body' | 'basic_header' | 'none' — 'none' is a public client (no secret, PKCE only)
+  egress_custom_token_auth_style: string;
+  egress_custom_resource: string; // RFC 8707 resource indicator (optional)
   // obo_exchange (same-IdP OBO hop 1) field:
   egress_target_audience: string;
+  // pat inject header config (admin). Blank = server defaults (Authorization / Bearer).
 }
 
 interface ServerEditModalProps {
@@ -245,6 +249,7 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({
                     <option value="none">Disabled</option>
                     <option value="oauth_user">Per-user OAuth (3LO)</option>
                     <option value="obo_exchange">OBO exchange (same IdP)</option>
+                    <option value="pat">Per-user PAT / API key</option>
                   </select>
                 </div>
                 {form.egress_auth_mode === 'obo_exchange' && (
@@ -262,6 +267,32 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                       The internal MCP server&apos;s App ID URI (Entra) or client id (Keycloak).
                       Must differ from the gateway&apos;s own IdP client id.
+                    </p>
+                  </div>
+                )}
+                {form.egress_auth_mode === 'pat' && (
+                  <div>
+                    <label className={LABEL}>Provider (vault key)</label>
+                    <input
+                      type="text"
+                      value={form.egress_provider}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, egress_provider: e.target.value }))
+                      }
+                      placeholder="github"
+                      className={FIELD}
+                    />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      A short namespace/display key that identifies this credential in the
+                      vault (lowercase letters, digits, hyphen, underscore). This is NOT the
+                      token: each user submits their own PAT on the Connected Accounts page.
+                    </p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                      The PAT is injected into the same header as Backend Authentication
+                      above ({form.auth_scheme === 'api_key'
+                        ? `${form.auth_header_name || 'X-API-Key'}: <token>`
+                        : `${form.auth_header_name || 'Authorization'}: Bearer <token>`}).
+                      Set the header there.
                     </p>
                   </div>
                 )}
@@ -306,19 +337,26 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({
                         className={FIELD}
                       />
                     </div>
-                    <div>
-                      <label className={LABEL}>Client Secret</label>
-                      <input
-                        type="password"
-                        value={form.egress_client_secret}
-                        onChange={(e) =>
-                          setForm((prev) => ({ ...prev, egress_client_secret: e.target.value }))
-                        }
-                        placeholder="leave blank to keep current"
-                        autoComplete="new-password"
-                        className={FIELD}
-                      />
-                    </div>
+                    {/* A public client (custom provider, token auth 'none') has no
+                        secret by design — hide the field so nothing stale is sent. */}
+                    {!(
+                      form.egress_provider === 'custom' &&
+                      form.egress_custom_token_auth_style === 'none'
+                    ) && (
+                      <div>
+                        <label className={LABEL}>Client Secret</label>
+                        <input
+                          type="password"
+                          value={form.egress_client_secret}
+                          onChange={(e) =>
+                            setForm((prev) => ({ ...prev, egress_client_secret: e.target.value }))
+                          }
+                          placeholder="leave blank to keep current"
+                          autoComplete="new-password"
+                          className={FIELD}
+                        />
+                      </div>
+                    )}
                     <div>
                       <label className={LABEL}>Scopes</label>
                       <input
@@ -362,6 +400,50 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({
                             placeholder="https://idp.example/token"
                             className={FIELD}
                           />
+                        </div>
+                        <div>
+                          <label className={LABEL}>Token Endpoint Authentication</label>
+                          <select
+                            value={form.egress_custom_token_auth_style || 'post_body'}
+                            onChange={(e) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                egress_custom_token_auth_style: e.target.value,
+                              }))
+                            }
+                            className={FIELD}
+                          >
+                            <option value="post_body">Client secret in POST body</option>
+                            <option value="basic_header">Client secret in Basic header</option>
+                            <option value="none">None — public client (PKCE only)</option>
+                          </select>
+                          {form.egress_custom_token_auth_style === 'none' && (
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                              For providers that register public OAuth clients via Dynamic
+                              Client Registration (e.g. Datadog MCP). No client secret is
+                              stored or sent; PKCE proves possession.
+                            </p>
+                          )}
+                        </div>
+                        <div>
+                          <label className={LABEL}>Resource (RFC 8707, optional)</label>
+                          <input
+                            type="text"
+                            value={form.egress_custom_resource}
+                            onChange={(e) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                egress_custom_resource: e.target.value,
+                              }))
+                            }
+                            placeholder="https://mcp.example.com/mcp"
+                            className={FIELD}
+                          />
+                          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                            Binds issued tokens to one protected resource. Required by some
+                            MCP servers (Atlassian Rovo, Datadog); sent on authorize, token
+                            exchange, and refresh.
+                          </p>
                         </div>
                       </>
                     )}

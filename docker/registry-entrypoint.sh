@@ -40,7 +40,7 @@ if [ -n "$MONGODB_CONNECTION_STRING" ] || [ -n "$DOCUMENTDB_HOST" ]; then
     source /app/.venv/bin/activate
     python3 -c "
 import pymongo, os, re, time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, quote_plus
 
 override = os.getenv('MONGODB_CONNECTION_STRING', '')
 if override:
@@ -59,7 +59,10 @@ else:
     ca_file = os.getenv('DOCUMENTDB_TLS_CA_FILE', '/app/certs/global-bundle.pem')
     auth = 'SCRAM-SHA-256' if backend == 'mongodb-ce' else 'SCRAM-SHA-1'
     if user and pwd:
-        uri = f'mongodb://{user}:{pwd}@{host}:{port}/?authMechanism={auth}&authSource=admin'
+        # Escape credentials per RFC 3986 so passwords with reserved
+        # characters (e.g. after a Secrets Manager rotation) do not break
+        # the connection URI. Mirrors scripts/_mongo_conn_args.py.
+        uri = f'mongodb://{quote_plus(user)}:{quote_plus(pwd)}@{host}:{port}/?authMechanism={auth}&authSource=admin'
     else:
         uri = f'mongodb://{host}:{port}/'
     tls_options = {}
@@ -185,6 +188,9 @@ cp "$LUA_SOURCE_DIR/virtual_router.lua" "$LUA_SCRIPTS_DIR/virtual_router.lua"
 cp "$LUA_SOURCE_DIR/emit_metrics.lua" "$LUA_SCRIPTS_DIR/emit_metrics.lua"
 cp "$LUA_SOURCE_DIR/flush_metrics.lua" "$LUA_SCRIPTS_DIR/flush_metrics.lua"
 
+# A2A reverse-proxy filter
+cp "$LUA_SOURCE_DIR/agent_card_rewrite.lua" "$LUA_SCRIPTS_DIR/agent_card_rewrite.lua"
+
 echo "Lua scripts copied from $LUA_SOURCE_DIR to $LUA_SCRIPTS_DIR."
 
 # --- Nginx Configuration ---
@@ -233,6 +239,10 @@ if [ "${NGINX_ENABLE_IPV6:-false}" = "true" ]; then
         if ! grep -q 'listen \[::\]:8080;' "$nginx_template"; then
             sed -i 's|listen 8080;|listen 8080;\
     listen [::]:8080;|' "$nginx_template"
+        fi
+        if ! grep -q 'listen \[::\]:8091;' "$nginx_template"; then
+            sed -i 's|listen 8091;|listen 8091;\
+    listen [::]:8091;|' "$nginx_template"
         fi
         if grep -q 'listen 8443 ssl;' "$nginx_template" && ! grep -q 'listen \[::\]:8443 ssl;' "$nginx_template"; then
             sed -i 's|listen 8443 ssl;|listen 8443 ssl;\
@@ -309,6 +319,20 @@ for i in $(seq 1 99); do
     fi
 done
 echo "MCP Server configuration processing completed."
+
+# --- Optional customer RUM (Real User Monitoring) snippet ---
+# RUM_SNIPPET_B64 holds a base64-encoded HTML snippet (vendor <script> tags).
+# The resolver decodes it and, when RUM_ALLOWED_HOSTS is set, rejects any snippet
+# that references a host outside the allowlist. It always writes a valid file
+# (empty/invalid stub on failure) so /rum.js is a valid 200 and container startup
+# never fails on a bad value (set -e is on). RUM_SNIPPET_B64 / RUM_ALLOWED_HOSTS
+# are read from the environment by the resolver, never passed on argv (a secret
+# on argv is world-readable via ps).
+RUM_JS_PATH="/app/frontend/build/rum.js"
+if [ -d "/app/frontend/build" ]; then
+    /app/.venv/bin/python -m registry.utils.rum_snippet_writer "${RUM_JS_PATH}" \
+        || echo "RUM: resolver failed unexpectedly; leaving existing/stub rum.js" >&2
+fi
 
 # --- Start Background Services ---
 # Export embeddings configuration for the registry service

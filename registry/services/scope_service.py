@@ -27,6 +27,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
+# The built-in registry-admin group that per-type custom-entity scopes are minted
+# to on type-create. Admins get the full scope set so they can manage records of a
+# new type immediately; non-admins are granted scopes explicitly via the IAM UI.
+ADMIN_GROUP_NAME: str = "mcp-registry-admin"
+
 STANDARD_METHODS: list[str] = [
     "initialize",
     "notifications/initialized",
@@ -46,17 +51,22 @@ STANDARD_METHODS: list[str] = [
 def _grants_all(granted_resources: object) -> bool:
     """Return True if a ui_permission value grants access to "all" resources.
 
-    Mirrors the ``"all" in resources`` test in
-    ``registry.auth.dependencies._user_is_admin`` exactly, including its
-    behaviour for BOTH shapes the value can take:
+    Detects the ``"all"`` grant in BOTH shapes the value can take:
 
     - ``["all"]`` (list) -> membership check
     - ``"all"`` (bare string) -> equality (the string case ``_user_is_admin``
       accepts via substring matching; we accept it explicitly here)
 
-    Keeping this aligned with ``_user_is_admin`` is the whole point of the guard:
-    if the admin-derivation rule treats a value as admin-conferring, the guard
-    must treat the same value as privileged, regardless of list-vs-string shape.
+    NOTE: this service-layer write guard is intentionally BROADER than the
+    admin-derivation rule (``is_admin_conferring_action`` / ``_user_is_admin``).
+    It flags ANY ``"all"`` grant on ANY action -- including actions that are NOT
+    admin-conferring (per-type custom-entity scopes, and skill-management scopes
+    like ``modify_skill``). Those are excluded from admin derivation but still
+    require an admin to AUTHOR the group that carries them. So the guard being
+    over-inclusive here is deliberate and fail-safe: it can over-restrict a write
+    (an admin must create such a group) but never under-restricts. Do not
+    "tighten" it to match ``is_admin_conferring_action`` -- that would let a
+    non-admin author a skill-manager / entity-manager group.
     """
     if isinstance(granted_resources, str):
         return granted_resources == "all"
@@ -95,10 +105,12 @@ def _import_touches_privileged_scope(
         if mapped in PRIVILEGED_SCOPE_NAMES:
             return True
 
-    # A scope that grants any permission to "all" resources is admin-equivalent
-    # (see _user_is_admin, which confers admin on any mutating-prefix action with
-    # "all"). _grants_all handles both the list (["all"]) and bare-string ("all")
-    # shapes so a string-shaped grant cannot slip past this last line of defense.
+    # Any permission granting "all" resources requires an admin to author the
+    # group. This is intentionally broader than admin-derivation: it also trips on
+    # non-conferring "all" grants (per-type entity scopes, skill-management
+    # scopes) -- see _grants_all. Fail-safe: over-restricts the WRITE (admin-only
+    # authoring), never under-restricts. _grants_all handles both the list
+    # (["all"]) and bare-string ("all") shapes so neither slips past this guard.
     for granted_resources in (ui_permissions or {}).values():
         if _grants_all(granted_resources):
             return True
@@ -133,9 +145,7 @@ async def _trigger_auth_server_reload() -> bool:
                 logger.info("Successfully triggered auth server scope reload")
                 return True
             else:
-                logger.error(
-                    f"Failed to reload auth server scopes: HTTP {response.status_code}"
-                )
+                logger.error(f"Failed to reload auth server scopes: HTTP {response.status_code}")
                 return False
 
     except Exception as e:
@@ -637,3 +647,89 @@ async def add_group_mapping_to_scope(
     except Exception as e:
         logger.error(f"Error adding group mapping to scope {scope_name}: {e}")
         return False
+
+
+class ScopeMintError(Exception):
+    """Raised when minting a custom type's scopes to the admin group fails.
+
+    Type creation treats this as fatal: a type whose scopes could not be granted
+    to admins is unusable (no one can list/create its records), so the caller
+    should surface the failure rather than leave an orphaned type.
+    """
+
+
+async def mint_custom_type_scopes(
+    type_name: str,
+) -> bool:
+    """Grant the per-type custom-entity scope set to the admin group.
+
+    Adds ``list/create/modify/delete_<type>_entity: ["all"]`` to
+    ``mcp-registry-admin`` via a targeted ui_permissions merge (no whole-doc
+    round-trip, so the privileged-write guard is not involved). Fails closed:
+    raises ScopeMintError if the group is missing or the write fails, so type
+    creation can abort.
+
+    Args:
+        type_name: The custom type name whose scopes to mint.
+
+    Returns:
+        True on success. Raises ScopeMintError on failure (never returns False).
+    """
+    from .custom_entity_scopes import all_entity_scopes
+
+    scopes = all_entity_scopes(type_name)
+    scope_repo = get_scope_repository()
+    try:
+        success = await scope_repo.merge_ui_permissions(ADMIN_GROUP_NAME, scopes)
+    except Exception as e:
+        raise ScopeMintError(f"Failed to mint scopes for custom type '{type_name}': {e}") from e
+
+    if not success:
+        raise ScopeMintError(
+            f"Failed to mint scopes for custom type '{type_name}': "
+            f"group '{ADMIN_GROUP_NAME}' not found or not updated"
+        )
+
+    logger.info(
+        "Minted per-type scopes for custom type '%s' to group '%s': %s",
+        type_name,
+        ADMIN_GROUP_NAME,
+        sorted(scopes.keys()),
+    )
+    return True
+
+
+async def cleanup_custom_type_scopes(
+    type_name: str,
+) -> int:
+    """Remove a custom type's scope set from EVERY group that holds it.
+
+    Sweeps all groups (not just ``mcp-registry-admin``) so a non-admin who was
+    granted the type's scopes does not keep a dangling permission after the type
+    is deleted. Best-effort: logs and returns 0 on error rather than raising,
+    matching the delete-type teardown which prioritizes record/descriptor
+    removal.
+
+    Args:
+        type_name: The custom type name whose scopes to remove.
+
+    Returns:
+        The number of group documents modified.
+    """
+    from .custom_entity_scopes import all_entity_scopes
+
+    keys = list(all_entity_scopes(type_name).keys())
+    scope_repo = get_scope_repository()
+    try:
+        modified = await scope_repo.remove_ui_permission_keys_from_all_groups(keys)
+    except Exception as e:
+        logger.error(f"Failed to clean up scopes for custom type '{type_name}': {e}")
+        return 0
+
+    logger.info(
+        "Cleaned up per-type scopes for custom type '%s' from %d group(s): %s",
+        type_name,
+        modified,
+        sorted(keys),
+    )
+    return modified

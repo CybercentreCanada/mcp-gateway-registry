@@ -792,7 +792,14 @@ class TestCognitoIAMManager:
         """list_groups returns the groups from the cognito helper."""
         from registry.utils.iam_manager import CognitoIAMManager
 
-        sample = [{"id": "registry-admins", "name": "registry-admins", "description": "", "path": "registry-admins"}]
+        sample = [
+            {
+                "id": "registry-admins",
+                "name": "registry-admins",
+                "description": "",
+                "path": "registry-admins",
+            }
+        ]
         manager = CognitoIAMManager()
         with patch(
             "registry.utils.cognito_manager.list_cognito_groups",
@@ -807,7 +814,14 @@ class TestCognitoIAMManager:
         """list_users forwards max_results/include_groups and returns the users."""
         from registry.utils.iam_manager import CognitoIAMManager
 
-        sample = [{"id": "u1", "username": "u1", "email": "u1@example.com", "groups": ["public-mcp-users"]}]
+        sample = [
+            {
+                "id": "u1",
+                "username": "u1",
+                "email": "u1@example.com",
+                "groups": ["public-mcp-users"],
+            }
+        ]
         manager = CognitoIAMManager()
         with patch(
             "registry.utils.cognito_manager.list_cognito_users",

@@ -23,6 +23,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from ..audit import set_audit_action
+from ..audit.request_id import sanitize_correlation_id
+from ..auth.asset_permissions import user_has_asset_permission
 from ..auth.csrf import (
     generate_csrf_token,
     verify_csrf_token_flexible,
@@ -31,15 +33,21 @@ from ..auth.csrf import (
 from ..auth.dependencies import enhanced_auth, nginx_proxied_auth
 from ..auth.internal import validate_internal_auth
 from ..auth.tool_filter import filter_tools_for_user
-from ..common.log_redaction import redact_mapping
+from ..common.log_redaction import redact_mapping, redact_url
 from ..constants import VALID_AUTH_SCHEMES, DeploymentType, HealthStatus
 from ..core.config import DeploymentMode, settings
+from ..core.metrics import ASSET_ID_SUPPLIED_TOTAL
 from ..core.schemas import AuthCredentialUpdateRequest
 from ..schemas.registry_card import LifecycleStatus
 from ..schemas.server_update_models import (
     SERVER_REGISTRANT_ONLY_FIELDS,
     ServerCardPatch,
     ServerUpdateRequest,
+)
+from ..services._asset_id import (
+    InvalidAssetIdError,
+    check_caller_supplied_id_allowed,
+    resolve_asset_id,
 )
 from ..services.canonical_export import redact_backend_urls, to_canonical
 from ..services.lifecycle_events import (
@@ -60,7 +68,11 @@ from ..utils.credential_encryption import (
     encrypt_credential_in_server_dict,
     strip_credentials_from_dict,
 )
-from ..utils.metadata import flatten_metadata_to_text
+from ..utils.metadata import (
+    flatten_metadata_to_text,
+    parse_and_validate_metadata_fields,
+    project_metadata,
+)
 from ._etag_utils import parse_if_match, updated_ms, weak_etag_for_timestamp
 
 logger = logging.getLogger(__name__)
@@ -99,6 +111,69 @@ def _require_admin(
         )
 
 
+def _scan_destination_is_safe(
+    server_info: dict,
+) -> bool:
+    """Re-validate the scan destination through the shared SSRF guard.
+
+    The security scanner is an external process that opens its own connection
+    to ``proxy_pass_url`` (and ``mcp_endpoint`` when set), so the registry's
+    pinned guarded client cannot protect that outbound hop. A stored credential
+    must therefore only be handed to the scanner once the destination has been
+    re-validated at the moment of use: registration-time validation is not
+    enough because ``proxy_pass_url`` is mutable after registration (an owner or
+    a registration-time bypass could point it at a private/metadata address and
+    then trigger a scan to leak the credential there). Validate every
+    destination the scanner might reach and fail closed: if any is present and
+    fails validation, the credential is not attached and the caller must not
+    proceed with the credential.
+
+    Returns:
+        True only if every configured destination passes the PROXY_PROFILE
+        SSRF guard. False (deny) on any validation failure or ambiguity.
+    """
+    from ..exceptions import UrlValidationError
+    from ..utils.url_guard import PROXY_PROFILE, validate_url
+
+    destinations = [
+        server_info.get("proxy_pass_url"),
+        server_info.get("mcp_endpoint"),
+    ]
+    checked_any = False
+    for destination in destinations:
+        if not destination:
+            continue
+        checked_any = True
+        try:
+            validate_url(destination, profile=PROXY_PROFILE)
+        except UrlValidationError as e:
+            logger.warning(
+                "Refusing to attach stored credential for '%s': destination "
+                "failed SSRF re-validation: %s",
+                server_info.get("path", "unknown"),
+                e,
+            )
+            return False
+        except Exception as e:  # pragma: no cover - defensive, fail closed
+            logger.warning(
+                "Refusing to attach stored credential for '%s': destination validation error: %s",
+                server_info.get("path", "unknown"),
+                e,
+            )
+            return False
+
+    if not checked_any:
+        # No destination to validate means we cannot establish where the
+        # credential would be sent -> fail closed rather than attach blindly.
+        logger.warning(
+            "Refusing to attach stored credential for '%s': no destination URL to validate",
+            server_info.get("path", "unknown"),
+        )
+        return False
+
+    return True
+
+
 def _build_scan_headers_from_credentials(
     server_info: dict,
 ) -> str | None:
@@ -107,16 +182,28 @@ def _build_scan_headers_from_credentials(
     Decrypts the stored credential and formats it as a JSON headers string
     that the scanner's _extract_bearer_token_from_headers() expects.
 
+    The stored credential is only decrypted and attached after the scan
+    destination is re-validated through the shared SSRF guard (see
+    :func:`_scan_destination_is_safe`), so a destination that was mutated to a
+    private/metadata address after registration cannot receive the credential.
+
     Args:
         server_info: Server info dict with include_credentials=True.
 
     Returns:
-        JSON string with X-Authorization header, or None if no credentials.
+        JSON string with X-Authorization header, or None if no credentials or
+        if the destination fails SSRF re-validation (fail closed).
     """
     auth_scheme = server_info.get("auth_scheme", "none")
     encrypted_credential = server_info.get("auth_credential_encrypted")
 
     if auth_scheme == "none" or not encrypted_credential:
+        return None
+
+    # Re-validate the destination at the moment of use, before decrypting or
+    # attaching the credential. Fail closed: an unsafe destination gets no
+    # credential (and the scan proceeds unauthenticated / is refused upstream).
+    if not _scan_destination_is_safe(server_info):
         return None
 
     from ..utils.credential_encryption import decrypt_credential
@@ -224,6 +311,46 @@ def _coerce_metadata_to_dict(parsed_metadata: Any, path: str) -> dict[str, Any]:
         type(parsed_metadata).__name__,
     )
     return {}
+
+
+def _apply_tool_visibility(
+    server_info: dict,
+    server_path: str,
+    user_context: dict,
+    *,
+    endpoint: str,
+) -> None:
+    """Prune a single-server response's ``tool_list`` to the caller's allowlist.
+
+    Mutates ``server_info`` in place so a caller with server access but a
+    restricted tool set cannot read tool names outside that set on the
+    single-server detail endpoints. Keeps ``num_tools`` consistent with the
+    pruned list. Uses the same canonical helper as the server-listing and
+    tool-catalog paths; admin / wildcard callers pass through unchanged and a
+    missing/empty allowlist fails closed (empty list).
+
+    Args:
+        server_info: The server document being returned (mutated in place).
+        server_path: The registered server path, used for the allowlist lookup.
+        user_context: The authenticated caller's context.
+        endpoint: Label for the tool-filter audit event.
+    """
+    raw_tools = server_info.get("tool_list")
+    if not isinstance(raw_tools, list):
+        return
+    filtered = filter_tools_for_user(
+        server_info.get("server_name", server_path),
+        raw_tools,
+        user_context or {},
+        endpoint=endpoint,
+        server_path=server_path,
+    )
+    # Safe to mutate: server_service.get_server_info() returns a fresh
+    # per-request document (not a shared/cached dict), so this cannot poison a
+    # cache or a concurrent request.
+    server_info["tool_list"] = filtered
+    # Keep the badge/count consistent with what is actually rendered.
+    server_info["num_tools"] = len(filtered)
 
 
 async def _build_versions_list(
@@ -347,6 +474,18 @@ def _parse_and_validate_custom_headers(
         seen_names.add(lower)
         validated.append({"name": ch.name, "value": ch.value})
 
+    # Re-run the storage-layer policy here so route validation cannot drift from
+    # defensive validation performed immediately before encryption.
+    from ..utils.credential_encryption import validate_custom_headers
+
+    try:
+        validate_custom_headers(validated, allow_empty_values=allow_empty_values)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid custom header: {exc}",
+        ) from exc
+
     return validated
 
 
@@ -444,7 +583,7 @@ async def _perform_security_scan_on_registration(
         )
 
     except Exception as e:
-        logger.error(f"Security scan failed for {path}: {e}")
+        logger.error(f"Security scan failed for path={path} type={type(e).__name__}")
         # Non-fatal error - server is registered but scan failed. Still notify
         # consumers so they are not left polling for a scan that never reports.
         fire_scan_complete_event(
@@ -509,13 +648,14 @@ async def read_root(
     accessible_services = user_context.get("accessible_services", [])
     # Normalize accessible_services by stripping slashes for comparison
     normalized_accessible_services = [s.strip("/") for s in accessible_services]
-    logger.info(
-        f"DEBUG: User {user_context['username']} accessible_services: {accessible_services}"
+    # Per-user authorization policy (accessible services, UI permissions, scopes)
+    # is a verbose trace, kept at DEBUG: this runs on the list-servers path and
+    # dumps the caller's full authz policy, which must not land in logs at INFO.
+    logger.debug(f"User {user_context['username']} accessible_services: {accessible_services}")
+    logger.debug(
+        f"User {user_context['username']} ui_permissions: {user_context.get('ui_permissions', {})}"
     )
-    logger.info(
-        f"DEBUG: User {user_context['username']} ui_permissions: {user_context.get('ui_permissions', {})}"
-    )
-    logger.info(f"DEBUG: User {user_context['username']} scopes: {user_context.get('scopes', [])}")
+    logger.debug(f"User {user_context['username']} scopes: {user_context.get('scopes', [])}")
 
     for path in sorted_server_paths:
         server_info = all_servers[path]
@@ -620,6 +760,14 @@ async def get_servers_json(
             "behavior (active and beta shown; draft and deprecated excluded)."
         ),
     ),
+    metadata_fields: list[str] | None = Query(
+        None,
+        description=(
+            "Comma-separated metadata field paths to include (dot-notation for nested). "
+            "Example: 'owner,config.region'. Only the listed metadata fields are returned; "
+            "all other metadata keys are omitted. Omit to return full metadata."
+        ),
+    ),
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
 ):
     """Get servers data as JSON for React frontend and external API.
@@ -664,6 +812,9 @@ async def get_servers_json(
     service_data = []
     search_query = query.lower() if query else ""
 
+    # Parse and validate metadata_fields projection (Issue #1277)
+    _metadata_paths = parse_and_validate_metadata_fields(metadata_fields)
+
     # Determine if user has unrestricted access (no servers will be filtered out)
     is_admin = user_context.get("is_admin", False) if user_context else False
     accessible_servers_list = user_context.get("accessible_servers", []) if user_context else []
@@ -683,7 +834,10 @@ async def get_servers_json(
         # FAST PATH: DB-level pagination -- correct because no servers are filtered out
         # and no field filters need a full scan for accurate total_count
         all_servers, db_total = await server_service.get_servers_paginated(
-            skip=offset, limit=limit, exclude_tool_list=not include_tools
+            skip=offset,
+            limit=limit,
+            exclude_tool_list=not include_tools,
+            metadata_paths=_metadata_paths,
         )
     else:
         # FALLBACK PATH: full fetch needed
@@ -791,7 +945,7 @@ async def get_servers_json(
                     "health_status": normalized_status,
                     "last_checked_iso": health_data["last_checked_iso"],
                     "mcp_endpoint": server_info.get("mcp_endpoint"),
-                    "metadata": server_info.get("metadata", {}),
+                    "metadata": project_metadata(server_info.get("metadata", {}), _metadata_paths),
                     "version": current_version,
                     "versions": versions if len(versions) > 1 else None,
                     "default_version": current_version,
@@ -877,7 +1031,6 @@ async def toggle_service_route(
     _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """Toggle a service on/off (requires toggle_service UI permission)."""
-    from ..auth.dependencies import user_has_ui_permission_for_service
     from ..health.service import health_service
 
     if not service_path.startswith("/"):
@@ -890,9 +1043,7 @@ async def toggle_service_route(
     service_name = server_info["server_name"]
 
     # Check if user has toggle_service permission for this specific service
-    if not user_has_ui_permission_for_service(
-        "toggle_service", service_name, user_context.get("ui_permissions", {})
-    ):
+    if not user_has_asset_permission("server", "toggle", service_name, user_context):
         logger.warning(
             f"User {user_context['username']} attempted to toggle service {service_name} without toggle_service permission"
         )
@@ -1009,6 +1160,57 @@ def _normalize_server_path(path: str) -> str:
     return path
 
 
+def _build_provider_entry(
+    provider_organization: str | None,
+    provider_url: str | None,
+) -> dict[str, Any] | None:
+    """Build the nested provider object from the two provider form fields.
+
+    The pair is optional as a whole but meaningless half-filled: per the A2A
+    specification, and per ``AgentProvider``'s own required fields, a provider
+    that is present must carry both an organization and a URL.
+
+    A blank or whitespace-only field counts as absent. An HTML form submits an
+    empty string for a field the user left alone, so treating ``""`` as a value
+    would store a provider with an empty organization -- valid to Pydantic,
+    useless to a reader.
+
+    Args:
+        provider_organization: Raw ``provider_organization`` form field.
+        provider_url: Raw ``provider_url`` form field.
+
+    Returns:
+        The serialized provider object, or None when neither field was supplied
+        so the caller omits ``provider`` entirely.
+
+    Raises:
+        HTTPException: 400 naming the missing field when exactly one is given.
+            Building ``AgentProvider`` with a None field raises a Pydantic
+            ValidationError that no handler catches, which surfaces as a 500
+            with nothing to indicate which field was at fault (issue #1651).
+    """
+    from ..schemas.agent_models import AgentProvider
+
+    organization = (provider_organization or "").strip() or None
+    url = (provider_url or "").strip() or None
+
+    if organization is None and url is None:
+        return None
+
+    if organization is None or url is None:
+        missing = "provider_organization" if organization is None else "provider_url"
+        supplied = "provider_url" if organization is None else "provider_organization"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"'{missing}' is required when '{supplied}' is supplied. "
+                f"Provider organization and URL must be given together, or both left empty."
+            ),
+        )
+
+    return AgentProvider(organization=organization, url=url).model_dump()
+
+
 def _to_dt(value: Any) -> datetime | None:
     """Coerce a stored timestamp value into a datetime.
 
@@ -1035,58 +1237,35 @@ def _to_dt(value: Any) -> datetime | None:
     return None
 
 
-def _require_admin(user_context: dict | None) -> None:
-    """Reject the request unless the caller is an authenticated admin.
-
-    Mirrors the sibling ``_require_admin`` helpers in management_routes.py,
-    log_routes.py, etc. Used to gate scope/group mutation endpoints, which
-    have no finer-grained permission model and must be admin-only.
-
-    Args:
-        user_context: Authenticated user context (may be None if auth failed).
-
-    Raises:
-        HTTPException: 403 if the user is missing or not an admin.
-    """
-    if not user_context or not user_context.get("is_admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Administrator permissions are required for this operation",
-        )
-
-
 def _check_server_permission(
-    permission: str,
+    action: str,
     server_name: str,
     user_context: dict[str, Any],
 ) -> None:
-    """Check whether the user has the requested UI permission for a server.
+    """Check whether the user may perform ``action`` on a server.
 
-    Mirrors `_check_agent_permission` in agent_routes.py so PUT/PATCH on
-    servers behaves the same way as PUT/PATCH on agents.
+    Takes a logical ACTION (list/create/modify/delete/toggle/health_check) and
+    resolves it to the server scope via the canonical asset-permission map, so
+    the enforced scope is always the correct one for the server family. Mirrors
+    `_check_agent_permission` in agent_routes.py.
 
     Args:
-        permission: UI permission name (e.g., "modify_service").
-        server_name: Display name of the server, used for the 403 detail.
+        action: Logical server action (e.g. "modify", "toggle", "delete").
+        server_name: Display name of the server, used for the 403 detail and the
+            per-resource grant match.
         user_context: Authenticated user context.
 
     Raises:
         HTTPException: 403 if the user lacks the permission.
     """
-    from ..auth.dependencies import user_has_ui_permission_for_service
-
-    if not user_has_ui_permission_for_service(
-        permission,
-        server_name,
-        user_context.get("ui_permissions", {}),
-    ):
+    if not user_has_asset_permission("server", action, server_name, user_context):
         logger.warning(
-            f"User {user_context.get('username')} attempted to perform {permission} "
-            f"on server {server_name} without permission"
+            f"User {user_context.get('username')} attempted to {action} "
+            f"server {server_name} without permission"
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"You do not have permission to {permission} for {server_name}",
+            detail=f"You do not have permission to {action} server {server_name}",
         )
 
 
@@ -1242,6 +1421,7 @@ async def register_service(
     mcp_endpoint: Annotated[str | None, Form()] = None,
     sse_endpoint: Annotated[str | None, Form()] = None,
     metadata: Annotated[str | None, Form()] = None,
+    id: Annotated[str | None, Form()] = None,
     visibility: Annotated[str, Form()] = "public",
     allowed_groups: Annotated[str | None, Form()] = None,
     auth_scheme: Annotated[str, Form()] = "none",
@@ -1258,6 +1438,7 @@ async def register_service(
     oauth_client_id: Annotated[str | None, Form()] = None,
     append_mcp_path: Annotated[bool | None, Form()] = None,
     user_context: Annotated[dict, Depends(enhanced_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """Register a new service (requires register_service UI permission).
 
@@ -1342,11 +1523,24 @@ async def register_service(
 
     visibility, allowed_groups_list = _validate_visibility_and_groups(visibility, allowed_groups)
 
-    # Create server entry with auto-generated UUID
-    from uuid import uuid4
+    # Resolve caller-supplied id (or auto-generate). No Pydantic model guards
+    # this form route, so resolve_asset_id is the only id validation here —
+    # map its InvalidAssetIdError to 422 explicitly. The feature-flag gate raises
+    # CallerSuppliedIdDisabledError (a subclass), so it maps to 422 here too.
+    try:
+        check_caller_supplied_id_allowed(id, settings.allow_caller_supplied_asset_id)
+        resolved_id = resolve_asset_id(id)
+    except InvalidAssetIdError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid asset id: {e}",
+        )
+    if id is not None:
+        logger.info(f"Honoring caller-supplied id for server '{name}'")
+        ASSET_ID_SUPPLIED_TOTAL.labels(asset_type="server").inc()
 
     server_entry: dict[str, Any] = {
-        "id": str(uuid4()),
+        "id": resolved_id,
         "server_name": name,
         "description": description,
         "path": path,
@@ -1420,7 +1614,7 @@ async def register_service(
             try:
                 encrypt_credential_in_server_dict(server_entry)
             except Exception as e:
-                logger.error(f"Failed to encrypt credential: {e}")
+                logger.error(f"Failed to encrypt credential type={type(e).__name__}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Failed to encrypt credential",
@@ -1435,7 +1629,7 @@ async def register_service(
         try:
             encrypt_custom_headers_in_server_dict(server_entry)
         except Exception as e:
-            logger.error(f"Failed to encrypt custom headers: {e}")
+            logger.error(f"Failed to encrypt custom headers type={type(e).__name__}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to encrypt custom headers",
@@ -1454,14 +1648,11 @@ async def register_service(
     if effective_status:
         server_entry["status"] = effective_status
 
-    # Add provider information (stored as nested AgentProvider object)
-    if provider_organization or provider_url:
-        from ..schemas.agent_models import AgentProvider
-
-        server_entry["provider"] = AgentProvider(
-            organization=provider_organization,
-            url=provider_url,
-        ).model_dump()
+    # Add provider information (stored as nested AgentProvider object).
+    # A half-filled pair is rejected with a 400 naming the missing field.
+    provider_entry = _build_provider_entry(provider_organization, provider_url)
+    if provider_entry is not None:
+        server_entry["provider"] = provider_entry
 
     # Add source timestamps
     if source_created_at:
@@ -1507,7 +1698,7 @@ async def register_service(
             status_code=201,
             content={
                 "message": f"Service '{name}' version registered successfully",
-                "service": server_entry,
+                "service": strip_credentials_from_dict(server_entry),
                 "is_new_version": True,
                 "existing_version": result.get("existing_version"),
             },
@@ -1544,7 +1735,7 @@ async def register_service(
         send_registration_webhook(
             event_type="registration",
             registration_type="server",
-            card_data=server_entry,
+            card_data=strip_credentials_from_dict(server_entry),
             performed_by=user_context["username"],
         )
     )
@@ -1557,7 +1748,7 @@ async def register_service(
         status_code=201,
         content={
             "message": "Service registered successfully",
-            "service": server_entry,
+            "service": strip_credentials_from_dict(server_entry),
         },
     )
 
@@ -1587,26 +1778,25 @@ async def internal_register_service(
     allowed_groups: Annotated[str | None, Form()] = None,
 ):
     """Internal service registration endpoint for mcpgw-server (requires admin authentication)."""
-    logger.warning(
-        "INTERNAL REGISTER: Function called - starting execution"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL REGISTER: Function called - starting execution")
 
     from ..health.service import health_service
 
-    logger.warning(
-        f"INTERNAL REGISTER: Request parameters - name={name}, path={path}, proxy_pass_url={proxy_pass_url}"
-    )  # TODO: replace with debug
+    logger.debug(
+        f"INTERNAL REGISTER: Request parameters - name={name}, path={path}, "
+        f"proxy_pass_url={redact_url(proxy_pass_url)}"
+    )
 
     logger.info(f"Internal service registration request from caller '{caller}'")
 
     # Validate path format
     if not path.startswith("/"):
         path = "/" + path
-    logger.warning(f"INTERNAL REGISTER: Validated path: {path}")  # TODO: replace with debug
+    logger.debug(f"INTERNAL REGISTER: Validated path: {path}")
 
     # Process tags
     tag_list = [tag.strip() for tag in tags.split(",") if tag.strip()] if tags else []
-    logger.warning(f"INTERNAL REGISTER: Processed tags: {tag_list}")  # TODO: replace with debug
+    logger.debug(f"INTERNAL REGISTER: Processed tags: {tag_list}")
 
     # Process supported_transports
     if supported_transports:
@@ -1630,7 +1820,9 @@ async def internal_register_service(
         try:
             headers_list = json.loads(headers) if isinstance(headers, str) else headers
         except Exception as e:
-            logger.warning(f"INTERNAL REGISTER: Failed to parse headers: {e}")
+            logger.warning(
+                f"INTERNAL REGISTER: Failed to parse headers type={type(e).__name__}",
+            )
 
     # Process tool_list
     tool_list = []
@@ -1670,7 +1862,7 @@ async def internal_register_service(
     # Create server entry with auto-generated UUID
     from uuid import uuid4
 
-    server_entry = {
+    server_entry: dict[str, Any] = {
         "id": str(uuid4()),
         "server_name": name,
         "description": description,
@@ -1727,7 +1919,7 @@ async def internal_register_service(
         try:
             encrypt_credential_in_server_dict(server_entry)
         except ValueError as e:
-            logger.error(f"Credential encryption failed for server {path}: {e}")
+            logger.error(f"Credential encryption failed type={type(e).__name__}")
             return JSONResponse(
                 status_code=500,
                 content={
@@ -1744,25 +1936,19 @@ async def internal_register_service(
         try:
             encrypt_custom_headers_in_server_dict(server_entry)
         except Exception as e:
-            logger.error(f"Failed to encrypt custom headers: {e}")
+            logger.error(f"Failed to encrypt custom headers type={type(e).__name__}")
             return JSONResponse(
                 status_code=500,
                 content={"error": "Failed to encrypt custom headers"},
             )
 
-    logger.warning(
-        f"INTERNAL REGISTER: Created server entry for path: {path}"
-    )  # TODO: replace with debug
-    logger.warning(
-        f"INTERNAL REGISTER: Overwrite parameter: {overwrite}"
-    )  # TODO: replace with debug
+    logger.debug(f"INTERNAL REGISTER: Created server entry for path: {path}")
+    logger.debug(f"INTERNAL REGISTER: Overwrite parameter: {overwrite}")
 
     # Check if server exists and handle overwrite logic
     existing_server = await server_service.get_server_info(path)
     if existing_server and not overwrite:
-        logger.warning(
-            f"INTERNAL REGISTER: Server exists and overwrite=False for path {path}"
-        )  # TODO: replace with debug
+        logger.debug(f"INTERNAL REGISTER: Server exists and overwrite=False for path {path}")
         return JSONResponse(
             status_code=409,  # Conflict status code for existing resource
             content={
@@ -1773,13 +1959,9 @@ async def internal_register_service(
         )
 
     # Register the server (this will overwrite if server exists and overwrite=True)
-    logger.warning(
-        "INTERNAL REGISTER: Calling server_service.register_server"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL REGISTER: Calling server_service.register_server")
     if existing_server and overwrite:
-        logger.warning(
-            f"INTERNAL REGISTER: Overwriting existing server at path {path}"
-        )  # TODO: replace with debug
+        logger.debug(f"INTERNAL REGISTER: Overwriting existing server at path {path}")
         success = await server_service.update_server(path, server_entry)
         is_new_version = False
     else:
@@ -1800,9 +1982,7 @@ async def internal_register_service(
             },
         )
 
-    logger.warning(
-        "INTERNAL REGISTER: Auto-enabling newly registered server"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL REGISTER: Auto-enabling newly registered server")
 
     # Automatically enable the newly registered server before search indexing
     try:
@@ -1815,9 +1995,7 @@ async def internal_register_service(
         logger.error(f"Error auto-enabling server {path}: {e}")
         # Non-fatal error - server is registered but not enabled
 
-    logger.warning(
-        "INTERNAL REGISTER: Server registered successfully, updating search index"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL REGISTER: Server registered successfully, updating search index")
 
     # Index in DocumentDB search with current enabled state (should be True after auto-enable)
     is_enabled = await server_service.is_service_enabled(path)
@@ -1834,14 +2012,12 @@ async def internal_register_service(
 
     nginx_reload_scheduler.mark_dirty()
 
-    logger.warning(
-        "INTERNAL REGISTER: Broadcasting health status update"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL REGISTER: Broadcasting health status update")
 
     # Broadcast health status update to WebSocket clients
     await health_service.broadcast_health_update(path)
 
-    logger.warning("INTERNAL REGISTER: Updating scopes for new server")  # TODO: replace with debug
+    logger.debug("INTERNAL REGISTER: Updating scopes for new server")
 
     # Update scopes with the new server's tools
     from ..services.scope_service import update_server_scopes
@@ -1867,9 +2043,7 @@ async def internal_register_service(
         _perform_security_scan_on_registration(path, proxy_pass_url, server_entry, headers_list)
     )
 
-    logger.warning(
-        "INTERNAL REGISTER: Registration complete, returning success response"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL REGISTER: Registration complete, returning success response")
     logger.info(
         f"New service registered via internal endpoint: '{name}' at path '{path}' by caller '{caller}'"
     )
@@ -1878,7 +2052,7 @@ async def internal_register_service(
         status_code=201,
         content={
             "message": "Service registered successfully",
-            "service": server_entry,
+            "service": strip_credentials_from_dict(server_entry),
         },
     )
 
@@ -1956,9 +2130,7 @@ async def internal_remove_service(
     """Internal service removal endpoint for mcpgw-server (requires admin authentication)."""
     from ..health.service import health_service
 
-    logger.warning(
-        "INTERNAL REMOVE: Function called - starting execution"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL REMOVE: Function called - starting execution")
 
     logger.info(
         f"Internal service removal request from caller '{caller}' for service '{service_path}'"
@@ -1968,16 +2140,12 @@ async def internal_remove_service(
     if not service_path.startswith("/"):
         service_path = "/" + service_path
 
-    logger.warning(
-        f"INTERNAL REMOVE: Normalized service path: {service_path}"
-    )  # TODO: replace with debug
+    logger.debug(f"INTERNAL REMOVE: Normalized service path: {service_path}")
 
     # Check if server exists
     server_info = await server_service.get_server_info(service_path)
     if not server_info:
-        logger.warning(
-            f"INTERNAL REMOVE: Service not found at path '{service_path}'"
-        )  # TODO: replace with debug
+        logger.debug(f"INTERNAL REMOVE: Service not found at path '{service_path}'")
         return JSONResponse(
             status_code=404,
             content={
@@ -1987,17 +2155,13 @@ async def internal_remove_service(
             },
         )
 
-    logger.warning(
-        "INTERNAL REMOVE: Service found, proceeding with removal"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL REMOVE: Service found, proceeding with removal")
 
     # Remove the server
     success = await server_service.remove_server(service_path)
 
     if not success:
-        logger.warning(
-            f"INTERNAL REMOVE: Failed to remove service at path '{service_path}'"
-        )  # TODO: replace with debug
+        logger.debug(f"INTERNAL REMOVE: Failed to remove service at path '{service_path}'")
         return JSONResponse(
             status_code=500,
             content={
@@ -2007,9 +2171,7 @@ async def internal_remove_service(
             },
         )
 
-    logger.warning(
-        "INTERNAL REMOVE: Service removed successfully, updating search index"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL REMOVE: Service removed successfully, updating search index")
 
     # Remove from DocumentDB search index
     try:
@@ -2020,7 +2182,7 @@ async def internal_remove_service(
     except Exception as e:
         logger.warning(f"Failed to remove search index for {service_path}: {e}")
 
-    logger.warning("INTERNAL REMOVE: Regenerating Nginx configuration")  # TODO: replace with debug
+    logger.debug("INTERNAL REMOVE: Regenerating Nginx configuration")
 
     # Flush nginx config immediately (delete must take effect before response)
     from ..core.nginx_service import nginx_reload_scheduler
@@ -2028,12 +2190,12 @@ async def internal_remove_service(
     nginx_reload_scheduler.mark_dirty()
     await nginx_reload_scheduler.flush_now()
 
-    logger.warning("INTERNAL REMOVE: Broadcasting health status update")  # TODO: replace with debug
+    logger.debug("INTERNAL REMOVE: Broadcasting health status update")
 
     # Broadcast health status update to WebSocket clients
     await health_service.broadcast_health_update(service_path)
 
-    logger.warning("INTERNAL REMOVE: Removing server from scopes")  # TODO: replace with debug
+    logger.debug("INTERNAL REMOVE: Removing server from scopes")
 
     # Remove server from scopes and reload auth server
     from ..services.scope_service import remove_server_scopes
@@ -2045,9 +2207,7 @@ async def internal_remove_service(
         logger.error(f"Failed to remove server {service_path} from scopes: {e}")
         # Non-fatal error - server is removed but scopes not updated
 
-    logger.warning(
-        "INTERNAL REMOVE: Removal complete, returning success response"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL REMOVE: Removal complete, returning success response")
     logger.info(f"Service removed via internal endpoint: '{service_path}' by caller '{caller}'")
 
     return JSONResponse(
@@ -2068,9 +2228,7 @@ async def internal_toggle_service(
     """Internal service toggle endpoint for mcpgw-server (requires admin authentication)."""
     from ..health.service import health_service
 
-    logger.warning(
-        "INTERNAL TOGGLE: Function called - starting execution"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL TOGGLE: Function called - starting execution")
 
     # Ensure service_path starts with /
     if not service_path.startswith("/"):
@@ -2079,9 +2237,7 @@ async def internal_toggle_service(
     # Check if server exists
     server_info = await server_service.get_server_info(service_path)
     if not server_info:
-        logger.warning(
-            f"INTERNAL TOGGLE: Service not found at path '{service_path}'"
-        )  # TODO: replace with debug
+        logger.debug(f"INTERNAL TOGGLE: Service not found at path '{service_path}'")
         return JSONResponse(
             status_code=404,
             content={
@@ -2091,9 +2247,7 @@ async def internal_toggle_service(
             },
         )
 
-    logger.warning(
-        "INTERNAL TOGGLE: Service found, proceeding with toggle"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL TOGGLE: Service found, proceeding with toggle")
 
     # Get current state and toggle it
     current_state = await server_service.is_service_enabled(service_path)
@@ -2101,9 +2255,7 @@ async def internal_toggle_service(
     success = await server_service.toggle_service(service_path, new_state)
 
     if not success:
-        logger.warning(
-            f"INTERNAL TOGGLE: Failed to toggle service at path '{service_path}'"
-        )  # TODO: replace with debug
+        logger.debug(f"INTERNAL TOGGLE: Failed to toggle service at path '{service_path}'")
         return JSONResponse(
             status_code=500,
             content={
@@ -2153,9 +2305,7 @@ async def internal_toggle_service(
     # Broadcast health status update to WebSocket clients
     await health_service.broadcast_health_update(service_path)
 
-    logger.warning(
-        "INTERNAL TOGGLE: Toggle complete, returning success response"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL TOGGLE: Toggle complete, returning success response")
     return JSONResponse(
         status_code=200,
         content={
@@ -2177,9 +2327,7 @@ async def internal_healthcheck(
     """Internal health check endpoint for mcpgw-server (requires admin authentication)."""
     from ..health.service import health_service
 
-    logger.warning(
-        "INTERNAL HEALTHCHECK: Function called - starting execution"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL HEALTHCHECK: Function called - starting execution")
 
     logger.info(f"Internal healthcheck request from caller '{caller}'")
 
@@ -2202,7 +2350,6 @@ async def edit_server_form(
     user_context: Annotated[dict, Depends(enhanced_auth)],
 ):
     """Show edit form for a service (requires modify_service UI permission)."""
-    from ..auth.dependencies import user_has_ui_permission_for_service
 
     if not service_path.startswith("/"):
         service_path = "/" + service_path
@@ -2214,9 +2361,7 @@ async def edit_server_form(
     service_name = server_info["server_name"]
 
     # Check if user has modify_service permission for this specific service
-    if not user_has_ui_permission_for_service(
-        "modify_service", service_name, user_context.get("ui_permissions", {})
-    ):
+    if not user_has_asset_permission("server", "modify", service_name, user_context):
         logger.warning(
             f"User {user_context['username']} attempted to access edit form for {service_name} without modify_service permission"
         )
@@ -2288,7 +2433,6 @@ async def edit_server_submit(
     require admin privileges, mirroring the registration gate. If `deployment`
     is omitted, the existing server's deployment is preserved.
     """
-    from ..auth.dependencies import user_has_ui_permission_for_service
     from ..utils.local_runtime_validation import (
         add_unpinned_warning_tag,
         parse_and_validate_local_runtime,
@@ -2343,9 +2487,7 @@ async def edit_server_submit(
             )
     else:
         # Remote edit — standard modify_service permission check.
-        if not user_has_ui_permission_for_service(
-            "modify_service", service_name, user_context.get("ui_permissions", {})
-        ):
+        if not user_has_asset_permission("server", "modify", service_name, user_context):
             logger.warning(
                 f"User {user_context['username']} attempted to edit service "
                 f"{service_name} without modify_service permission"
@@ -2506,7 +2648,7 @@ async def edit_server_submit(
             try:
                 encrypt_credential_in_server_dict(updated_server_entry)
             except Exception as e:
-                logger.error(f"Failed to encrypt credential: {e}")
+                logger.error(f"Failed to encrypt credential type={type(e).__name__}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Failed to encrypt credential",
@@ -2567,7 +2709,9 @@ async def edit_server_submit(
             try:
                 encrypt_custom_headers_in_server_dict(updated_server_entry)
             except Exception as e:
-                logger.error(f"Failed to encrypt custom headers on edit: {e}")
+                logger.error(
+                    f"Failed to encrypt custom headers on edit type={type(e).__name__}",
+                )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Failed to encrypt custom headers",
@@ -2624,7 +2768,16 @@ async def token_generation_page(
 
 @router.get("/server_details/{service_path:path}")
 async def get_server_details(
-    request: Request, service_path: str, user_context: Annotated[dict, Depends(enhanced_auth)]
+    request: Request,
+    service_path: str,
+    user_context: Annotated[dict, Depends(enhanced_auth)],
+    metadata_fields: list[str] | None = Query(
+        None,
+        description=(
+            "Comma-separated metadata field paths to include (dot-notation for nested). "
+            "Example: 'owner,config.region'. Omit to return full metadata."
+        ),
+    ),
 ):
     """Get server details by path, or all servers if path is 'all' (filtered by permissions)."""
     # Normalize the path to ensure it starts with '/'
@@ -2679,6 +2832,17 @@ async def get_server_details(
     # Redaction decision is per-request; compute once so both the local
     # early-return and the multi-version return path apply it.
     redact_backend = should_redact_backend_urls(user_context)
+
+    # Prune the tool_list to what this caller may see, matching the list
+    # endpoint (GET /servers) and the tool catalog. A caller with server
+    # access but a restricted tool set must not see tool names outside that
+    # set. filter_tools_for_user fails closed and passes through admin/wildcard.
+    _apply_tool_visibility(server_info, service_path, user_context, endpoint="server_details")
+
+    # Apply metadata projection if requested (Issue #1277)
+    _metadata_paths = parse_and_validate_metadata_fields(metadata_fields)
+    if _metadata_paths is not None:
+        server_info["metadata"] = project_metadata(server_info.get("metadata"), _metadata_paths)
 
     # Local (stdio) servers don't support multi-version routing — early-return
     # avoids guarding the synthesis block below. _build_versions_list() also
@@ -2846,7 +3010,7 @@ async def get_service_tools(
     if not proxy_pass_url:
         raise HTTPException(status_code=500, detail="Service has no proxy URL configured")
 
-    logger.info(f"Fetching live tools for {service_path} from {proxy_pass_url}")
+    logger.info(f"Fetching live tools for {service_path} from {redact_url(proxy_pass_url)}")
 
     try:
         # Call MCP client to fetch fresh tools using server configuration
@@ -2940,9 +3104,12 @@ async def get_service_tools(
 
 
 @router.post("/refresh/{service_path:path}")
-async def refresh_service(service_path: str, user_context: Annotated[dict, Depends(enhanced_auth)]):
+async def refresh_service(
+    service_path: str,
+    user_context: Annotated[dict, Depends(enhanced_auth)],
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
+):
     """Refresh service health and tool information (requires health_check_service permission)."""
-    from ..auth.dependencies import user_has_ui_permission_for_service
     from ..health.service import health_service
 
     if not service_path.startswith("/"):
@@ -2955,9 +3122,7 @@ async def refresh_service(service_path: str, user_context: Annotated[dict, Depen
     service_name = server_info["server_name"]
 
     # Check if user has health_check_service permission for this specific service
-    if not user_has_ui_permission_for_service(
-        "health_check_service", service_name, user_context.get("ui_permissions", {})
-    ):
+    if not user_has_asset_permission("server", "health_check", service_name, user_context):
         logger.warning(
             f"User {user_context['username']} attempted to refresh service {service_name} without health_check_service permission"
         )
@@ -3001,7 +3166,8 @@ async def refresh_service(service_path: str, user_context: Annotated[dict, Depen
         raise HTTPException(status_code=500, detail="Service has no proxy URL configured")
 
     logger.info(
-        f"Refreshing service {service_path} at {proxy_pass_url} by user '{user_context['username']}'"
+        f"Refreshing service {service_path} at {redact_url(proxy_pass_url)} "
+        f"by user '{user_context['username']}'"
     )
 
     try:
@@ -3186,16 +3352,14 @@ async def internal_list_services(
     caller: Annotated[str, Depends(validate_internal_auth)],
 ):
     """Internal service listing endpoint for mcpgw-server (requires admin authentication)."""
-    logger.warning(
-        "INTERNAL LIST: Function called - starting execution"
-    )  # TODO: replace with debug
+    logger.debug("INTERNAL LIST: Function called - starting execution")
 
     logger.info(f"Internal service list request from caller '{caller}'")
 
     # Get all servers (admin access - no permission filtering)
     all_servers = await server_service.get_all_servers()
 
-    logger.warning(f"INTERNAL LIST: Found {len(all_servers)} servers")  # TODO: replace with debug
+    logger.debug(f"INTERNAL LIST: Found {len(all_servers)} servers")
 
     # Transform the data to include enabled status and health information
     services = []
@@ -3226,7 +3390,7 @@ async def internal_list_services(
         }
         services.append(service_data)
 
-    logger.warning(f"INTERNAL LIST: Returning {len(services)} services")  # TODO: replace with debug
+    logger.debug(f"INTERNAL LIST: Returning {len(services)} services")
     logger.info(
         f"Internal service list completed for caller '{caller}' - returned {len(services)} services"
     )
@@ -3354,7 +3518,9 @@ async def internal_list_groups(
 
 @router.post("/tokens/generate")
 async def generate_user_token(
-    request: Request, user_context: Annotated[dict, Depends(enhanced_auth)]
+    request: Request,
+    user_context: Annotated[dict, Depends(enhanced_auth)],
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Generate a JWT token for the authenticated user.
@@ -3381,15 +3547,23 @@ async def generate_user_token(
             raise HTTPException(status_code=400, detail="Invalid JSON in request body")
 
         requested_scopes = body.get("requested_scopes", [])
-        expires_in_hours = body.get("expires_in_hours", 8)
+        # Omitted lifetime falls back to the configured default (MCP_TOKEN_DEFAULT_TTL_HOURS).
+        expires_in_hours = body.get("expires_in_hours", settings.mcp_token_default_ttl_hours)
         description = body.get("description", "")
         resource = body.get("resource")
 
-        # Validate expires_in_hours
-        if not isinstance(expires_in_hours, int) or expires_in_hours <= 0 or expires_in_hours > 24:
+        # Validate expires_in_hours against the configured maximum
+        # (MCP_TOKEN_MAX_TTL_HOURS; itself bounded to a 7-day ceiling by settings).
+        max_ttl_hours = settings.mcp_token_max_ttl_hours
+        if (
+            not isinstance(expires_in_hours, int)
+            or isinstance(expires_in_hours, bool)
+            or expires_in_hours <= 0
+            or expires_in_hours > max_ttl_hours
+        ):
             raise HTTPException(
                 status_code=400,
-                detail="expires_in_hours must be an integer between 1 and 24",
+                detail=f"expires_in_hours must be an integer between 1 and {max_ttl_hours}",
             )
 
         # Validate requested_scopes
@@ -3532,11 +3706,17 @@ async def generate_user_token(
                 "groups": user_context["groups"],
                 "provider": user_context.get("provider", session_data.get("provider")),
                 "auth_method": user_context.get("auth_method", session_data.get("auth_method")),
+                # Forward the opaque server-side session id so the auth server can
+                # reconcile the minted groups/scopes against the authoritative
+                # session record rather than trusting the body. Omitted (None) for
+                # non-session-backed callers, in which case the auth server uses
+                # the supplied context as-is.
+                "session_id": user_context.get("session_id"),
             },
             "requested_scopes": requested_scopes,
             "expires_in_hours": expires_in_hours,
             "description": description,
-            "correlation_id": request.headers.get("X-Correlation-ID"),
+            "correlation_id": sanitize_correlation_id(request.headers.get("X-Correlation-ID")),
         }
 
         if resource is not None:
@@ -3683,25 +3863,17 @@ async def generate_user_token(
                     )
 
                 return formatted_response
-            else:
-                error_detail = "Unknown error"
-                try:
-                    error_response = response.json()
-                    error_detail = error_response.get("detail", "Unknown error")
-                except:
-                    error_detail = response.text
-
-                logger.warning(f"Auth server returned error {response.status_code}: {error_detail}")
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Token generation failed: {error_detail}",
-                )
+            logger.warning(f"Auth server token request failed status={response.status_code}")
+            raise HTTPException(
+                status_code=response.status_code,
+                detail="Token generation failed",
+            )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(
-            f"Unexpected error generating token for user '{user_context['username']}': {e}"
+            f"Unexpected token generation failure user={user_context['username']} type={type(e).__name__}",
         )
         raise HTTPException(status_code=500, detail="Internal error generating token")
 
@@ -3749,6 +3921,7 @@ async def register_service_api(
     mcp_endpoint: Annotated[str | None, Form()] = None,
     sse_endpoint: Annotated[str | None, Form()] = None,
     metadata: Annotated[str | None, Form()] = None,
+    id: Annotated[str | None, Form()] = None,
     version: Annotated[str | None, Form()] = None,
     status: Annotated[str | None, Form()] = None,
     provider_organization: Annotated[str | None, Form()] = None,
@@ -3762,6 +3935,7 @@ async def register_service_api(
     allowed_groups: Annotated[str | None, Form()] = None,
     oauth_client_id: Annotated[str | None, Form()] = None,
     append_mcp_path: Annotated[bool | None, Form()] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """Register a service via JWT Bearer Token authentication (External API).
 
@@ -3909,7 +4083,9 @@ async def register_service_api(
         try:
             headers_list = json.loads(headers) if isinstance(headers, str) else headers
         except Exception as e:
-            logger.warning(f"SERVERS REGISTER: Failed to parse headers: {e}")
+            logger.warning(
+                f"SERVERS REGISTER: Failed to parse headers type={type(e).__name__}",
+            )
 
     # Process tool_list
     tool_list = []
@@ -3937,11 +4113,24 @@ async def register_service_api(
         if "security-pending-local" not in tag_list:
             tag_list.append("security-pending-local")
 
-    # Create server entry with auto-generated UUID
-    from uuid import uuid4
+    # Resolve caller-supplied id (or auto-generate). Like the /register form
+    # route, this JSON route has no Pydantic model guarding it, so
+    # resolve_asset_id is the only id validation -- map InvalidAssetIdError to 422.
+    # The feature-flag gate raises a subclass, so it maps to 422 here too.
+    try:
+        check_caller_supplied_id_allowed(id, settings.allow_caller_supplied_asset_id)
+        resolved_id = resolve_asset_id(id)
+    except InvalidAssetIdError as e:
+        raise HTTPException(
+            status_code=fastapi_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid asset id: {e}",
+        )
+    if id is not None:
+        logger.info(f"Honoring caller-supplied id for server '{name}'")
+        ASSET_ID_SUPPLIED_TOTAL.labels(asset_type="server").inc()
 
     server_entry: dict[str, Any] = {
-        "id": str(uuid4()),
+        "id": resolved_id,
         "server_name": name,
         "description": description,
         "path": path,
@@ -4009,14 +4198,11 @@ async def register_service_api(
     if effective_status:
         server_entry["status"] = effective_status
 
-    # Add provider information
-    if provider_organization or provider_url:
-        from ..schemas.agent_models import AgentProvider
-
-        server_entry["provider"] = AgentProvider(
-            organization=provider_organization,
-            url=provider_url,
-        ).model_dump()
+    # Add provider information. A half-filled pair is rejected with a 400
+    # naming the missing field.
+    provider_entry = _build_provider_entry(provider_organization, provider_url)
+    if provider_entry is not None:
+        server_entry["provider"] = provider_entry
 
     # Add source timestamps
     if source_created_at:
@@ -4065,7 +4251,7 @@ async def register_service_api(
         try:
             encrypt_credential_in_server_dict(server_entry)
         except ValueError as e:
-            logger.error(f"Credential encryption failed for server {path}: {e}")
+            logger.error(f"Credential encryption failed type={type(e).__name__}")
             return JSONResponse(
                 status_code=500,
                 content={
@@ -4082,7 +4268,7 @@ async def register_service_api(
         try:
             encrypt_custom_headers_in_server_dict(server_entry)
         except Exception as e:
-            logger.error(f"Failed to encrypt custom headers: {e}")
+            logger.error(f"Failed to encrypt custom headers type={type(e).__name__}")
             return JSONResponse(
                 status_code=500,
                 content={"error": "Failed to encrypt custom headers"},
@@ -4195,7 +4381,7 @@ async def register_service_api(
             send_registration_webhook(
                 event_type="registration",
                 registration_type="server",
-                card_data=server_entry,
+                card_data=strip_credentials_from_dict(server_entry),
                 performed_by=user_context.get("username"),
             )
         )
@@ -4210,7 +4396,7 @@ async def register_service_api(
         )
 
     except Exception as e:
-        logger.error(f"Service registration failed for {path}: {e}", exc_info=True)
+        logger.error(f"Service registration failed type={type(e).__name__}")
         raise HTTPException(status_code=500, detail="Service registration failed")
 
 
@@ -4220,6 +4406,7 @@ async def update_server_auth_credential(
     server_path: str,
     body: AuthCredentialUpdateRequest,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Update the authentication credential for a registered server.
@@ -4267,7 +4454,7 @@ async def update_server_auth_credential(
     # require the same modify_service permission as PUT/PATCH /servers/{path}.
     # nginx_proxied_auth only authenticates; it does not authorize.
     _check_server_permission(
-        "modify_service",
+        "modify",
         existing_server.get("server_name", server_path),
         user_context,
     )
@@ -4331,7 +4518,7 @@ async def update_server_auth_credential(
         try:
             encrypt_credential_in_server_dict(existing_server)
         except ValueError as e:
-            logger.error(f"Credential encryption failed for server {server_path}: {e}")
+            logger.error(f"Credential encryption failed type={type(e).__name__}")
             return JSONResponse(
                 status_code=500,
                 content={
@@ -4372,6 +4559,7 @@ async def toggle_service_api(
     path: Annotated[str, Form()],
     new_state: Annotated[bool, Form()],
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Toggle a service's enabled/disabled state via JWT authentication (External API).
@@ -4420,13 +4608,10 @@ async def toggle_service_api(
     # Authorization: mirror the legacy UI toggle route (toggle_service_route).
     # Require the toggle_service UI permission for this service, then a
     # per-server access check for non-admin callers.
-    from ..auth.dependencies import user_has_ui_permission_for_service
 
     service_name = server_info["server_name"]
 
-    if not user_has_ui_permission_for_service(
-        "toggle_service", service_name, user_context.get("ui_permissions", {})
-    ):
+    if not user_has_asset_permission("server", "toggle", service_name, user_context):
         logger.warning(
             f"User '{user_context.get('username')}' attempted to toggle "
             f"'{service_name}' without toggle_service permission"
@@ -4512,6 +4697,7 @@ async def remove_service_api(
     request: Request,
     path: Annotated[str, Form()],
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Remove a service via JWT Bearer Token authentication (External API).
@@ -4586,12 +4772,8 @@ async def remove_service_api(
     # not the URL path token, so the trust key is consistent and cannot be satisfied by
     # a delete_service grant for a raw path string that differs from the server_name.
     if not user_context.get("is_admin", False):
-        from ..auth.dependencies import user_has_ui_permission_for_service
-
         service_name = server_info["server_name"]
-        if not user_has_ui_permission_for_service(
-            "delete_service", service_name, user_context.get("ui_permissions", {})
-        ):
+        if not user_has_asset_permission("server", "delete", service_name, user_context):
             logger.warning(
                 f"User {user_context.get('username')} denied delete for server "
                 f"'{service_name}' ({path})"
@@ -4601,6 +4783,26 @@ async def remove_service_api(
                 content={
                     "error": "Permission denied",
                     "reason": f"User does not have delete_service permission for '{service_name}'",
+                },
+            )
+
+        # Ownership guard: deleting a server tears down its routing and scopes,
+        # so only the original owner (registered_by) or an admin may do it --
+        # matching PUT /servers/{path} and PATCH .../auth-credential. Permission
+        # AND ownership are both required (defense in depth) so the whole
+        # mutation family is consistent; a delete_service grant alone is not
+        # sufficient. Fails closed when ownership cannot be established
+        # (missing registered_by -> deny for a non-admin).
+        if server_info.get("registered_by") != user_context.get("username"):
+            logger.warning(
+                f"User {user_context.get('username')} attempted to delete server "
+                f"'{service_name}' ({path}) owned by {server_info.get('registered_by')}"
+            )
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "Not authorized",
+                    "reason": "You can only delete servers you registered",
                 },
             )
 
@@ -4650,7 +4852,7 @@ async def remove_service_api(
         send_registration_webhook(
             event_type="deletion",
             registration_type="server",
-            card_data=server_info,
+            card_data=strip_credentials_from_dict(server_info),
             performed_by=user_context.get("username"),
         )
     )
@@ -4712,6 +4914,7 @@ async def add_server_to_groups_api(
     server_name: Annotated[str, Form()],
     group_names: Annotated[str, Form()],
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Add a service to scope groups via JWT authentication (External API).
@@ -4754,6 +4957,7 @@ async def remove_server_from_groups_api(
     server_name: Annotated[str, Form()],
     group_names: Annotated[str, Form()],
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Remove a service from scope groups via JWT authentication (External API).
@@ -4870,6 +5074,7 @@ async def create_group_api(
     description: Annotated[str, Form()] = "",
     create_in_idp: Annotated[bool, Form()] = False,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Create a new scope group via JWT authentication (External API).
@@ -5001,6 +5206,7 @@ async def delete_group_api(
     delete_from_keycloak: Annotated[bool, Form()] = True,
     force: Annotated[bool, Form()] = False,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Delete a scope group via JWT authentication (External API).
@@ -5151,6 +5357,7 @@ async def get_group_api(
 async def import_group_definition(
     request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Import a complete group definition via JSON (External API).
@@ -5324,6 +5531,7 @@ async def rate_server(
     path: str,
     rating_request: RatingRequest,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """Save integer ratings to server."""
     # Set audit action for server rating
@@ -5490,6 +5698,7 @@ async def get_server_security_scan(
 async def rescan_server(
     path: str,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Trigger a manual security scan for a server.
@@ -5543,9 +5752,10 @@ async def rescan_server(
     headers_json = _build_scan_headers_from_credentials(server_info)
 
     logger.info(
-        f"Manual security scan requested by user '{user_context.get('username')}' "
-        f"for server '{path}' at URL '{server_url}'"
+        f"Manual security scan requested by user={user_context.get('username')} server={path} endpoint={redact_url(server_url)}",
     )
+
+    from ..exceptions import UrlValidationError
 
     try:
         # Trigger security scan
@@ -5574,8 +5784,17 @@ async def rescan_server(
             "error_message": scan_result.error_message,
             "raw_output": scan_result.raw_output,
         }
+    except UrlValidationError as e:
+        # The server endpoint is not a permitted scan target (e.g. it resolves to a
+        # private/metadata address and is not allowlisted). That is a client/config
+        # condition, not a server error -- surface it as 400, not 500.
+        logger.warning(f"Manual security scan blocked by URL validation type={type(e).__name__}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Server endpoint is not a permitted scan target",
+        )
     except Exception as e:
-        logger.exception(f"Failed to scan server '{path}': {e}")
+        logger.error(f"Manual security scan failed type={type(e).__name__}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to scan server",
@@ -5636,6 +5855,7 @@ async def remove_server_version(
     service_path: str,
     version: str,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Remove a version from a server.
@@ -5656,7 +5876,7 @@ async def remove_server_version(
     if not existing_server:
         raise HTTPException(status_code=404, detail="Service path not registered")
     _check_server_permission(
-        "modify_service",
+        "modify",
         existing_server.get("server_name", decoded_path),
         user_context,
     )
@@ -5701,6 +5921,7 @@ async def set_default_version(
     service_path: str,
     version_data: SetDefaultVersion,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Set the default (latest) version for a server.
@@ -5721,7 +5942,7 @@ async def set_default_version(
     if not existing_server:
         raise HTTPException(status_code=404, detail="Service path not registered")
     _check_server_permission(
-        "modify_service",
+        "modify",
         existing_server.get("server_name", decoded_path),
         user_context,
     )
@@ -5877,6 +6098,11 @@ async def get_server_connect_config(
     # emit --callback-port and the IDE stops using a random port the IdP rejects.
     callback_port = settings.ide_oauth_callback_port or None
 
+    # Optional scope for the Claude Code Connect snippet (local|project|user).
+    # Empty (default) => the frontend omits --scope, keeping Claude Code's own
+    # default. Only affects the displayed Claude Code command.
+    connect_scope = settings.ide_connect_scope or None
+
     return {
         "path": service_path,
         "server_name": server_info.get("server_name"),
@@ -5885,6 +6111,7 @@ async def get_server_connect_config(
         "custom_headers": custom_headers,
         "oauth_client_id": oauth_client_id,
         "oauth_callback_port": callback_port,
+        "connect_scope": connect_scope,
         "append_mcp_path": server_info.get("append_mcp_path"),
         # Per-user egress credential vault mode. When "oauth_user", the gateway
         # injects the user's vaulted upstream token on egress, so the Connect
@@ -5906,6 +6133,7 @@ async def update_server_endpoint(
     response: Response,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """Replace a registered server's mutable metadata.
 
@@ -5952,7 +6180,7 @@ async def update_server_endpoint(
         )
 
     _check_server_permission(
-        "modify_service",
+        "modify",
         existing.get("server_name", path),
         user_context,
     )
@@ -6080,6 +6308,7 @@ async def patch_server_endpoint(
     response: Response,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """Apply an RFC 7396 JSON Merge Patch to a server's metadata.
 
@@ -6125,7 +6354,7 @@ async def patch_server_endpoint(
         )
 
     _check_server_permission(
-        "modify_service",
+        "modify",
         existing.get("server_name", path),
         user_context,
     )
@@ -6311,10 +6540,20 @@ async def get_server(
                 detail="You do not have access to this server",
             )
 
+    # Defense in depth: project a fresh recursive token-free response even
+    # though ServerService already strips credentials on ordinary reads.
+    server_info = strip_credentials_from_dict(server_info)
+
     # Strip internal backend URLs for non-admin users in with-gateway mode.
     # In registry-only mode, users need the URL to connect directly.
     if should_redact_backend_urls(user_context):
         redact_server_backend_fields(server_info)
+
+    # Prune the tool_list to what this caller may see, matching the list
+    # endpoint (GET /servers), the tool catalog, and get_server_details. A
+    # caller with server access but a restricted tool set must not read tool
+    # names outside that set. Fails closed; admin/wildcard pass through.
+    _apply_tool_visibility(server_info, path, user_context, endpoint="server_detail")
 
     # Normalize visibility for servers stored before the write-side fix
     # always persisted the field (#1181). Matches the default-on-read

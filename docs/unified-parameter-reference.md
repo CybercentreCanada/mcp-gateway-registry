@@ -137,6 +137,36 @@ Affects only `with-gateway` deployments (nginx reverse proxy).
 | Extra nginx `server_name` entries | `GATEWAY_ADDITIONAL_SERVER_NAMES` | — | — (ingress annotations handle this) | Space-separated list of additional hostnames / IPs to accept. |
 | Server bind address (IPv6 opt-in) | `BIND_HOST` (and `HOST` for currenttime/mcpgw) | `bind_host` | `mcpgw.app.bindHost` | Default `0.0.0.0` (IPv4) works everywhere. Set to `::` only for IPv6-only deployments — requires `net.ipv6.bindv6only=0` on the host AND an IPv6 loopback in the container. Issue #863 / PR #864. Local-dev `uvicorn` direct invocation and `servers/currenttime` keep the safer `127.0.0.1` default. |
 | Nginx IPv6 listeners (opt-in) | `NGINX_ENABLE_IPV6` | — | via `extraEnv` | Default `false` keeps the in-pod nginx reverse proxy's IPv4-only `listen` directives, which work on every host (binding `[::]` fails where IPv6 is unavailable). Set to `true` on IPv6-only / dual-stack clusters so the entrypoint adds `listen [::]:8080;` (and `[::]:8443 ssl;`), letting the load balancer and kubelet readiness probe reach the pod over IPv6. Nginx counterpart to `BIND_HOST=::`. |
+| Trusted real-IP CIDRs **(recommended behind a load balancer)** | `TRUSTED_REAL_IP_CIDRS` | `trusted_real_ip_cidrs` (auto-defaults to the VPC CIDR) | via `extraEnv` | `set_real_ip_from` ranges nginx trusts to recover the real client IP from `X-Forwarded-For`. **Without it, behind an ALB/CloudFront the audited client IP and per-IP rate limits collapse to the load balancer's IP** (every client shares one bucket). Leave empty only for direct-exposure / single-host deployments where nginx's peer already IS the client. Terraform auto-sets it to the VPC CIDR; docker-compose behind a proxy must set it. |
+| Trusted proxy hops | `TRUSTED_PROXY_HOPS` | `trusted_proxy_hops` | via `extraEnv` | Number of trusted reverse-proxy hops when extracting the client IP from `X-Forwarded-For`. Default `1`. Must match your proxy depth (e.g. CloudFront in front of an ALB = `2`) or the trusted-hop selection is wrong and a client could spoof its apparent IP. |
+
+---
+
+## Group 4a — Gateway Generic Proxy (proxy any registry resource)
+
+Serve non-MCP registry entities (skills, agents, custom types) through the gateway. **Ships DISABLED** and fails closed. The shared switch must reach both registry and auth-server. Helm refuses to render an enabled auth-server unless the chart-managed egress NetworkPolicy is enabled or the operator explicitly sets `auth-server.egress.externalEgressPolicyAcknowledged=true` after deploying an equivalent external control. The 17 environment variables split by consuming process: 6 registry, 11 auth-server.
+
+The egress policy must exclude cloud metadata and workload-credential endpoints even when private targets are otherwise allowed: EC2 IMDS `169.254.169.254` / `fd00:ec2::254`, ECS task credentials `169.254.170.2`, EKS Pod Identity `169.254.170.23` / `fd00:ec2::23`, IPv4/IPv6 link-local ranges, and unspecified addresses. The application URL guard hard-denies these destinations before hostname/CIDR relaxations. On ECS Fargate, EC2 IMDS is unavailable and the task sets `AWS_EC2_METADATA_DISABLED=true` to prevent SDK fallback; `169.254.170.2` must remain reachable so the task can obtain its own IAM-role credentials, but it remains forbidden as a generic-proxy target. ECS security groups are allow-only and cannot express a `0.0.0.0/0` rule with link-local exceptions; use an AWS Network Firewall/NACL equivalent when an additional network-layer deny is required for EC2-backed capacity.
+
+| Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
+|-----------|-----------------|-----------------------|----------------------|---------|
+| Enable generic proxy (shared) | `GATEWAY_GENERIC_PROXY_ENABLED` | `gateway_generic_proxy_enabled` | `registry.app.gatewayGenericProxyEnabled` **and** `auth-server.app.gatewayGenericProxyEnabled` | Shared master switch for route generation and the auth-server `/proxy` hop. Default `false`; both processes must receive the same value. |
+| Canonical namespace aliases (registry) | `GATEWAY_CANONICAL_NAMESPACE_ENABLED` | `gateway_canonical_namespace_enabled` | `registry.app.gatewayCanonicalNamespaceEnabled` | Emit `/entity_type/path` canonical blocks alongside legacy aliases. Default `false`. |
+| Allow private proxy targets (registry) | `GATEWAY_PROXY_ALLOW_PRIVATE_TARGETS` | `gateway_proxy_allow_private_targets` | `registry.app.gatewayProxyAllowPrivateTargets` | Permit validated private targets. Default `false`; metadata/workload-credential endpoints remain hard-denied. |
+| Generic request-body limit (registry) | `GATEWAY_GENERIC_CLIENT_MAX_BODY_SIZE` | `gateway_generic_client_max_body_size` | `registry.app.gatewayGenericClientMaxBodySize` | nginx `client_max_body_size` for inbound generic requests. Default `1m`. |
+| Generated route prefix (registry) | `GATEWAY_PROXY_PREFIX` | `gateway_proxy_prefix` | `registry.app.gatewayProxyPrefix` | Single path segment used for generated `/{prefix}/{type}/{name}` routes. Default `gateway`. |
+| Streaming read timeout (registry) | `GATEWAY_GENERIC_STREAM_READ_TIMEOUT_SECONDS` | `gateway_generic_stream_read_timeout_seconds` | `registry.app.gatewayGenericStreamReadTimeoutSeconds` | nginx `proxy_read_timeout` for entities with `proxy_streaming=true`. Default `3600`; buffered routes retain nginx defaults. |
+| Generic token TTL (auth-server) | `GENERIC_PROXY_TOKEN_TTL_SECONDS` | `generic_proxy_token_ttl_seconds` | `auth-server.app.genericProxyTokenTtlSeconds` | TTL (s) for the method/target-bound internal token. Default `30`. |
+| Buffered response cap (auth-server) | `GENERIC_PROXY_MAX_BODY_BYTES` | `generic_proxy_max_body_bytes` | `auth-server.app.genericProxyMaxBodyBytes` | Maximum decoded upstream response buffered by a non-streaming request. Default `10485760` (10 MiB). |
+| CSRF: require Bearer for writes (auth-server) | `GATEWAY_GENERIC_REQUIRE_BEARER_FOR_WRITES` | `gateway_generic_require_bearer_for_writes` | `auth-server.app.gatewayGenericRequireBearerForWrites` | Refuse cookie-authenticated state-changing verbs. Default `true`. |
+| Startup egress self-check (auth-server) | `GATEWAY_EGRESS_SELFCHECK_ENABLED` | `gateway_egress_selfcheck_enabled` | `auth-server.app.gatewayEgressSelfcheckEnabled` | Probe metadata reachability at startup; if reachable, disable the hop for that process and emit `gateway_egress_policy_unverified=1`. Default `true`. |
+| Generic hop TLS verify (auth-server) | `GATEWAY_GENERIC_TLS_VERIFY` | `gateway_generic_tls_verify` | `auth-server.app.gatewayGenericTlsVerify` | `true` (default), `false`, or a custom CA-bundle path. |
+| Buffered concurrency cap (auth-server) | `GATEWAY_GENERIC_MAX_CONCURRENCY` | `gateway_generic_max_concurrency` | `auth-server.app.gatewayGenericMaxConcurrency` | Separate semaphore for buffered requests. Default `32`; worst-case buffered heap is approximately this × `GENERIC_PROXY_MAX_BODY_BYTES`. |
+| Stream concurrency cap (auth-server) | `GATEWAY_GENERIC_STREAM_MAX_CONCURRENCY` | `gateway_generic_stream_max_concurrency` | `auth-server.app.gatewayGenericStreamMaxConcurrency` | Isolated semaphore for long-lived streams so they cannot consume buffered-request capacity. Default `8`. |
+| Concurrency acquisition timeout (auth-server) | `GATEWAY_GENERIC_ACQUIRE_TIMEOUT_SECONDS` | `gateway_generic_acquire_timeout_seconds` | `auth-server.app.gatewayGenericAcquireTimeoutSeconds` | Maximum wait for either semaphore before returning `503`. Default `5` seconds. |
+| Stream duration ceiling (auth-server) | `GATEWAY_GENERIC_STREAM_MAX_DURATION_SECONDS` | `gateway_generic_stream_max_duration_seconds` | `auth-server.app.gatewayGenericStreamMaxDurationSeconds` | Absolute stream lifetime, enforced even while chunks continue arriving. Default `3600` seconds. |
+| Stream byte ceiling (auth-server) | `GATEWAY_GENERIC_STREAM_MAX_BYTES` | `gateway_generic_stream_max_bytes` | `auth-server.app.gatewayGenericStreamMaxBytes` | Maximum raw response bytes forwarded by one stream before termination. Default `104857600` (100 MiB). |
+| Egress policy prerequisite (Helm only) | — | See ECS guidance above | `auth-server.egress.networkPolicy.enabled` or `auth-server.egress.externalEgressPolicyAcknowledged` | Enabling the Helm generic proxy with both values false fails template rendering. Prefer the chart-managed CIDR policy; acknowledgement is only for an equivalent externally managed policy. |
 
 ---
 
@@ -150,6 +180,8 @@ Enterprise-perimeter auth for registry APIs without full IdP validation. See [`d
 | Legacy single API token **(secret)** | `REGISTRY_API_TOKEN` | `registry_api_token` (use `TF_VAR_*`) | `auth-server.app.registryApiToken` | Single admin-level key. |
 | Scoped multi-key JSON map **(secret)** | `REGISTRY_API_KEYS` | `registry_api_keys` (use `TF_VAR_*`) | `registry.app.registryApiKeys` + `registryApiKeysExistingSecret` | Named keys with per-key group assignments. |
 | Max tokens / user / hour | — | `max_tokens_per_user_per_hour` | `auth-server.app.maxTokensPerUserPerHour` | Rate limit for token vending. |
+| MCP token default TTL (hours) | `MCP_TOKEN_DEFAULT_TTL_HOURS` | `mcp_token_default_ttl_hours` | `registry.app.mcpTokenDefaultTtlHours` / `auth-server.app.mcpTokenDefaultTtlHours` | PR #1477. Lifetime of the self-signed MCP access token (Generate Token page / `POST /api/tokens/generate`) when a caller omits `expires_in_hours`. Default `8`. Read by both registry (validation) and auth-server (minting). |
+| MCP token max TTL (hours) | `MCP_TOKEN_MAX_TTL_HOURS` | `mcp_token_max_ttl_hours` | `registry.app.mcpTokenMaxTtlHours` / `auth-server.app.mcpTokenMaxTtlHours` | PR #1477. Hard cap on the requested MCP access-token lifetime; larger requests are rejected/clamped. Default `24`. Floored at 1h and bounded by a hardcoded 7-day (168h) absolute ceiling — these are self-signed bearer tokens with no revocation path, so an unbounded lifetime is refused. Read by both registry and auth-server. |
 
 ---
 
@@ -205,6 +237,16 @@ Async batch register/patch/replace/delete for agent cards, drained by an in-proc
 
 ---
 
+## Group 7b — Caller-Supplied Asset ID (Issue #1276)
+
+Fail-closed opt-in for callers to supply their own asset `id` (UUID, ARN, URN, ...) on the public server/agent/skill registration routes instead of auto-generating one. Federation is not affected (peer ids are governed by the peer allowlist).
+
+| Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
+|-----------|-----------------|-----------------------|----------------------|---------|
+| Enable | `ALLOW_CALLER_SUPPLIED_ASSET_ID` | `allow_caller_supplied_asset_id` | `registry.app.allowCallerSuppliedAssetId` | Master switch. OFF by default (supplied id rejected with 422). When on, a supplied id must pass safe-charset validation and be unique. |
+
+---
+
 ## Group 8 — Federation (Peer Registries)
 
 Static-token and OAuth2 config for peer-to-peer federation.
@@ -236,6 +278,7 @@ Single URL; disables itself when unset.
 | Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
 |-----------|-----------------|-----------------------|----------------------|---------|
 | Enable AWS Agent Registry federation | `AWS_REGISTRY_FEDERATION_ENABLED` | `aws_registry_federation_enabled` | `registry.awsRegistry.federationEnabled` | Overrides the `aws_registry.enabled` flag stored in MongoDB. |
+| Cross-account federation assume-role ARNs | — | `aws_registry_federation_assume_role_arns` | — | List of IAM role ARNs the registry task may `sts:AssumeRole` for cross-account AgentCore federation. Empty (default) omits the grant entirely (fail closed). ECS/IAM-only: no Docker env (the task role is an ECS construct) and no Helm value (Kubernetes uses IRSA on the service account instead of this policy). CDK equivalent: `federation.awsRegistryFederationAssumeRoleArns` in `infra/config.yaml`. |
 
 ---
 
@@ -254,12 +297,15 @@ Single URL; disables itself when unset.
 | Provider type | `AUTH_PROVIDER` | Derived from `entra_enabled` / `okta_enabled` / `auth0_enabled` flags | `global.authProvider.type` | `keycloak`, `cognito`, `entra`, `okta`, `auth0`. |
 | IDE OAuth client id | `IDE_OAUTH_CLIENT_ID` | `ide_oauth_client_id` | `registry.ideOauthClientId` | Registry-wide **default** pre-registered **public** OAuth client_id that IDEs (Cursor, Claude Code, Codex) use to start the gateway login flow. When set, a server's Connect config advertises this client_id and omits the static gateway token, so the IDE shows a login button and runs the OAuth/PKCE flow. A per-server `oauth_client_id` (see below) overrides this default. Use when anonymous Dynamic Client Registration is disabled and a fixed public client is registered instead. Empty (default) keeps the static-token Connect config. Not a secret. |
 | IDE OAuth callback port | `IDE_OAUTH_CALLBACK_PORT` | `ide_oauth_callback_port` | `registry.ideOauthCallbackPort` | Fixed loopback callback port the IDE uses for the OAuth login redirect (`http://localhost:<port>/callback`). Needed for IdPs that match the redirect_uri literally including the port (Okta, Entra, Cognito): register that exact URI on the public client and set the same port here so the Connect dialog emits `--callback-port` (Claude Code). `0` (default) lets the IDE pick a port, which is correct for Keycloak (wildcard loopback redirect). Note: Codex/Cursor cannot pin the port, so this only fully helps Claude Code. |
+| Claude Code connect scope | `IDE_CONNECT_SCOPE` | `ide_connect_scope` | `registry.ideConnectScope` | Optional install scope for the Claude Code Connect snippet: `local`, `project`, or `user`. When set, the generated `claude mcp add` command emits `--scope <value>` so the server installs at that scope — e.g. `user` makes it available in every project instead of only the current directory (Claude Code's `local` default). Empty (default) omits the flag. Invalid values are ignored (flag omitted). Only affects the displayed Claude Code snippet; no effect on Cursor/Codex configs or gateway behaviour. |
 | IdP group filter prefixes | `IDP_GROUP_FILTER_PREFIX` | `idp_group_filter_prefix` | `registry.idpGroupFilterPrefix` | Comma-separated prefixes for IAM > Groups. |
 | Login-time IdP group allowlist | `ALLOWED_IDP_GROUPS` | `allowed_idp_groups` | `registry.allowedIdpGroups` / `auth-server.allowedIdpGroups` | Comma-separated EXACT IdP group names/IDs stored in a user's session at login. Empty (default) auto-derives the allowlist from scope mappings. Fixes session bloat and per-request slowness for users with very large IdP group memberships (e.g. Entra ID with hundreds of AD groups). Read by both registry and auth-server. |
 | IdP user-to-group fallback providers | `IDP_USER_GROUP_FALLBACK_ENABLED_PROVIDERS` | `idp_user_group_fallback_enabled_providers` | `registry.idpUserGroupFallbackEnabledProviders` / `auth-server.idpUserGroupFallbackEnabledProviders` | Issue #1127. Comma-separated IdP providers (e.g. `pingfederate`) for which the registry's local `idp_user_groups` collection is consulted to populate empty JWT groups claims. Empty disables fallback for all providers. Default: `pingfederate`. Read by both registry and auth-server. |
 | PingFederate admin URL | `PF_ADMIN_URL` | `pf_admin_url` | `registry.pingfederateAdmin.url` | Issue #1127. Admin API URL used by the registry to create OAuth clients and Simple PCV users. Default: dev-only `https://pingfederate:9999`; override for BYO PingFederate. Read by registry only. |
 | PingFederate admin user | `PF_ADMIN_USER` | `pf_admin_user` | `registry.pingfederateAdmin.user` | Issue #1127. Basic-auth user for the PF admin API. Default: dev-only `administrator`; override in production. Read by registry only. |
 | PingFederate admin password **(secret)** | `PF_ADMIN_PASS` | `pf_admin_pass` | `registry.pingfederateAdmin.password` / `registry.pingfederateAdmin.passwordExistingSecret` | Issue #1127. **Secret.** Basic-auth password for the PF admin API. Used by registry to create OAuth clients and Simple PCV users. Default: dev-only `2FederateM0re`; override in production. Wired through AWS Secrets Manager (Terraform) and `secretKeyRef` (Helm). Read by registry only. |
+| PingFederate upstream CA bundle | `PINGFEDERATE_CA_BUNDLE` | n/a | n/a | PR #1540. PEM CA bundle nginx uses to verify the PingFederate runtime TLS cert when `PINGFEDERATE_BASE_URL` is https (`proxy_ssl_verify on`, fail closed). Consulted only for a BYO-https IdP; the shipped in-cluster `http://pingfederate:9032` default takes the plaintext branch and needs none. nginx does not consult a system trust store for `proxy_ssl`, so the bundle is always required for an https upstream (point it at the CA chain even for a publicly-trusted cert). Default `/etc/nginx/certs/pingfederate-ca.pem`. nginx-generator-only (read by `registry/core/nginx_service.py`, not app config); no Terraform/Helm var. |
+| Keycloak upstream CA bundle | `KEYCLOAK_CA_BUNDLE` | n/a | n/a | PR #1540. PEM CA bundle nginx uses to verify the Keycloak runtime TLS cert when `KEYCLOAK_URL` is https (`proxy_ssl_verify on`, fail closed). Consulted only for a BYO-https Keycloak; the shipped in-cluster `http://keycloak:8080` default takes the plaintext branch and needs none. Same no-system-trust-store caveat as `PINGFEDERATE_CA_BUNDLE`. Default `/etc/nginx/certs/keycloak-ca.pem`. nginx-generator-only (read by `registry/core/nginx_service.py`, not app config); no Terraform/Helm var. |
 
 #### Per-server Connect overrides
 
@@ -304,6 +350,7 @@ that server's Connect dialog:
 | Client secret **(secret)** | `COGNITO_CLIENT_SECRET` | — | `auth-server.cognito.clientSecret` | — |
 | Enabled | `COGNITO_ENABLED` | — | — | — |
 | Custom domain | `COGNITO_DOMAIN` | — | `auth-server.cognito.domain` | Optional. |
+| M2M client allowlist | `COGNITO_M2M_CLIENT_IDS` | `cognito_m2m_client_ids` | `auth-server.cognito.m2mClientIds` | Comma/space-separated allowlist of Cognito app-client ids whose machine (`client_credentials`) access tokens the gateway accepts (Cognito access tokens are not audience-bound, so the `client_id` claim is checked against this list). Default-empty = fail closed. Use `*` to accept ANY M2M client in the pool without listing each (machine/no-`username` tokens only; user logins stay restricted to the web + IDE clients) — for one M2M client per agent. Only use `*` when the pool is dedicated to the gateway. Required for Cognito agent/M2M callers, e.g. per-agent rate limiting. |
 | Region | `AWS_REGION` | `aws_region` | `auth-server.cognito.region` | — |
 
 ### 12c — Microsoft Entra ID
@@ -317,6 +364,8 @@ that server's Connect dialog:
 | Enabled flag | `ENTRA_ENABLED` | — | — | — |
 | Login base URL | `ENTRA_LOGIN_BASE_URL` | `entra_login_base_url` | `auth-server.entra.loginBaseUrl` | Sovereign clouds. |
 | Graph base URL | `ENTRA_GRAPH_BASE_URL` | `entra_graph_base_url` | `auth-server.entra.graphBaseUrl` | Optional override for Microsoft Graph base URL. Leave unset on standard Entra deployments — auto-inferred from `ENTRA_LOGIN_BASE_URL` via the documented sovereign-cloud mapping. Set explicitly only for proxied or air-gapped deployments. |
+| PRM scope format | `ENTRA_SCOPE_FORMAT` | `entra_scope_format` | `auth-server.entra.scopeFormat` / `registry.entra.scopeFormat` | `v1` or `v2` (default `v2`). Controls the form of custom resource scopes advertised in the OAuth PRM `scopes_supported` array. `v1` emits `api://<app-id>/<scope>` (required by apps exposing v1-style scopes; fixes AADSTS650053 at IDE login); `v2` emits the bare fragment. Standard OIDC scopes are always advertised bare. See [Entra v1 vs v2 scope format](entra-scope-format.md). |
+| Application ID URI | `ENTRA_APPLICATION_ID_URI` | `entra_application_id_uri` | `auth-server.entra.applicationIdUri` / `registry.entra.applicationIdUri` | Application ID URI (e.g. `api://<app-id>`) registered on the Entra app. Used as the v1 scope prefix and accepted as a token audience. Defaults to `api://<ENTRA_CLIENT_ID>`. |
 | Admin group id | `ENTRA_GROUP_ADMIN_ID` | — | `global.authProvider.entra.adminGroupId` | — |
 | Users group id | `ENTRA_GROUP_USERS_ID` | — | — | — |
 
@@ -367,6 +416,7 @@ that server's Connect dialog:
 |-----------|-----------------|-----------------------|----------------------|---------|
 | Secure flag | `SESSION_COOKIE_SECURE` | `session_cookie_secure` | `auth-server.app.sessionCookieSecure` | Secure by default (`true`); set `false` only on plain-HTTP localhost. |
 | Cookie domain | `SESSION_COOKIE_DOMAIN` | `session_cookie_domain` | `auth-server.app.sessionCookieDomain` | Leading dot for cross-subdomain; empty is safest. |
+| OAuth redirect allowlist | `OAUTH2_ALLOWED_REDIRECT_URIS` | `oauth2_allowed_redirect_uris` | `auth-server.app.oauth2AllowedRedirectUris` | Comma-separated exact-match allowlist of login/logout redirect URIs (open-redirect hardening). When set, an absolute redirect_uri must exactly match an entry; relative paths always allowed. Empty falls back to the weaker cookie-domain heuristic (configuring the list is the hardened path). |
 | CORS allowlist | `CORS_ALLOWED_ORIGINS` | `cors_allowed_origins` | `registry.app.corsAllowedOrigins` | Comma-separated exact origins for credentialed cross-origin API access. Registry's own origin is always trusted; empty means same-origin only (no wildcard fallback). |
 
 ---
@@ -511,6 +561,14 @@ Used by `registry` and `mcpgw` services.
 | API key **(secret)** | `EMBEDDINGS_API_KEY` | `embeddings_api_key` | `mcpgw.app.embeddingsApiKey` / `mcpgw.app.embeddingsApiKeyExistingSecret` | For `litellm` cloud providers. |
 | Custom API base | `EMBEDDINGS_API_BASE` | — | `mcpgw.app.embeddingsApiBase` | — |
 | AWS region | `EMBEDDINGS_AWS_REGION` | `embeddings_aws_region` | `mcpgw.app.embeddingsAwsRegion` | Bedrock. |
+| Auth mode | `EMBEDDINGS_AUTH_MODE` | `embeddings_auth_mode` | `registry.embeddings.authMode` | `static` (default) or `idp`. When `idp`, fetches bearer via OAuth2 client credentials. |
+| IdP token endpoint | `EMBEDDINGS_IDP_TOKEN_ENDPOINT` | `embeddings_idp_token_endpoint` | `registry.embeddings.idpTokenEndpoint` | OAuth2 token URL (must be `https://`). Required when `idp`. |
+| IdP client id | `EMBEDDINGS_IDP_CLIENT_ID` | `embeddings_idp_client_id` | `registry.embeddings.idpClientId` | Client-credentials client id. Required when `idp`. |
+| IdP client secret **(secret)** | `EMBEDDINGS_IDP_CLIENT_SECRET` | `embeddings_idp_client_secret` | `registry.embeddings.idpClientSecretExistingSecret` / `...Key` | Client-credentials secret. Never logged. On Helm, reference a pre-created Secret. Required when `idp`. |
+| IdP scope | `EMBEDDINGS_IDP_SCOPE` | `embeddings_idp_scope` | `registry.embeddings.idpScope` | OAuth2 scope (e.g. `api://<app-id>/.default`). Optional. |
+| IdP timeout | `EMBEDDINGS_IDP_TIMEOUT_SECONDS` | `embeddings_idp_timeout_seconds` | `registry.embeddings.idpTimeoutSeconds` | Token request timeout (default 30s). |
+| IdP allow insecure | `EMBEDDINGS_IDP_ALLOW_INSECURE` | `embeddings_idp_allow_insecure` | `registry.embeddings.idpAllowInsecure` | Allow `http://` loopback token endpoint (local dev only, default `false`). |
+| Response format | `EMBEDDINGS_RESPONSE_FORMAT` | `embeddings_response_format` | `registry.embeddings.responseFormat` | `openai` (default envelope) or `raw_array` (endpoint returns a bare `[[float]]` array). Independent of auth mode. |
 
 ---
 
@@ -568,6 +626,7 @@ Weights must sum to 1.0 ± 0.001 or the registry process refuses to start (valid
 | MCPGW base URL | `MCPGW_BASE_URL` | — | — | OAuth redirect URIs. |
 | Bind host | `HOST` | — | — | `127.0.0.1` vs `0.0.0.0`. |
 | Registry URL | — | — | `mcpgw.app.registryUrl` | Where MCPGW talks to registry. |
+| HTTP allowed hosts | `MCPGW_HTTP_ALLOWED_HOSTS` | via `mcpgw_extra_env` | via `mcpgw.extraEnv` | Host allowlist for FastMCP's DNS-rebinding protection on the streamable-http transport. Default `mcpgw-server` matches the service name the registry front door uses on every surface (Docker Compose service, ECS Service Connect `dns_name`, Kubernetes Service), so the built-in `airegistry-tools` server stays healthy with no config. Comma-separated to add hosts; `*` disables host/origin protection entirely (discouraged). No first-class Terraform/Helm parameter — inject via the generic extra-env mechanism (Group 29) only if you front mcpgw under a non-standard name. Not a reserved name, so `extraEnv`/`mcpgw_extra_env` accept it. Added in 1.27.1 (PR #1497). |
 
 ---
 
@@ -577,6 +636,8 @@ Weights must sum to 1.0 ± 0.001 or the registry process refuses to start (valid
 |-----------|-----------------|-----------------------|----------------------|---------|
 | Audit log enabled | `AUDIT_LOG_ENABLED` | `audit_log_enabled` | — | — |
 | Audit TTL (days) | `AUDIT_LOG_MONGODB_TTL_DAYS` | `audit_log_ttl_days` | — | TTL index. |
+| Audit require durable sink | `AUDIT_LOG_REQUIRE_DURABLE` | `audit_log_require_durable` | `registry.app.auditLogRequireDurable` / `auth-server.app.auditLogRequireDurable` | Fail closed (default `true`): refuse to start if audit logging is enabled but no durable sink (MongoDB/DocumentDB) is available, instead of degrading to non-durable log lines. Set `false` only in local/dev (emits a loud warning). |
+| Audit instance id | `AUDIT_INSTANCE_ID` | — | — | Per-replica attribution label embedded in internal-token `sub` and audit records. Auto-detected per replica from `HOSTNAME` (set per-container by Docker, per-pod by Kubernetes); set explicitly only to override, so no Terraform/Helm column. |
 | App log max bytes | `APP_LOG_MAX_BYTES` | — | `registry.app.appLogMaxBytes` / `auth-server.app.appLogMaxBytes` | Rotating file size. |
 | App log backup count | `APP_LOG_BACKUP_COUNT` | — | `*.app.appLogBackupCount` | — |
 | Centralized log enabled | `APP_LOG_CENTRALIZED_ENABLED` | `app_log_centralized_enabled` | `*.app.appLogCentralizedEnabled` | Write to MongoDB. |
@@ -603,9 +664,20 @@ Weights must sum to 1.0 ± 0.001 or the registry process refuses to start (valid
 | Native OTel emission: export interval (Issue #1122) | `OTEL_METRIC_EXPORT_INTERVAL_MS` | (set in container env block) | `registry.app.otelMetricExportIntervalMs`, `auth-server.metrics.otelExportIntervalMs`, `mcpgw.metrics.otelExportIntervalMs` | OTel SDK metric export push interval, ms. Default 15000. |
 | Native OTel emission: Prometheus exporter host (Issue #1122) | `OTEL_EXPORTER_PROMETHEUS_HOST` | (set in container env block) | `registry.app.otelExporterPrometheusHost`, `auth-server.metrics.exporterPrometheusHost`, `mcpgw.metrics.exporterPrometheusHost` | Bind address for the OTel Prometheus exporter listener. EKS default `0.0.0.0` (NetworkPolicy gates access); Compose default `127.0.0.1`. |
 | Native OTel emission: Prometheus exporter port (Issue #1122) | `OTEL_EXPORTER_PROMETHEUS_PORT` | (set in container env block) | `registry.app.otelExporterPrometheusPort`, `auth-server.metrics.exporterPrometheusPort`, `mcpgw.metrics.exporterPrometheusPort` | Port for the OTel Prometheus exporter. Default 9464. |
+| Native OTel emission: bounded-label distinct-value cap (Issue #1735) | `METRICS_MAX_LABEL_CARDINALITY` | (set in container env block) | (set via `extraEnv`) | Max distinct values one attacker-influenced or per-entity Prometheus label may take per process before further values collapse to the `_other` bucket. Guards against a label-cardinality DoS. Default `150`. Read independently by the registry/auth-server limiter (`registry/observability/label_bounding.py`) and by the metrics-service processor, which must agree — tests pin both. A missing, non-integer, or non-positive value falls back to the default (fail-bounded). |
+| Native OTel emission: bounded-label length cap (Issue #1735) | `METRICS_MAX_LABEL_LENGTH` | (set in container env block) | (set via `extraEnv`) | Max characters of a bounded label value before truncation. Default `96`, raised from `64` in 1.25.0: a gateway-proxied entity's authz key reaches exactly 64 characters on its own (`rest-endpoint/rest-endpoint/<uuid>`), and a truncated key matches no `server_access` rule, which defeats the purpose of the `server` label. Same fail-bounded fallback and same two-copy sync requirement as the cap above. |
 | OTLP push endpoint (standard OTel SDK var, Issue #1122) | `OTEL_EXPORTER_OTLP_ENDPOINT` | Set conditionally in `ecs-services.tf` to `http://localhost:4317` when `var.enable_observability=true` (per-task ADOT sidecar). Else empty. | Operators inject via `extraEnv` per chart, or set on the chart's configmap | Activates the OTLP push exporter when set. SDK default empty (Compose pull-only mode). |
 | OTLP push protocol (standard OTel SDK var, Issue #1122) | `OTEL_EXPORTER_OTLP_PROTOCOL` | (set in container env block) | (set via `extraEnv`) | `grpc` (default) or `http/protobuf`. Must match the receiver. |
 | Service name for trace attribution (standard OTel SDK var, Issue #1122) | `OTEL_SERVICE_NAME` | Hardcoded per service in `ecs-services.tf` (e.g., `mcp-gateway-registry`) | (set via `extraEnv` per pod) | Without this, traces are tagged `unknown_service` in your tracing backend. Set per service. |
+
+---
+
+## Group 25a — Frontend RUM (Real User Monitoring) (Issue #1471)
+
+| Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
+|-----------|-----------------|-----------------------|----------------------|---------|
+| RUM snippet **(secret)** | `RUM_SNIPPET_B64` | `registry_rum_snippet_b64` (plaintext, token-free) / `registry_rum_snippet_secret_arn` (Secrets Manager, token-bearing) | `registry.rumSnippetB64` (plaintext) or `extraEnv` + `secretKeyRef` (token-bearing) | Base64-encoded HTML snippet served as `/rum.js` and injected into the frontend `<head>` for browser Real User Monitoring (Splunk, Datadog, New Relic, Grafana Faro, etc.). Empty disables RUM (default no-op stub). Operator/deploy-time trust boundary: the value runs as JavaScript in every user's browser, so it must never be set from user input or a non-admin API. See [docs/frontend-rum.md](frontend-rum.md). |
+| RUM allowed script/beacon hosts | `RUM_ALLOWED_HOSTS` | `registry_rum_allowed_hosts` | `registry.rumAllowedHosts` | Comma-separated allowlist of hosts the RUM snippet may reference (script `src` and beacon endpoints). Startup validation fails closed (writes the empty stub, logs an error) if the decoded snippet references a host not on this list. Empty disables the check. Guardrail against misconfiguration/tampering, not a control against a trusted operator. |
 
 ---
 
@@ -617,6 +689,10 @@ Weights must sum to 1.0 ± 0.001 or the registry process refuses to start (valid
 | Enable AMP/ADOT/Grafana pipeline | — | `enable_observability` | — | ECS-specific. |
 | Metrics service image | — | `metrics_service_image_uri` | — | ECR URI. |
 | Grafana image | — | `grafana_image_uri` | — | ECR URI. |
+| Metrics-service API-key pepper **(secret)** | `METRICS_KEY_PEPPER` | auto-generated into Secrets Manager | — (metrics-service not in the Helm stack) | Per-deployment HMAC pepper for stored metrics API-key hashes. **The metrics-service refuses to start if unset/empty/weak/`< 32` chars** (fail closed). `build_and_run.sh` auto-generates it into `.env`; Terraform generates it into Secrets Manager. Distinct per deployment. |
+| Metrics-service admin API key **(secret)** | `METRICS_ADMIN_API_KEY` | auto-generated into Secrets Manager (distinct from the ingest key) | — (metrics-service not in the Helm stack) | Privilege-separated credential gating the metrics-service `/admin/*` endpoints (retention policy changes, cleanup, database stats). Must be `>= 32` chars, not a known placeholder, and **distinct from any ingest key**. **`/admin/*` returns 503 until it is set** (ingest + the in-process daily cleanup are unaffected); a startup log announces the posture. docker-compose upgraders must add it to `.env`; Terraform/CDK generate it automatically. Introduced by PR #1539. |
+
+> **Note (metrics-service surface):** the standalone metrics-service is deployed only on the docker-compose and Terraform/CDK (ECS) surfaces — it is **not** part of the Helm/EKS stack (core services emit metrics natively via OpenTelemetry there). Its `METRICS_*` secrets therefore have no Helm column. Full metrics-service configuration lives in [`metrics-service/docs/deployment.md`](../metrics-service/docs/deployment.md) and [`metrics-service/docs/data-retention.md`](../metrics-service/docs/data-retention.md). Note also that the metrics-service Prometheus-exporter vars (`OTEL_PROMETHEUS_ENABLED` / `OTEL_PROMETHEUS_PORT`) are named differently from the main app's exporter vars (`OTEL_EXPORTER_PROMETHEUS_PORT` / `_HOST`, Group 25) — they are separate settings on separate services.
 
 ---
 
@@ -704,7 +780,12 @@ shared in the stack `shared-secret`.
 | Refresh worker interval (s) | `EGRESS_REFRESH_WORKER_INTERVAL_SECONDS` | — | `registry.egressAuth.refreshWorkerIntervalSeconds` | Background refresh sweep interval.                                |
 | OAuth state TTL (s) | `EGRESS_STATE_TTL_SECONDS` | `egress_state_ttl_seconds` | `registry.egressAuth.stateTtlSeconds` | TTL for the AEAD-encrypted OAuth `state` blob.                    |
 | obo audience allowlist | `EGRESS_OBO_ALLOWED_AUDIENCES` | `egress_obo_allowed_audiences` | `registry.egressAuth.oboAllowedAudiences` | Whitespace-separated allowlist of `obo_exchange` `target_audience` values. When set, authoritative; when empty a shape rule applies (api:// App ID URI / bare client-id only, never an https host URL or GUID) so shared first-party APIs (Graph/ARM/Key Vault) are rejected. |
-| Registry internal vend URL | `EGRESS_REGISTRY_INTERNAL_URL` | `egress_registry_internal_url` | `auth-server.egressAuth.registryInternalUrl` | Auth-server → registry internal vend endpoint.                    |
+| Trusted IdP hosts | `EGRESS_OAUTH_TRUSTED_IDP_HOSTS` | `egress_oauth_trusted_idp_hosts` | `registry.egressAuth.oauthTrustedIdpHosts` + `auth-server.egressAuth.oauthTrustedIdpHosts` | Comma-separated exact hostnames of operator-controlled OAuth/OIDC identity providers whose **token endpoints** may resolve to private addresses (e.g. `keycloak.internal.example.com`). Needed when the IdP backing per-user egress consent is self-hosted on an internal network, which the credentialed-OAuth SSRF profile blocks by default — consent otherwise fails with `token endpoint blocked by security policy`. Deliberately does **not** inherit `SSRF_ALLOWED_HOSTS` / `SSRF_ALLOWED_CIDRS`, since a token POST carries client secrets, refresh tokens or user assertions and must not be relaxed by a proxy-target bypass. Hosts only: no CIDRs, no wildcards. HTTPS is still required, answers are still resolved, classified and pinned, and cloud/workload credential, metadata and link-local addresses are never permitted. Empty (default) = only public token endpoints allowed. Consumed by **both** processes — the registry (3LO per-user egress consent) and the auth-server (OBO same-IdP token exchange) — so set it on both subcharts / services in a stack or Compose deploy. |
+| Registry internal vend URL | `EGRESS_REGISTRY_INTERNAL_URL` | `egress_registry_internal_url` | `auth-server.egressAuth.registryInternalUrl` | Auth-server → registry's dedicated internal vend listener (default `http://registry:8091`); a ClusterIP-only port / unpublished Compose port, never routed by the public Ingress. |
+| Egress internal listener port | — | — (hardcoded `8091` in the ECS Service Connect entry + SG rule) | `registry.egressAuth.internalPort` | Port of the registry's dedicated internal vend listener. Helm exposes it as a ClusterIP-only Service port; Compose leaves it unpublished; ECS advertises it via Service Connect (`registry:8091`). Topology value, not an app env var. |
+| Egress internal NetworkPolicy | — | — (the `auth_internal` security-group rule: auth-server → registry:8091) | `registry.egressAuth.internalNetworkPolicy.{enabled,fromNamespaceSelector,fromPodSelector}` | K8s NetworkPolicy gating the internal vend port to the auth-server pod. The ECS analogue is the security-group rule; Compose relies on the port being unpublished. Topology value, not an app env var. |
+| Credential encryption key **(secret)** | `EGRESS_CREDENTIAL_ENCRYPTION_KEY` | `egress_credential_encryption_key` | `registry.egressAuth.credentialEncryptionKey` | Application-layer AES-256-GCM root key (>= 32 chars). When set, `StoredToken`s are encrypted per-principal (HKDF-derived key) before reaching either backend; empty = plaintext at rest. Backend-independent; legacy plaintext entries re-encrypt on first read. Keep it **outside** the secret-store trust boundary it protects. Rotation is a destructive cutover today (single active key). |
+| Require encrypted (strict) | `EGRESS_CREDENTIAL_ENCRYPTION_REQUIRE_ENCRYPTED` | — (registry env) | — (registry `extraEnv`) | Terminal strict mode: once set (with the key), reads reject any lingering plaintext entry. Enable after migration. |
 | nginx marker secret **(secret)** | `AUTH_SERVER_NGINX_MARKER_SECRET` | `egress_nginx_marker_secret` | auto-generated in stack `shared-secret`; `*.egressAuth.markerSecret` (standalone) | Marker shared by registry + auth-server; required at startup (both refuse to start without it). |
 | Secrets Manager KMS key **(secret)** | `SECRETS_MANAGER_KMS_KEY_ID` | `egress_secrets_manager_kms_key_id` | `registry.egressAuth.secretsManager.kmsKeyId` | Optional CMK for the vault secrets (secrets-manager backend).     |
 | Secrets Manager path prefix | `SECRETS_MANAGER_PATH_PREFIX` | `egress_secrets_manager_path_prefix` | `registry.egressAuth.secretsManager.pathPrefix` | Secret name prefix; also scopes the ECS task IAM grant.           |
@@ -712,6 +793,7 @@ shared in the stack `shared-secret`.
 | OpenBao namespace | `OPENBAO_NAMESPACE` | — | `registry.egressAuth.openbao.namespace` | Enterprise namespaces only.                                       |
 | OpenBao KV mount | `OPENBAO_KV_MOUNT` | — | `registry.egressAuth.openbao.kvMount` | KV v2 mount point (default `secret`).                             |
 | OpenBao auth method | `OPENBAO_AUTH_METHOD` | — | `registry.egressAuth.openbao.authMethod` | `token` \| `kubernetes`. EKS uses `kubernetes` (no static token). |
+| OpenBao token **(secret)** | `OPENBAO_TOKEN` | — | via secret | Static OpenBao/Vault token, root access to all vaulted egress credentials. **Required when `SECRET_STORE_BACKEND=openbao` with `OPENBAO_AUTH_METHOD=token`** — docker-compose references it as `${OPENBAO_TOKEN:?}`, so the stack refuses to start if unset. Not needed with `authMethod=kubernetes` (EKS), which uses the ServiceAccount instead. |
 | OpenBao role | `OPENBAO_ROLE` | — | `registry.egressAuth.openbao.role` | Kubernetes-auth role bound to the registry ServiceAccount.        |
 
 **Backend by surface:** ECS wires only the `secrets-manager` knobs (`OPENBAO_*`
@@ -776,6 +858,52 @@ These have no `.env` equivalent because they describe the infrastructure, not th
 | `<subchart>.ingress.*` | Per-subchart ingress overrides. |
 | `mongodb-kubernetes.operator.*` | MongoDB Community operator knobs. |
 | `mongodb-configure.*`, `keycloak-configure.*` | One-shot job configuration for the init jobs. |
+
+---
+
+## Group 31 — A2A Reverse-Proxy Mode
+
+| Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
+|-----------|-----------------|-----------------------|----------------------|---------|
+| Enable reverse-proxy | `A2A_REVERSE_PROXY_ENABLED` | `a2a_reverse_proxy_enabled` | `registry.app.a2aReverseProxyEnabled` | Opt-in. When `true`, each enabled agent gets nginx blocks that proxy its A2A traffic (agent card + JSON-RPC) through the gateway for centralized auth and per-agent access control. Default `false` = registry-only discovery, no proxy blocks. Also gated by `with-gateway` deployment mode; force-disabled in `registry-only`. See [A2A reverse-proxy mode](design/a2a-protocol-integration.md#reverse-proxy-mode-proxying-a2a-traffic). |
+| SSRF allowed hosts | `SSRF_ALLOWED_HOSTS` | `ssrf_allowed_hosts` | `registry.app.ssrfAllowedHosts` | Comma-separated exact hostnames or literal IPs that the gateway is permitted to proxy/health-check even though they resolve to private/internal addresses. Needed when agent backends live on internal networks (Docker service names, ECS Service Connect names, in-cluster ClusterIPs), which the SSRF guard blocks by default. Least-privilege: prefer naming hosts here over widening CIDRs. Empty = only public addresses allowed. |
+| SSRF allowed CIDRs | `SSRF_ALLOWED_CIDRS` | `ssrf_allowed_cidrs` | `registry.app.ssrfAllowedCidrs` | Comma-separated CIDR ranges to allow whole internal subnets (e.g. `172.18.0.0/16` for a Docker network, or the cluster service CIDR on EKS). Use only when you cannot enumerate hosts. Empty = no internal subnets allowed. |
+| Trusted egress OAuth IdP hosts | — | — | — | *(configured under Group 31 — Egress Credential Vault, not here.)* Neither SSRF setting above applies to the credential-bearing OAuth **token endpoints** used by per-user egress consent — those carry client secrets, refresh tokens or user assertions and must not inherit a proxy-target bypass. A self-hosted IdP on a private address is allowed separately, via `EGRESS_OAUTH_TRUSTED_IDP_HOSTS`. |
+
+---
+
+## Group 32 — Rate Limiting
+
+Application-level, identity/group/target-aware request limiting enforced at the auth-server `/validate` hop. This is complementary to (not a replacement for) the coarse per-IP nginx edge limiting. Off by default; limit **definitions** are managed at runtime via the admin API (`/api/rate-limits`) or `registry_management.py rate-limit-set`, not via these parameters. Applies to both the `registry` and `auth-server` services (both must agree). See [rate limiting design](design/rate-limiting.md).
+
+| Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
+|-----------|-----------------|-----------------------|----------------------|---------|
+| Enable rate limiting | `RATE_LIMITING_ENABLED` | `rate_limiting_enabled` | `registry.app.rateLimiting.enabled` / `auth-server.app.rateLimiting.enabled` | Master switch. Default `false` = no checks (no behavior change). |
+| Counter backend | `RATE_LIMIT_BACKEND` | `rate_limit_backend` | `*.app.rateLimiting.backend` | Counter store. Only `documentdb` is implemented in v1 (no new infrastructure); the backend interface allows a future Redis. |
+| Fail open on error | `RATE_LIMIT_FAIL_OPEN` | `rate_limit_fail_open` | `*.app.rateLimiting.failOpen` | Default `true`: on a counter-store error, allow rather than deny (availability guardrail). A per-limit `fail_closed` definition overrides to deny. |
+| Quarantine fail closed | `RATE_LIMIT_QUARANTINE_FAIL_CLOSED` | `rate_limit_quarantine_fail_closed` | `*.app.rateLimiting.quarantineFailClosed` | Default `false`: on a backend error reading quarantine (kill-switch) membership, allow (fail open). Set `true` to deny instead (stricter block at the cost of denying data-plane traffic during a memberships-store outage). The `caller_target` axis and the quarantine groups themselves are runtime-managed via the admin API (no env var). |
+| Definitions cache TTL | `RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS` | `rate_limit_definitions_cache_ttl_seconds` | `*.app.rateLimiting.definitionsCacheTtlSeconds` | In-process cache TTL (seconds) for definition reads; steady-state per-call cost is zero DB reads for definitions. Default `30`. |
+| Backend op timeout | `RATE_LIMIT_BACKEND_TIMEOUT_MS` | `rate_limit_backend_timeout_ms` | `*.app.rateLimiting.backendTimeoutMs` | Hard per-op timeout (ms) for each counter operation; a slow store fails fast into the fail-open/closed policy, never hanging `/validate`. Default `250`. |
+| User floor (per min) | `RATE_LIMIT_USER_FLOOR_PER_MIN` | `rate_limit_user_floor_per_min` | `registry.app.rateLimiting.userFloorPerMin` | Lockout safeguard read by the **registry** at group-definition config time: on windows `<= 60s` a group's `user_max_requests` must be `>=` this floor, else the PUT is rejected. Config-only (no API). Default `20`. |
+| Agent floor (per min) | `RATE_LIMIT_AGENT_FLOOR_PER_MIN` | `rate_limit_agent_floor_per_min` | `registry.app.rateLimiting.agentFloorPerMin` | Same as above for a group's `agent_max_requests`. Config-only (no API). Default `10`. |
+
+---
+
+## Group 33 — Gateway Generic Proxy
+
+Extends gateway reverse-proxying to non-MCP entities (skills, agents, custom entities) through a uniform auth-server hop. **Ships dark:** every flag defaults off/safe, so with `GATEWAY_GENERIC_PROXY_ENABLED=false` no generic-proxy nginx block is rendered, no generic token is minted, and zero extra per-tick DB queries are issued. Consumed by the `registry` (render + SSRF validation) and the `auth-server` (the `/proxy` hop). See [gateway generic proxy design](design/gateway-generic-proxy.md). The Terraform and Helm columns are blank pending the enabling slice that wires the runtime surfaces (this feature is dark today; a `.env` override is sufficient for Docker/local enablement and testing).
+
+| Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
+|-----------|-----------------|-----------------------|----------------------|---------|
+| Generic proxy enabled | `GATEWAY_GENERIC_PROXY_ENABLED` | — (not yet wired) | — (not yet wired) | Master switch for generic-proxy blocks. Default `false` (ships dark). |
+| Canonical namespace enabled | `GATEWAY_CANONICAL_NAMESPACE_ENABLED` | — (not yet wired) | — (not yet wired) | Emit canonical `/entity_type/path` blocks alongside the legacy flat aliases. Placeholder for a later slice. Default `false`. |
+| Allow private targets | `GATEWAY_PROXY_ALLOW_PRIVATE_TARGETS` | — (not yet wired) | — (not yet wired) | SSRF egress policy. `false` rejects loopback/private/reserved targets. Link-local/metadata/unspecified are denied regardless. Default `false`. |
+| Require Bearer for writes | `GATEWAY_GENERIC_REQUIRE_BEARER_FOR_WRITES` | — (not yet wired) | — (not yet wired) | CSRF defense: refuse a state-changing verb under ambient cookie auth (403 before any token mint). Default `true`. |
+| Client max body size | `GATEWAY_GENERIC_CLIENT_MAX_BODY_SIZE` | — (not yet wired) | — (not yet wired) | nginx `client_max_body_size` for generic blocks (inbound request body). nginx size token. Default `1m`. |
+| Upstream response max body | `GENERIC_PROXY_MAX_BODY_BYTES` | — (not yet wired) | — (not yet wired) | Bytes of upstream response the hop buffers before returning. Default `10485760` (10 MiB). |
+| Max concurrency | `GATEWAY_GENERIC_MAX_CONCURRENCY` | — (not yet wired) | — (not yet wired) | Semaphore cap on in-flight generic-hop requests (OOM guard). Default `32`. |
+| TLS verify | `GATEWAY_GENERIC_TLS_VERIFY` | — (not yet wired) | — (not yet wired) | Generic hop TLS verification: `true` / CA-bundle path / `false` (emits a startup WARNING). Default `true`. |
+| Egress self-check enabled | `GATEWAY_EGRESS_SELFCHECK_ENABLED` | — (not yet wired) | — (not yet wired) | Probe metadata IPs at startup; if reachable, disable the feature for the process (not readiness). Default `true`. |
 
 ---
 

@@ -87,11 +87,81 @@ local function _auth_user_id()
 end
 
 
+-- Forward the validated caller identity to backend subrequests, fail-closed.
+--
+-- auth_request_set variables ($auth_user, $auth_username) are scoped to the
+-- parent request and do NOT propagate into ngx.location.capture subrequests
+-- via proxy_set_header, so we copy them onto request headers here; the
+-- _vs_backend_* locations then forward them to the upstream MCP server via
+-- $http_x_user/$http_x_username, enabling backends to enforce write-gates and
+-- record audit attribution.
+--
+-- SECURITY: $http_x_user is a CLIENT-controllable request header. The backend
+-- value must be the gateway-validated identity or nothing -- never a value the
+-- caller supplied. When auth_user is empty (e.g. an M2M / client-credentials
+-- token that authenticates with a client_id but no user), we must CLEAR any
+-- inbound X-User rather than leave it intact, otherwise a caller could spoof
+-- X-User to the backend. This mirrors the direct-server path, which forwards
+-- `proxy_set_header X-User $auth_user;` unconditionally so a client header can
+-- never survive. Always overwrite or clear; never pass through.
+local function _forward_identity_headers()
+    local auth_user = ngx.var.auth_user
+    local auth_username = ngx.var.auth_username
+    if auth_user and auth_user ~= "" then
+        ngx.req.set_header("X-User", auth_user)
+    else
+        ngx.req.clear_header("X-User")
+    end
+    if auth_username and auth_username ~= "" then
+        ngx.req.set_header("X-Username", auth_username)
+    else
+        ngx.req.clear_header("X-Username")
+    end
+end
+
+
+-- JSON Schema keywords whose value must serialize as an array.
+local SCHEMA_ARRAY_KEYS = {
+    required = true, enum = true, allOf = true, anyOf = true,
+    oneOf = true, examples = true, prefixItems = true,
+}
+
+-- Keywords holding a map of caller-chosen names to subschemas. A member named
+-- "required" there is a property name, not the keyword, so descend into the
+-- members without matching their names against SCHEMA_ARRAY_KEYS.
+local SCHEMA_MAP_KEYS = {
+    properties = true, patternProperties = true,
+    definitions = true, ["$defs"] = true,
+}
+
+-- cjson decodes an empty JSON array to a bare table, which re-encodes as {}.
+-- Tag those tables so the keywords above survive the round trip as [].
+local function _tag_empty_schema_arrays(node, depth)
+    if type(node) ~= "table" or depth > 16 then
+        return
+    end
+    for key, value in pairs(node) do
+        if type(value) == "table" then
+            if SCHEMA_MAP_KEYS[key] then
+                for _, subschema in pairs(value) do
+                    _tag_empty_schema_arrays(subschema, depth + 1)
+                end
+            elseif SCHEMA_ARRAY_KEYS[key] and next(value) == nil then
+                setmetatable(value, empty_array_mt)
+            else
+                _tag_empty_schema_arrays(value, depth + 1)
+            end
+        end
+    end
+end
+
+
 -- Ensure inputSchema has "type": "object" as required by MCP spec
 local function _ensure_mcp_schema(schema)
     if not schema or type(schema) ~= "table" then
         return { type = "object", properties = {} }
     end
+    _tag_empty_schema_arrays(schema, 0)
     if schema.type == "object" then
         return schema
     end
@@ -336,8 +406,27 @@ local function _collect_backend_locations(mapping)
 end
 
 
+-- Append mapping-file metadata for one backend when live discovery fails.
+local function _append_mapping_tools_for_backend(enriched_tools, mapping, backend_location)
+    if not mapping.tools then
+        return
+    end
+
+    for _, tool in ipairs(mapping.tools) do
+        if tool.backend_location == backend_location then
+            enriched_tools[#enriched_tools + 1] = {
+                name = tool.name,
+                description = tool.description or "",
+                inputSchema = _ensure_mcp_schema(tool.inputSchema),
+                required_scopes = tool.required_scopes,
+            }
+        end
+    end
+end
+
+
 -- Fetch tools/list from a single backend via ngx.location.capture.
--- Returns the tools array from the backend, or empty table on failure.
+-- Returns the tools array and true on success, or an empty table and false on failure.
 -- On stale session error (status >= 400), invalidates and retries once.
 local function _fetch_backend_tools_list(backend_location, client_session_id, server_id)
     local req_body = cjson.encode({
@@ -384,27 +473,33 @@ local function _fetch_backend_tools_list(backend_location, client_session_id, se
     if not res or res.status ~= 200 then
         ngx.log(ngx.ERR, "Failed to fetch tools/list from ", backend_location,
             " status=", res and res.status or "nil")
-        return {}
+        return {}, false
+    end
+
+    if res.truncated then
+        ngx.log(ngx.ERR, "Truncated tools/list response from ", backend_location)
+        return {}, false
     end
 
     -- Backend may respond with SSE format (text/event-stream) or raw JSON
     local json_body = _parse_sse_body(res.body)
     if not json_body then
         ngx.log(ngx.ERR, "Empty or unparseable tools/list response from ", backend_location)
-        return {}
+        return {}, false
     end
 
     local ok, data = pcall(cjson.decode, json_body)
     if not ok then
         ngx.log(ngx.ERR, "Failed to parse tools/list response from ", backend_location)
-        return {}
+        return {}, false
     end
 
-    if data.result and data.result.tools then
-        return data.result.tools
+    if data.result and type(data.result.tools) == "table" then
+        return data.result.tools, true
     end
 
-    return {}
+    ngx.log(ngx.ERR, "Missing tools array in tools/list response from ", backend_location)
+    return {}, false
 end
 
 
@@ -438,55 +533,45 @@ local function _handle_tools_list(request_id, mapping, user_scopes_str, client_s
     if not enriched_tools then
         enriched_tools = {}
         local backend_locations = _collect_backend_locations(mapping)
-        local fetch_ok = false
+        local all_fetches_ok = true
 
         for _, backend_loc in ipairs(backend_locations) do
-            local backend_tools = _fetch_backend_tools_list(backend_loc, client_session_id, server_id)
-            if #backend_tools > 0 then
-                fetch_ok = true
-            end
-
-            for _, bt in ipairs(backend_tools) do
-                local mapping_entry = allowed_tools[bt.name]
-                if mapping_entry then
-                    -- Use the mapping's display name (alias) instead of original name
-                    local display_name = mapping_entry.name
-                    -- Use mapping's description if non-empty (override), else backend's
-                    local desc = mapping_entry.description
-                    if not desc or desc == "" then
-                        desc = bt.description or ""
+            local backend_tools, backend_ok = _fetch_backend_tools_list(
+                backend_loc, client_session_id, server_id)
+            if backend_ok then
+                for _, bt in ipairs(backend_tools) do
+                    local mapping_entry = allowed_tools[bt.name]
+                    if mapping_entry then
+                        -- Use the mapping's display name (alias) instead of original name
+                        local display_name = mapping_entry.name
+                        -- Use mapping's description if non-empty (override), else backend's
+                        local desc = mapping_entry.description
+                        if not desc or desc == "" then
+                            desc = bt.description or ""
+                        end
+                        enriched_tools[#enriched_tools + 1] = {
+                            name = display_name,
+                            description = desc,
+                            inputSchema = _ensure_mcp_schema(bt.inputSchema or bt.input_schema),
+                            required_scopes = mapping_entry.required_scopes,
+                        }
                     end
-                    enriched_tools[#enriched_tools + 1] = {
-                        name = display_name,
-                        description = desc,
-                        inputSchema = _ensure_mcp_schema(bt.inputSchema or bt.input_schema),
-                        required_scopes = mapping_entry.required_scopes,
-                    }
                 end
+            else
+                all_fetches_ok = false
+                ngx.log(ngx.WARN, "Backend tools/list fetch failed for ", backend_loc,
+                    " -- falling back to mapping file metadata for this backend")
+                _append_mapping_tools_for_backend(enriched_tools, mapping, backend_loc)
             end
         end
 
-        -- Fallback: if all backend fetches failed, use mapping file metadata
-        if not fetch_ok then
-            ngx.log(ngx.WARN, "All backend tools/list fetches failed for server=", server_id,
-                " -- falling back to mapping file metadata")
-            enriched_tools = {}
-            if mapping.tools then
-                for _, tool in ipairs(mapping.tools) do
-                    enriched_tools[#enriched_tools + 1] = {
-                        name = tool.name,
-                        description = tool.description or "",
-                        inputSchema = _ensure_mcp_schema(tool.inputSchema),
-                        required_scopes = tool.required_scopes,
-                    }
-                end
+        -- Cache only fully discovered results. A fallback response remains complete,
+        -- but the next request should retry failed backends instead of serving it for 60s.
+        if all_fetches_ok then
+            local ok_enc, encoded = pcall(cjson.encode, enriched_tools)
+            if ok_enc then
+                session_cache:set(enriched_cache_key, encoded, ENRICHED_CACHE_TTL)
             end
-        end
-
-        -- Cache enriched tools (pre-scope-filtered, 60s TTL)
-        local ok_enc, encoded = pcall(cjson.encode, enriched_tools)
-        if ok_enc then
-            session_cache:set(enriched_cache_key, encoded, ENRICHED_CACHE_TTL)
         end
     end
 
@@ -947,6 +1032,10 @@ function _M.route()
     -- all ngx.location.capture subrequests to backends inherit it.
     ngx.req.set_header("Accept", "application/json, text/event-stream")
 
+    -- Forward the validated caller identity to backend subrequests (fail-closed:
+    -- always the gateway-validated value or cleared, never a client-supplied one).
+    _forward_identity_headers()
+
     local request_method = ngx.var.request_method
 
     -- Handle HTTP GET: per MCP Streamable HTTP 2025-11-25 spec section 3.3,
@@ -1175,6 +1264,17 @@ function _M.route()
         ngx.status = 200
         ngx.say(_jsonrpc_error(request_id, -32601, "Method not found: " .. tostring(method)))
     end
+end
+
+-- Test hook: when loaded by the Lua unit test (which sets _G._VR_TEST), expose
+-- internal helpers and return the module WITHOUT executing the router. In
+-- production _G._VR_TEST is nil, so this branch is skipped and route() runs.
+if _G._VR_TEST then
+    _M._fetch_backend_tools_list = _fetch_backend_tools_list
+    _M._append_mapping_tools_for_backend = _append_mapping_tools_for_backend
+    _M._handle_tools_list = _handle_tools_list
+    _M._forward_identity_headers = _forward_identity_headers
+    return _M
 end
 
 -- Execute routing

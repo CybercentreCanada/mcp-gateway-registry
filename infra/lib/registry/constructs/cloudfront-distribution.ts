@@ -1,14 +1,20 @@
 /**
- * CloudFrontDistribution - L3 construct that creates CloudFront distributions
- * for MCP Gateway and Keycloak with optional cross-region ACM certificates
- * and an S3 logging bucket.
+ * CloudFrontOriginDistribution - single-origin CloudFront distribution
+ * fronting an ALB, plus optional cross-region ACM certificate and shared
+ * access-log bucket.
  *
  * Translated from:
  *   - terraform/aws-ecs/cloudfront.tf
  *   - terraform/aws-ecs/cloudfront-acm.tf
  *   - terraform/aws-ecs/cloudfront-logging.tf
  *
- * This construct is a no-op when config.cloudfront.enabled is false.
+ * Each caller (Registry-Auth for Keycloak, Registry-Service for the registry
+ * ALB) instantiates one of these. Splitting per origin lets each stack own
+ * its own CloudFront distribution, which breaks the earlier cross-stack
+ * cycle: Auth reads its own distribution's domain to build KC_HOSTNAME
+ * without needing a separate CDN stack.
+ *
+ * No-op when config.cloudfront.enabled is false.
  */
 
 import * as cdk from 'aws-cdk-lib';
@@ -20,136 +26,118 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 import { RegistryConfig } from '../registry-config';
 
-// ---------------------------------------------------------------------------
-// Props
-// ---------------------------------------------------------------------------
-
-export interface CloudFrontDistributionProps {
+export interface CloudFrontOriginDistributionProps {
   readonly config: RegistryConfig;
-  /** DNS name of the MCP Gateway ALB */
-  readonly registryAlbDns: string;
-  /** DNS name of the Keycloak ALB */
-  readonly keycloakAlbDns: string;
-  /** Root hosted zone domain (e.g. mycorp.click) for cross-region certificates */
-  readonly hostedZoneDomain: string;
+  /** DNS name of the ALB origin */
+  readonly albDns: string;
+  /** Custom domain alias for this distribution (empty when Route53 disabled) */
+  readonly customDomain: string;
+  /** Route53 hosted zone (used for DNS-validated ACM cert issuance) */
+  readonly hostedZone?: route53.IHostedZone;
+  /** CloudFront distribution comment */
+  readonly comment: string;
+  /** S3 log prefix inside the shared access-log bucket */
+  readonly logsPrefix: string;
+  /** Emit X-Cloudfront-Forwarded-Proto in addition to X-Forwarded-Proto */
+  readonly emitCloudFrontForwardedProtoHeader: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Construct
-// ---------------------------------------------------------------------------
+export class CloudFrontOriginDistribution extends Construct {
+  /** CloudFront distribution (undefined when CloudFront disabled) */
+  public readonly distribution?: cloudfront.IDistribution;
 
-export class CloudFrontDistribution extends Construct {
-  /** Domain name of the MCP Gateway CloudFront distribution */
-  public readonly mcpGatewayDistributionDomainName: string;
+  /** Distribution domain name (empty string when CloudFront disabled) */
+  public readonly distributionDomainName: string;
 
-  /** Domain name of the Keycloak CloudFront distribution */
-  public readonly keycloakDistributionDomainName: string;
+  /** Full HTTPS URL to the distribution (empty when CloudFront disabled) */
+  public readonly url: string;
 
-  constructor(scope: Construct, id: string, props: CloudFrontDistributionProps) {
+  constructor(scope: Construct, id: string, props: CloudFrontOriginDistributionProps) {
     super(scope, id);
 
-    const { config, registryAlbDns, keycloakAlbDns, hostedZoneDomain } = props;
+    const { config, albDns, customDomain, hostedZone, comment, logsPrefix } = props;
 
-    // No-op when CloudFront is disabled
     if (!config.cloudfront.enabled) {
-      this.mcpGatewayDistributionDomainName = '';
-      this.keycloakDistributionDomainName = '';
+      this.distributionDomainName = '';
+      this.url = '';
       return;
     }
 
-    // ------------------------------------------------------------------
-    // S3 bucket for CloudFront access logs
-    // ------------------------------------------------------------------
+    const logsBucket = _getOrCreateLogsBucket(this, config);
 
-    const logsBucket = _createLogsBucket(this, config);
+    const certificate = _createCrossRegionCert(this, config, hostedZone, customDomain);
 
-    // ------------------------------------------------------------------
-    // Cross-region ACM certificates (us-east-1) - only when Route53 is also enabled
-    // ------------------------------------------------------------------
+    const customHeaders: Record<string, string> = {
+      'X-Forwarded-Proto': 'https',
+    };
+    if (props.emitCloudFrontForwardedProtoHeader) {
+      customHeaders['X-Cloudfront-Forwarded-Proto'] = 'https';
+    }
 
-    // Look up the Route53 hosted zone when custom domains are enabled
-    const hostedZone = config.enableRoute53Dns
-      ? route53.HostedZone.fromLookup(this, 'HostedZone', {
-          domainName: hostedZoneDomain,
-        })
-      : undefined;
+    const origin = new origins.HttpOrigin(albDns, {
+      protocolPolicy: cloudfront.OriginProtocolPolicy.HTTP_ONLY,
+      httpPort: 80,
+      httpsPort: 443,
+      customHeaders,
+    });
 
-    const registryCert = _createCrossRegionCert(
-      this,
-      'RegistryCert',
-      config,
-      hostedZone,
-      `registry.${hostedZoneDomain}`,
-    );
+    const certificateConfig: {
+      certificate?: acm.ICertificate;
+      domainNames?: string[];
+      sslSupportMethod?: cloudfront.SSLMethod;
+      minimumProtocolVersion?: cloudfront.SecurityPolicyProtocol;
+    } = {};
+    if (certificate && customDomain !== '') {
+      certificateConfig.certificate = certificate;
+      certificateConfig.domainNames = [customDomain];
+      certificateConfig.sslSupportMethod = cloudfront.SSLMethod.SNI;
+      certificateConfig.minimumProtocolVersion = cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021;
+    }
 
-    const keycloakDomain = config.useRegionalDomains
-      ? `kc.${config.awsRegion}.${config.baseDomain}`
-      : config.keycloak.domain;
-
-    const keycloakCert = _createCrossRegionCert(
-      this,
-      'KeycloakCert',
-      config,
-      hostedZone,
-      keycloakDomain,
-    );
-
-    // ------------------------------------------------------------------
-    // MCP Gateway CloudFront distribution
-    // ------------------------------------------------------------------
-
-    const mcpGatewayDistribution = _createDistribution(
-      this,
-      'McpGateway',
-      {
-        config,
-        albDns: registryAlbDns,
-        originId: 'mcp-gateway-alb',
-        comment: `${config.name} MCP Gateway Registry CloudFront Distribution`,
-        logsBucket,
-        logsPrefix: 'mcp-gateway/',
-        certificate: registryCert,
-        domainAlias: config.enableRoute53Dns ? `registry.${hostedZoneDomain}` : undefined,
-        includeCloudFrontForwardedProtoHeader: true,
+    const distribution = new cloudfront.Distribution(this, 'Distribution', {
+      enabled: true,
+      comment,
+      priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
+      enableLogging: true,
+      logBucket: logsBucket,
+      logFilePrefix: logsPrefix,
+      logIncludesCookies: false,
+      defaultBehavior: {
+        origin,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+        cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER,
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        compress: true,
       },
-    );
+      ...certificateConfig,
+    });
 
-    this.mcpGatewayDistributionDomainName = mcpGatewayDistribution.distributionDomainName;
+    cdk.Tags.of(distribution).add('Component', id.toLowerCase());
 
-    // ------------------------------------------------------------------
-    // Keycloak CloudFront distribution
-    // ------------------------------------------------------------------
-
-    const keycloakDistribution = _createDistribution(
-      this,
-      'Keycloak',
-      {
-        config,
-        albDns: keycloakAlbDns,
-        originId: 'keycloak-alb',
-        comment: `${config.name} Keycloak CloudFront Distribution`,
-        logsBucket,
-        logsPrefix: 'keycloak/',
-        certificate: keycloakCert,
-        domainAlias: config.enableRoute53Dns ? keycloakDomain : undefined,
-        includeCloudFrontForwardedProtoHeader: false,
-      },
-    );
-
-    this.keycloakDistributionDomainName = keycloakDistribution.distributionDomainName;
+    this.distribution = distribution;
+    this.distributionDomainName = distribution.distributionDomainName;
+    this.url = `https://${distribution.distributionDomainName}`;
   }
 }
 
-// ---------------------------------------------------------------------------
-// Private helpers
-// ---------------------------------------------------------------------------
-
 /**
- * Create the S3 bucket for CloudFront access logs with full security hardening.
+ * Create (or reuse) the shared CloudFront access-log bucket for the current
+ * stack. Each stack that hosts a CloudFrontOriginDistribution ends up with
+ * one bucket; each distribution uses its own logsPrefix.
  */
-function _createLogsBucket(scope: Construct, config: RegistryConfig): s3.Bucket {
-  const bucket = new s3.Bucket(scope, 'LogsBucket', {
-    bucketName: `ai-registry-${config.awsRegion}-cloudfront-logs`,
+function _getOrCreateLogsBucket(scope: Construct, config: RegistryConfig): s3.IBucket {
+  const stack = cdk.Stack.of(scope);
+  const bucketId = 'CloudFrontLogsBucket';
+  const existing = stack.node.tryFindChild(bucketId) as s3.Bucket | undefined;
+  if (existing) {
+    return existing;
+  }
+  const bucket = new s3.Bucket(stack, bucketId, {
+    // Include account ID + stack name because S3 bucket names are globally
+    // unique. Stack name suffix disambiguates Auth vs Service log buckets.
+    bucketName: `${config.name}-${stack.region}-${stack.account}-${stack.stackName.toLowerCase()}-cflogs`,
     blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
     encryption: s3.BucketEncryption.S3_MANAGED,
     versioned: true,
@@ -164,121 +152,29 @@ function _createLogsBucket(scope: Construct, config: RegistryConfig): s3.Bucket 
       },
     ],
   });
-
   cdk.Tags.of(bucket).add('Purpose', 'CloudFront access logs');
   cdk.Tags.of(bucket).add('Component', 'logging');
-
   return bucket;
 }
 
 /**
  * Create a cross-region ACM certificate in us-east-1 for CloudFront.
- * Only created when both CloudFront and Route53 DNS are enabled.
- * Returns undefined when Route53 is disabled.
+ * Only created when both CloudFront and a hostedZone + customDomain are
+ * provided. Returns undefined otherwise.
  */
 function _createCrossRegionCert(
   scope: Construct,
-  id: string,
   config: RegistryConfig,
   hostedZone: route53.IHostedZone | undefined,
   domainName: string,
 ): acm.ICertificate | undefined {
-  if (!config.enableRoute53Dns || !hostedZone) {
+  if (!config.enableRoute53Dns || !hostedZone || domainName === '') {
     return undefined;
   }
-
-  // DnsValidatedCertificate handles cross-region provisioning in us-east-1
-  // and automatic DNS validation via Route53.
-  const cert = new acm.DnsValidatedCertificate(scope, id, {
+  return new acm.DnsValidatedCertificate(scope, 'Cert', {
     domainName,
     hostedZone,
     region: 'us-east-1',
     cleanupRoute53Records: true,
   });
-
-  return cert;
-}
-
-/**
- * Configuration for a single CloudFront distribution.
- */
-interface DistributionConfig {
-  readonly config: RegistryConfig;
-  readonly albDns: string;
-  readonly originId: string;
-  readonly comment: string;
-  readonly logsBucket: s3.IBucket;
-  readonly logsPrefix: string;
-  readonly certificate: acm.ICertificate | undefined;
-  readonly domainAlias: string | undefined;
-  readonly includeCloudFrontForwardedProtoHeader: boolean;
-}
-
-/**
- * Create a CloudFront distribution for an ALB origin.
- *
- * - HTTP-only origin to avoid TLS certificate mismatch with ALB DNS names.
- * - Caching disabled; AllViewer origin request policy forwards all headers.
- * - PriceClass_100 (NA + EU edge locations).
- * - Compression enabled.
- */
-function _createDistribution(
-  scope: Construct,
-  id: string,
-  distConfig: DistributionConfig,
-): cloudfront.Distribution {
-  // Build custom origin headers
-  const customHeaders: Record<string, string> = {
-    'X-Forwarded-Proto': 'https',
-  };
-
-  if (distConfig.includeCloudFrontForwardedProtoHeader) {
-    customHeaders['X-Cloudfront-Forwarded-Proto'] = 'https';
-  }
-
-  const origin = new origins.HttpOrigin(distConfig.albDns, {
-    protocolPolicy: cloudfront.OriginProtocolPolicy.HTTP_ONLY,
-    httpPort: 80,
-    httpsPort: 443,
-    customHeaders,
-  });
-
-  // Determine viewer certificate configuration
-  const certificateConfig: {
-    certificate?: acm.ICertificate;
-    domainNames?: string[];
-    sslSupportMethod?: cloudfront.SSLMethod;
-    minimumProtocolVersion?: cloudfront.SecurityPolicyProtocol;
-  } = {};
-
-  if (distConfig.certificate && distConfig.domainAlias) {
-    certificateConfig.certificate = distConfig.certificate;
-    certificateConfig.domainNames = [distConfig.domainAlias];
-    certificateConfig.sslSupportMethod = cloudfront.SSLMethod.SNI;
-    certificateConfig.minimumProtocolVersion = cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021;
-  }
-
-  const distribution = new cloudfront.Distribution(scope, `${id}Distribution`, {
-    enabled: true,
-    comment: distConfig.comment,
-    priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
-    enableLogging: true,
-    logBucket: distConfig.logsBucket,
-    logFilePrefix: distConfig.logsPrefix,
-    logIncludesCookies: false,
-    defaultBehavior: {
-      origin,
-      allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-      cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
-      cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-      originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER,
-      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-      compress: true,
-    },
-    ...certificateConfig,
-  });
-
-  cdk.Tags.of(distribution).add('Component', id.toLowerCase());
-
-  return distribution;
 }

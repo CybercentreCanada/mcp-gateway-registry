@@ -15,9 +15,10 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys
+
 import matplotlib.pyplot as plt
 import seaborn as sns
-import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -181,7 +182,7 @@ def _plot_single_facet(
     ax.set_title(title, fontsize=12, fontweight="bold")
     ax.set_xlabel("")
 
-    for bar, count in zip(bars, counts):
+    for bar, count in zip(bars, counts, strict=False):
         pct = count / total * 100
         label_text = f" {count} ({pct:.0f}%)"
         ax.text(
@@ -261,10 +262,7 @@ def _filter_rows_new_on_date(
             earliest_per_id[rid] = ts
 
     if range_start:
-        new_ids = {
-            rid for rid, ts in earliest_per_id.items()
-            if range_start <= ts <= new_date
-        }
+        new_ids = {rid for rid, ts in earliest_per_id.items() if range_start <= ts <= new_date}
         label = f"first-seen in {range_start}..{new_date}"
     else:
         new_ids = {rid for rid, ts in earliest_per_id.items() if ts == new_date}
@@ -320,8 +318,7 @@ def _generate_chart(
 
     if new_on_date and new_range_start:
         title_suffix = (
-            f"\n(New installs {new_range_start} to {new_on_date}: "
-            f"{total} unique instances)"
+            f"\n(New installs {new_range_start} to {new_on_date}: {total} unique instances)"
         )
     elif new_on_date:
         title_suffix = f"\n(New installs on {new_on_date}: {total} unique instances)"

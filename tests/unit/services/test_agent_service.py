@@ -9,7 +9,7 @@ than MagicMock behavior.
 import logging
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -260,6 +260,20 @@ class TestRegisterAgent:
             await agent_service.register_agent(AgentCardFactory(path="/duplicate"))
 
     @pytest.mark.asyncio
+    async def test_register_agent_fails_for_duplicate_id(
+        self,
+        agent_service: AgentService,
+        fake_repo: InMemoryAgentRepository,
+    ):
+        """A caller-supplied id colliding with an existing agent -> 409 (#1276)."""
+        from registry.exceptions import AssetIdConflictError
+
+        await fake_repo.create(AgentCardFactory(path="/first", id="arn:aws:x"))
+
+        with pytest.raises(AssetIdConflictError):
+            await agent_service.register_agent(AgentCardFactory(path="/second", id="arn:aws:x"))
+
+    @pytest.mark.asyncio
     async def test_register_agent_defaults_to_disabled(
         self,
         agent_service: AgentService,
@@ -470,6 +484,81 @@ class TestUpdateAgent:
         with pytest.raises(ValueError, match="Invalid"):
             await agent_service.update_agent("/test-agent", {"num_stars": 10.0})
 
+    @pytest.mark.asyncio
+    async def test_update_enabled_agent_marks_nginx_dirty(
+        self,
+        agent_service: AgentService,
+        fake_repo: InMemoryAgentRepository,
+    ):
+        """Updating an enabled agent regenerates nginx config (backend url may change)."""
+        await fake_repo.create(AgentCardFactory(path="/test-agent"))
+        await fake_repo.set_state("/test-agent", True)
+
+        with patch("registry.core.nginx_service.nginx_reload_scheduler") as scheduler:
+            await agent_service.update_agent("/test-agent", {"description": "Updated"})
+
+        scheduler.mark_dirty.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_update_disabled_agent_does_not_mark_nginx_dirty(
+        self,
+        agent_service: AgentService,
+        fake_repo: InMemoryAgentRepository,
+    ):
+        """A disabled agent has no proxy block, so update skips nginx regeneration."""
+        await fake_repo.create(AgentCardFactory(path="/test-agent"))
+
+        with patch("registry.core.nginx_service.nginx_reload_scheduler") as scheduler:
+            await agent_service.update_agent("/test-agent", {"description": "Updated"})
+
+        scheduler.mark_dirty.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_agent_repoint_clears_upstream_headers(
+        self,
+        agent_service: AgentService,
+        fake_repo: InMemoryAgentRepository,
+    ):
+        """Repointing a proxied agent's backend to a different host clears its
+        stored upstream custom headers (credential-misdirection guard)."""
+        await fake_repo.create(
+            AgentCardFactory(
+                path="/proxied-agent",
+                is_proxied=True,
+                proxy_target_url="https://old.example.com",
+                custom_headers_encrypted=[{"name": "X-Api-Key", "value_encrypted": "gAAAAAdummy"}],
+                custom_header_names=["X-Api-Key"],
+                custom_header_overridable_names=["X-Api-Key"],
+                custom_headers_updated_at="2024-01-01T00:00:00Z",
+            )
+        )
+
+        captured: dict[str, Any] = {}
+        original_update = fake_repo.update
+
+        async def spy_update(path: str, updates: dict[str, Any]) -> AgentCard:
+            captured["updates"] = updates
+            return await original_update(path, updates)
+
+        # Patch the proxy validate-and-pin hop to avoid DNS/egress while the
+        # in-service repoint guard (clear_upstream_headers_on_repoint) still runs.
+        with (
+            patch(
+                "registry.services.agent_service._validate_and_pin_agent_proxy",
+                new=AsyncMock(),
+            ),
+            patch.object(fake_repo, "update", new=spy_update),
+        ):
+            await agent_service.update_agent(
+                "/proxied-agent", {"proxy_target_url": "https://new.example.com"}
+            )
+
+        persisted = captured["updates"]
+        assert persisted["custom_headers_encrypted"] is None
+        assert persisted["custom_header_names"] == []
+        assert persisted["custom_header_overridable_names"] == []
+        assert persisted["custom_headers_updated_at"] is None
+
 
 # =============================================================================
 # TEST: Delete Agent
@@ -532,6 +621,37 @@ class TestDeleteAgent:
         result = await agent_service.remove_agent("/nonexistent")
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_delete_enabled_agent_marks_nginx_dirty(
+        self,
+        agent_service: AgentService,
+        fake_repo: InMemoryAgentRepository,
+    ):
+        """Deleting an enabled agent removes its proxy block, triggering nginx reload."""
+        await fake_repo.create(AgentCardFactory(path="/test-agent"))
+        await fake_repo.set_state("/test-agent", True)
+
+        with patch("registry.core.nginx_service.nginx_reload_scheduler") as scheduler:
+            result = await agent_service.delete_agent("/test-agent")
+
+        assert result is True
+        scheduler.mark_dirty.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_delete_disabled_agent_does_not_mark_nginx_dirty(
+        self,
+        agent_service: AgentService,
+        fake_repo: InMemoryAgentRepository,
+    ):
+        """A disabled agent had no proxy block, so delete skips nginx regeneration."""
+        await fake_repo.create(AgentCardFactory(path="/test-agent"))
+
+        with patch("registry.core.nginx_service.nginx_reload_scheduler") as scheduler:
+            result = await agent_service.delete_agent("/test-agent")
+
+        assert result is True
+        scheduler.mark_dirty.assert_not_called()
 
 
 # =============================================================================

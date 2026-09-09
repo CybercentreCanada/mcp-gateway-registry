@@ -511,10 +511,16 @@ class TestRemoveServiceDeletePermissionKey:
     """
 
     def _server_info(self):
-        """Server whose stored name intentionally differs from the URL path token."""
+        """Server whose stored name intentionally differs from the URL path token.
+
+        ``registered_by`` is set to the deleting caller so this suite isolates
+        the permission-key behavior; the ownership guard (deletion requires
+        owner-or-admin) is exercised separately.
+        """
         return {
             "path": "/victim",
             "server_name": "victim-server",
+            "registered_by": "deleter",
             "sync_metadata": {},
         }
 

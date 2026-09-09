@@ -8,15 +8,22 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 import httpx
 
+from registry.common.log_redaction import redact_url
 from registry.constants import REGISTRY_CONSTANTS, DeploymentType, HealthStatus
+from registry.schemas.proxy_mixin import _assert_egress_allowed, build_proxy_client_path
 
 from .config import settings
-from .metrics import NGINX_CONFIG_WRITES, NGINX_UPDATES_SKIPPED
+from .endpoint_utils import get_endpoint_url_from_server_info
+from .metrics import (
+    GATEWAY_GENERIC_BLOCKS_DROPPED,
+    NGINX_CONFIG_WRITES,
+    NGINX_UPDATES_SKIPPED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +32,30 @@ logger = logging.getLogger(__name__)
 # exists yet. Subsequent writes preserve whatever mode the destination
 # currently has so an operator's chmod isn't silently reverted.
 DEFAULT_NGINX_CONFIG_MODE: int = 0o644
+
+# Route prefix under which enabled A2A agents are reverse-proxied through the
+# gateway. An agent registered at path "/flight-booking-agent" is
+# reachable at "{ROOT_PATH}/agent/flight-booking-agent/".
+AGENT_ROUTE_PREFIX: str = "/agent"
+
+# Agent path and backend url come from registry data and are interpolated into
+# nginx directive positions, so they must be validated to prevent config
+# injection (e.g. "}", ";", newlines breaking out of the location block).
+_NGINX_AGENT_PATH_SAFE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+# The path segment also accepts percent-encoded octets (%XX), because a Bedrock
+# AgentCore runtime url embeds a percent-encoded ARN:
+#   https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded-ARN}/invocations
+# (built by cli/agentcore/models.py::build_invocation_url). Rejecting those made
+# every AgentCore A2A agent unroutable through the gateway.
+#
+# Only a COMPLETE triplet is allowed -- `%` must be followed by exactly two hex
+# digits -- so a bare or truncated `%` still fails. That keeps the anti-injection
+# guarantee: no unescaped `%` can reach an nginx directive position, and the
+# characters that would break out of the location block (`}`, `;`, whitespace,
+# newlines) remain excluded because they are not hex digits.
+_NGINX_AGENT_URL_SAFE = re.compile(
+    r"^https?://[A-Za-z0-9.\-]+(?::\d+)?(?:/(?:[A-Za-z0-9._~\-/]|%[0-9A-Fa-f]{2})*)?$"
+)
 
 
 # Headroom added on top of the auth-server mcp-proxy hop's own upstream timeout
@@ -46,6 +77,207 @@ MCP_PROXY_NGINX_READ_TIMEOUT_BUFFER_SECONDS: int = 30
 # subnet does not trip the warning.
 MIN_TRUSTED_REAL_IP_PREFIXLEN_V4: int = 8
 MIN_TRUSTED_REAL_IP_PREFIXLEN_V6: int = 32
+
+
+# TLS trust for the nginx -> IdP runtime reverse proxies.
+#
+# The gateway reverse-proxies IdP front-channel endpoints (PingFederate's /as/,
+# /pf/, /ext/, /idp/, /assets/, /.well-known/openid-configuration; Keycloak's
+# /keycloak/, /realms/, /resources/) that carry the token exchange, JWKS, and
+# OIDC discovery. When the upstream URL is https, upstream certificate
+# verification MUST be ON (fail closed): a MITM between nginx and the IdP that
+# could present an untrusted cert would be able to substitute JWKS (forge
+# tokens) or intercept the token exchange, an authentication bypass for every
+# user of that IdP. A private/self-signed IdP runtime certificate is trusted
+# explicitly by pointing the IdP's CA-bundle env var at the PEM file that signed
+# it, NOT by disabling verification. The default path lives under the certs
+# mount so a private-CA deployment only has to drop the bundle in place. This
+# code path NEVER emits ``proxy_ssl_verify off``.
+_PINGFEDERATE_CA_BUNDLE_ENV: str = "PINGFEDERATE_CA_BUNDLE"
+_PINGFEDERATE_CA_BUNDLE_DEFAULT: str = "/etc/nginx/certs/pingfederate-ca.pem"
+
+_KEYCLOAK_CA_BUNDLE_ENV: str = "KEYCLOAK_CA_BUNDLE"
+_KEYCLOAK_CA_BUNDLE_DEFAULT: str = "/etc/nginx/certs/keycloak-ca.pem"
+
+# Depth of the certificate chain nginx will verify for an IdP upstream.
+# 2 accommodates a leaf signed by an intermediate under the supplied root.
+_IDP_SSL_VERIFY_DEPTH: int = 2
+
+
+def _resolve_ca_bundle(
+    env_var: str,
+    default_path: str,
+) -> str:
+    """Resolve a CA bundle path used to verify an IdP upstream certificate.
+
+    Reads ``env_var`` and falls back to a documented default under the nginx
+    certs mount. The value is only consumed when the IdP upstream scheme is
+    https; it is not validated for existence here because the file lives in the
+    nginx container's filesystem (a different mount than the registry process),
+    and ``nginx -t`` / nginx startup is the authoritative check. Verification
+    stays ON regardless, so a missing/unreadable bundle makes nginx reject the
+    upstream cert (fail closed) rather than trusting anything.
+
+    Args:
+        env_var: Environment variable naming the PEM CA bundle path.
+        default_path: Fallback path used when the env var is unset/empty.
+
+    Returns:
+        Absolute path to the PEM CA bundle for the IdP upstream.
+    """
+    configured = os.environ.get(env_var, "").strip()
+    return configured or default_path
+
+
+def _render_idp_proxy_ssl(
+    idp_label: str,
+    base_url_env: str,
+    scheme: str,
+    host: str,
+    ca_bundle: str,
+) -> str:
+    """Render an IdP reverse-proxy ``proxy_ssl`` directive block (fail closed).
+
+    Shared renderer for every IdP upstream ``{{*_PROXY_SSL}}`` placeholder.
+    Behavior is gated on the upstream scheme:
+
+    - https: emit fail-closed TLS verification -- ``proxy_ssl_verify on`` plus a
+      trusted CA bundle, verify depth, and SNI/hostname pinning against the
+      configured upstream host. This is what closes the MITM/auth-bypass hole;
+      the result is NEVER ``proxy_ssl_verify off``.
+    - http: there is no TLS to verify, so emit only an explanatory comment. Note
+      that plaintext to the IdP is itself an insecure-transport concern
+      (documented for operators), but this function must not silently weaken the
+      https path to accommodate it.
+
+    Args:
+        idp_label: Human-readable IdP name for log/comment text (e.g. "Keycloak").
+        base_url_env: Name of the env var that supplies the upstream URL, used in
+            the plaintext-warning remediation hint.
+        scheme: Upstream scheme parsed from the IdP base URL.
+        host: Upstream hostname parsed from the IdP base URL, used for SNI and
+            certificate hostname verification.
+        ca_bundle: PEM CA bundle path nginx trusts for the upstream cert.
+
+    Returns:
+        The nginx directive text (indented to sit inside a ``location`` block)
+        that replaces the corresponding ``{{*_PROXY_SSL}}`` placeholder.
+    """
+    if scheme != "https":
+        logger.warning(
+            "%s upstream scheme is '%s' (not https); nginx will proxy the IdP "
+            "token/JWKS/discovery traffic in plaintext. TLS verification does not "
+            "apply. Set %s to an https:// URL to secure this hop.",
+            idp_label,
+            scheme,
+            base_url_env,
+        )
+        # http upstream: nothing to verify. Keep a placeholder line so the
+        # rendered location block stays syntactically valid.
+        return f"# proxy_ssl_verify not applicable: {idp_label} upstream is http (plaintext)"
+
+    logger.info(
+        "%s upstream is https; enforcing proxy_ssl_verify on with CA bundle '%s' "
+        "and hostname pinning to '%s'.",
+        idp_label,
+        ca_bundle,
+        host,
+    )
+    return (
+        "proxy_ssl_verify on;\n"
+        f"        proxy_ssl_verify_depth {_IDP_SSL_VERIFY_DEPTH};\n"
+        f"        proxy_ssl_trusted_certificate {ca_bundle};\n"
+        "        proxy_ssl_server_name on;\n"
+        f"        proxy_ssl_name {host};"
+    )
+
+
+def _resolve_pingfederate_ca_bundle() -> str:
+    """Resolve the CA bundle path used to verify the PingFederate upstream cert.
+
+    Reads ``PINGFEDERATE_CA_BUNDLE`` and falls back to a documented default under
+    the nginx certs mount. See :func:`_resolve_ca_bundle` for the fail-closed
+    rationale.
+
+    Returns:
+        Absolute path to the PEM CA bundle for the PingFederate upstream.
+    """
+    return _resolve_ca_bundle(_PINGFEDERATE_CA_BUNDLE_ENV, _PINGFEDERATE_CA_BUNDLE_DEFAULT)
+
+
+def _resolve_keycloak_ca_bundle() -> str:
+    """Resolve the CA bundle path used to verify the Keycloak upstream cert.
+
+    Reads ``KEYCLOAK_CA_BUNDLE`` and falls back to a documented default under the
+    nginx certs mount. See :func:`_resolve_ca_bundle` for the fail-closed
+    rationale.
+
+    Returns:
+        Absolute path to the PEM CA bundle for the Keycloak upstream.
+    """
+    return _resolve_ca_bundle(_KEYCLOAK_CA_BUNDLE_ENV, _KEYCLOAK_CA_BUNDLE_DEFAULT)
+
+
+def _render_pingfederate_proxy_ssl(
+    pf_scheme: str,
+    pf_host: str,
+) -> str:
+    """Render the ``{{PINGFEDERATE_PROXY_SSL}}`` directive block (fail closed).
+
+    Thin wrapper over :func:`_render_idp_proxy_ssl` for the PingFederate
+    front-channel locations. For an https upstream it enforces
+    ``proxy_ssl_verify on`` with a trusted CA bundle and SNI/hostname pinning;
+    for an http upstream it emits only a comment and never
+    ``proxy_ssl_verify off``.
+
+    Args:
+        pf_scheme: Upstream scheme parsed from ``PINGFEDERATE_BASE_URL``.
+        pf_host: Upstream hostname parsed from ``PINGFEDERATE_BASE_URL``, used for
+            SNI and certificate hostname verification.
+
+    Returns:
+        The nginx directive text that replaces every ``{{PINGFEDERATE_PROXY_SSL}}``
+        placeholder.
+    """
+    return _render_idp_proxy_ssl(
+        idp_label="PingFederate",
+        base_url_env="PINGFEDERATE_BASE_URL",
+        scheme=pf_scheme,
+        host=pf_host,
+        ca_bundle=_resolve_pingfederate_ca_bundle(),
+    )
+
+
+def _render_keycloak_proxy_ssl(
+    keycloak_scheme: str,
+    keycloak_host: str,
+) -> str:
+    """Render the ``{{KEYCLOAK_PROXY_SSL}}`` directive block (fail closed).
+
+    Thin wrapper over :func:`_render_idp_proxy_ssl` for the Keycloak
+    reverse-proxy locations (``/keycloak/``, ``/realms/``, ``/resources/``) that
+    carry Keycloak's JWKS, token, and OIDC discovery traffic. The shipped default
+    upstream is in-cluster ``http://keycloak:8080`` (plaintext, no verification
+    to perform), but when an operator points ``KEYCLOAK_URL`` at an https endpoint
+    this enforces ``proxy_ssl_verify on`` with a trusted CA bundle and
+    SNI/hostname pinning. It never emits ``proxy_ssl_verify off``.
+
+    Args:
+        keycloak_scheme: Upstream scheme parsed from ``KEYCLOAK_URL``.
+        keycloak_host: Upstream hostname parsed from ``KEYCLOAK_URL``, used for SNI
+            and certificate hostname verification.
+
+    Returns:
+        The nginx directive text that replaces every ``{{KEYCLOAK_PROXY_SSL}}``
+        placeholder.
+    """
+    return _render_idp_proxy_ssl(
+        idp_label="Keycloak",
+        base_url_env="KEYCLOAK_URL",
+        scheme=keycloak_scheme,
+        host=keycloak_host,
+        ca_bundle=_resolve_keycloak_ca_bundle(),
+    )
 
 
 def _resolve_mcp_proxy_read_timeout_seconds() -> int:
@@ -227,7 +459,7 @@ def _atomic_write_text(
         NGINX_CONFIG_WRITES.labels(status="failure").inc()
         try:
             tmp.close()
-        except Exception:
+        except Exception:  # nosec B110 - best-effort cleanup of temp file on write failure
             pass
         try:
             tmp_path.unlink()
@@ -806,6 +1038,15 @@ class NginxConfigService:
 
                 unprotected_api_block = """    # API endpoints - FastAPI handles authentication (session cookie / bearer)
     location {{ROOT_PATH}}/api/ {
+        # Inbound rate limits still apply even though auth_request is bypassed:
+        # /api/ is the highest-volume surface and must stay bounded at the edge,
+        # and the registration endpoints keep their stricter per-source cap (the
+        # register zone key is empty for non-registration URIs, so it is a no-op
+        # for the rest of /api/).
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_req zone=mcp_gateway_register burst=10 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         # Proxy to FastAPI service
         proxy_pass http://127.0.0.1:7860/api/;
         proxy_http_version 1.1;
@@ -935,39 +1176,44 @@ class NginxConfigService:
             # This always runs so the Keycloak template placeholders are filled even
             # when another provider is active (the location blocks are stripped above).
             keycloak_url = os.environ.get("KEYCLOAK_URL", "http://keycloak:8080")
-            try:
-                parsed_keycloak = urlparse(keycloak_url)
-                keycloak_scheme = parsed_keycloak.scheme or "http"
-                keycloak_host = parsed_keycloak.hostname or "keycloak"
-                # Use default port based on scheme if not specified
-                if parsed_keycloak.port:
-                    keycloak_port = str(parsed_keycloak.port)
-                else:
-                    keycloak_port = "443" if keycloak_scheme == "https" else "8080"
+            # Parse scheme and host FIRST so that a downstream port-parse failure
+            # (urlparse raises ValueError on an out-of-range port) can never
+            # silently downgrade an intended https upstream to http. Downgrading
+            # to http would drop the fail-closed proxy_ssl_verify block, so we
+            # preserve the intended scheme and let nginx -t reject a genuinely
+            # malformed URL rather than trust an unverified https hop.
+            parsed_keycloak = urlparse(keycloak_url)
+            keycloak_scheme = parsed_keycloak.scheme or "http"
+            keycloak_host = parsed_keycloak.hostname or "keycloak"
 
-                # Validate that we can actually resolve the hostname
-                if not keycloak_host or keycloak_host == "keycloak":
-                    # If we end up with just 'keycloak', use the full URL's netloc instead
-                    keycloak_host = (
-                        parsed_keycloak.netloc.split(":")[0]
-                        if parsed_keycloak.netloc
-                        else "keycloak"
-                    )
-                    logger.warning(
-                        f"Keycloak hostname is 'keycloak', using netloc instead: {keycloak_host}"
-                    )
-
-                logger.info(
-                    f"Using Keycloak configuration from KEYCLOAK_URL '{keycloak_url}': "
-                    f"{keycloak_scheme}://{keycloak_host}:{keycloak_port}"
+            # Validate that we can actually resolve the hostname
+            if not keycloak_host or keycloak_host == "keycloak":
+                # If we end up with just 'keycloak', use the full URL's netloc instead
+                keycloak_host = (
+                    parsed_keycloak.netloc.split(":")[0] if parsed_keycloak.netloc else "keycloak"
                 )
-            except Exception as e:
                 logger.warning(
-                    f"Failed to parse KEYCLOAK_URL '{keycloak_url}': {e}. Using defaults."
+                    f"Keycloak hostname is 'keycloak', using netloc instead: {keycloak_host}"
                 )
-                keycloak_scheme = "http"
-                keycloak_host = "keycloak"
-                keycloak_port = "8080"
+
+            # Resolve the port separately. Only ``.port`` can raise (bad port);
+            # on failure fall back to the scheme default WITHOUT touching the
+            # already-parsed scheme, so an https URL stays https (verify on).
+            try:
+                keycloak_port = str(parsed_keycloak.port or "")
+            except ValueError as e:
+                logger.warning(
+                    f"Invalid port in KEYCLOAK_URL '{keycloak_url}': {e}. "
+                    f"Using scheme default (scheme '{keycloak_scheme}' preserved)."
+                )
+                keycloak_port = ""
+            if not keycloak_port:
+                keycloak_port = "443" if keycloak_scheme == "https" else "8080"
+
+            logger.info(
+                f"Using Keycloak configuration from KEYCLOAK_URL '{keycloak_url}': "
+                f"{keycloak_scheme}://{keycloak_host}:{keycloak_port}"
+            )
 
             # Generate version map for multi-version servers
             # In registry-only mode, skip version map generation (use empty string)
@@ -995,25 +1241,50 @@ class NginxConfigService:
             config_content = config_content.replace("{{KEYCLOAK_SCHEME}}", keycloak_scheme)
             config_content = config_content.replace("{{KEYCLOAK_HOST}}", keycloak_host)
             config_content = config_content.replace("{{KEYCLOAK_PORT}}", keycloak_port)
+            # Render the per-location TLS trust block for the Keycloak upstream.
+            # Fail closed on https: proxy_ssl_verify stays ON so a MITM cannot
+            # substitute JWKS or intercept the token exchange to a BYO-https
+            # Keycloak. The in-cluster default (http://keycloak:8080) is plaintext,
+            # so this emits a comment only for that case and never verify-off.
+            config_content = config_content.replace(
+                "{{KEYCLOAK_PROXY_SSL}}",
+                _render_keycloak_proxy_ssl(keycloak_scheme, keycloak_host),
+            )
 
             # Parse PingFederate configuration, falling back to defaults on any error
             # so a malformed PINGFEDERATE_BASE_URL never breaks config generation.
             pingfederate_url = os.environ.get("PINGFEDERATE_BASE_URL", "http://pingfederate:9032")
+            # Parse scheme and host FIRST so a downstream port-parse failure
+            # (urlparse raises ValueError on an out-of-range port) can never
+            # silently downgrade an intended https upstream to http and drop the
+            # fail-closed proxy_ssl_verify block. Preserve the intended scheme and
+            # let nginx -t reject a genuinely malformed URL.
+            pf_parsed = urlparse(pingfederate_url)
+            pf_scheme = pf_parsed.scheme or "http"
+            pf_host = pf_parsed.hostname or "pingfederate"
+            # Resolve the port separately; only ``.port`` can raise (bad port).
+            # On failure fall back to the scheme default WITHOUT touching the
+            # already-parsed scheme, so an https URL stays https (verify on).
             try:
-                pf_parsed = urlparse(pingfederate_url)
-                pf_scheme = pf_parsed.scheme or "http"
-                pf_host = pf_parsed.hostname or "pingfederate"
-                pf_port = str(pf_parsed.port or ("443" if pf_scheme == "https" else "9032"))
-            except Exception as e:
+                pf_port = str(pf_parsed.port or "")
+            except ValueError as e:
                 logger.warning(
-                    f"Failed to parse PINGFEDERATE_BASE_URL '{pingfederate_url}': {e}. Using defaults."
+                    f"Invalid port in PINGFEDERATE_BASE_URL '{pingfederate_url}': {e}. "
+                    f"Using scheme default (scheme '{pf_scheme}' preserved)."
                 )
-                pf_scheme = "http"
-                pf_host = "pingfederate"
-                pf_port = "9032"
+                pf_port = ""
+            if not pf_port:
+                pf_port = "443" if pf_scheme == "https" else "9032"
             config_content = config_content.replace("{{PINGFEDERATE_SCHEME}}", pf_scheme)
             config_content = config_content.replace("{{PINGFEDERATE_HOST}}", pf_host)
             config_content = config_content.replace("{{PINGFEDERATE_PORT}}", pf_port)
+            # Render the per-location TLS trust block. Fail closed on https:
+            # proxy_ssl_verify stays ON so a MITM cannot substitute JWKS or
+            # intercept the token exchange to the PingFederate IdP.
+            config_content = config_content.replace(
+                "{{PINGFEDERATE_PROXY_SSL}}",
+                _render_pingfederate_proxy_ssl(pf_scheme, pf_host),
+            )
 
             # Parse AUTH_SERVER_URL so nginx templates can reference the
             # auth-server by its actual hostname/FQDN instead of the
@@ -1074,14 +1345,47 @@ class NginxConfigService:
                         else virtual_backend_locations
                     )
 
+                # Generic-proxy blocks (proxied non-MCP entities). These join the
+                # VIRTUAL_SERVER_BLOCKS placeholder; nginx concatenates both
+                # placeholders into one server{} block, so a generic location that
+                # collides with ANY higher-precedence block (legacy MCP in
+                # location_blocks, or virtual above) must be dropped. Seed
+                # claimed_paths with both sources so the collision check spans them.
+                # Flag-gated inside _fetch_generic_proxied_resources: zero DB queries
+                # (and no-op here) when the feature is disabled.
+                claimed_paths: set[str] = set()
+                for mcp_block in location_blocks:
+                    claimed_paths |= self._location_paths_in(mcp_block)
+                claimed_paths |= self._location_paths_in(virtual_blocks)
+
+                generic_blocks = await self._generate_generic_proxy_blocks(claimed_paths)
+                if generic_blocks:
+                    generic_text = "\n".join(generic_blocks)
+                    virtual_blocks = (
+                        virtual_blocks + "\n" + generic_text if virtual_blocks else generic_text
+                    )
+
                 config_content = config_content.replace("{{VIRTUAL_SERVER_BLOCKS}}", virtual_blocks)
 
                 logger.info(
-                    f"Generated virtual server config with {len(virtual_servers)} virtual servers"
+                    f"Generated virtual server config with {len(virtual_servers)} virtual "
+                    f"servers and {len(generic_blocks)} generic-proxy blocks"
                 )
             except Exception as e:
                 logger.error(f"Failed to generate virtual server config: {e}", exc_info=True)
                 config_content = config_content.replace("{{VIRTUAL_SERVER_BLOCKS}}", "")
+
+            # Generate A2A agent reverse-proxy blocks. Opt-in via
+            # A2A_REVERSE_PROXY_ENABLED, and only effective in with-gateway mode
+            # (a2a_reverse_proxy_effective is the shared flag-AND-with-gateway
+            # gate). In registry-only mode they are skipped: the registry-only
+            # 503 block already returns 503 for any /agent/* path that is not an
+            # API route.
+            if settings.a2a_reverse_proxy_effective:
+                agent_blocks = await self._generate_agent_location_blocks()
+            else:
+                agent_blocks = ""
+            config_content = config_content.replace("{{AGENT_LOCATION_BLOCKS}}", agent_blocks)
 
             root_path = os.environ.get("ROOT_PATH", "").rstrip("/")
             config_content = config_content.replace("{{ROOT_PATH}}", root_path)
@@ -1460,11 +1764,23 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
                 # The path is interpolated into a location directive; escape any
                 # nginx-special characters (defense-in-depth over Pydantic path
                 # validation) so it cannot break out of the directive.
-                safe_vs_path = self._sanitize_for_nginx_set(vs.path)
+                # Normalise to a trailing slash for the same reason as real servers
+                # (issue #1501): a bare `location /virtual/dev` prefix-matches
+                # unrelated routes like `/virtual/devtools`, hijacking them into the
+                # /validate auth subrequest. `location /virtual/dev/` only matches the
+                # subtree. The virtual_router.lua content handler receives the full
+                # URI, so the added slash does not affect routing.
+                safe_vs_path = self._sanitize_for_nginx_set(vs.path).rstrip("/") + "/"
 
                 block = f"""
     # Virtual MCP Server: {safe_name}
     location {{{{ROOT_PATH}}}}{safe_vs_path} {{
+        # Inbound rate limiting: this path fans out to the shared /validate auth
+        # subrequest, so bound it at the edge (zones declared at http scope in
+        # docker/nginx_rev_proxy_*.conf) to keep a flood from exhausting /validate.
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         set $virtual_server_id "{safe_id}";
         auth_request /validate;
         auth_request_set $auth_scopes $upstream_http_x_scopes;
@@ -1488,6 +1804,297 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         except Exception as e:
             logger.error(f"Failed to generate virtual server blocks: {e}", exc_info=True)
             return ""
+
+    # Matches a `location [=] <path> {` directive so a generated block's nginx
+    # location path can be extracted for collision dedup. The path is a greedy
+    # run of non-whitespace and MUST be followed by whitespace then the opening
+    # brace — otherwise a `{{ROOT_PATH}}` placeholder's own brace would be
+    # mistaken for the block opener. Tolerates the unsubstituted `{{ROOT_PATH}}`
+    # prefix (stripped by the caller before comparison).
+    _LOCATION_DIRECTIVE_RE = re.compile(r"^\s*location\s+(?:=\s+)?(\S+)\s+\{", re.MULTILINE)
+
+    @classmethod
+    def _location_paths_in(
+        cls,
+        block_text: str,
+    ) -> set[str]:
+        """Extract the set of nginx location paths declared in a block string.
+
+        Used to detect cross-block ``location`` collisions (duplicate location
+        directives fail ``nginx -t`` and block the reload for the whole replica).
+        Commented-out location lines (leading ``#``) are ignored — they are not
+        live directives. The ``{{ROOT_PATH}}`` placeholder is stripped so paths
+        compare on their post-substitution value.
+        """
+        paths: set[str] = set()
+        for line in block_text.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            m = cls._LOCATION_DIRECTIVE_RE.match(line)
+            if m:
+                paths.add(m.group(1).replace("{{ROOT_PATH}}", ""))
+        return paths
+
+    def _create_generic_proxy_block(
+        self,
+        entity_type: str,
+        path: str,
+        target_url: str,
+        streaming: bool = False,
+        has_upstream_auth: bool = False,
+    ) -> str:
+        """Render one nginx location block routing a proxied non-MCP entity.
+
+        The block proxies to the auth-server's generic hop
+        (``{auth_server_url}/proxy/{entity_type}/{path}/``), NOT to the backend
+        target directly — nginx never dials the registered target. The target URL
+        is forwarded as ``X-Upstream-Url`` (via a SEPARATE ``$generic_backend_url``
+        variable, never ``$backend_url``, to avoid tripping the MCP token mint) so
+        ``/validate`` can cryptographically pin it into the generic-proxy token;
+        IP-pinning and TLS SNI for the backend happen at the auth-server httpx
+        layer, not here.
+
+        When ``streaming`` is true the route disables nginx response buffering and
+        raises the read timeout so a long-lived SSE / chunked upstream (e.g. an
+        LLM proxied as a custom type) flows to the client incrementally instead of
+        being held until complete. The ``$generic_streaming`` marker is forwarded
+        on the /validate subrequest and bound into the token, so the hop switches
+        to a StreamingResponse only when the SIGNED claim says so — never on a
+        forgeable inbound header.
+
+        When ``has_upstream_auth`` is true the route sets the
+        ``$generic_has_upstream_auth`` marker (forwarded on /validate, bound into
+        the token) so the hop knows to fetch the entity's decrypted upstream
+        headers from the registry's internal vend endpoint and inject them on
+        egress. Like ``$generic_streaming`` it is a fixed literal, never the
+        secret; the encrypted header VALUES never enter the nginx config.
+
+        Args:
+            entity_type: Canonical entity type (e.g. "skill", "a2a_agent").
+            path: The registered entity path (e.g. "/skills/proxy-demo").
+            target_url: The resolved, egress-validated backend URL.
+            streaming: Emit the buffering-off + long-timeout streaming variant.
+            has_upstream_auth: Emit the upstream-auth marker (entity has custom
+                headers to inject on egress).
+
+        Returns:
+            The nginx location block string (with ``{{ROOT_PATH}}`` placeholder).
+        """
+        entity_path = path.strip("/")
+        proxy_target = f"{settings.auth_server_url.rstrip('/')}/proxy/{entity_type}/{entity_path}/"
+        # Client-facing location = {prefix}/{type}/{name} (auto-derived, never
+        # hand-entered). This is ONLY the outward path; the authz key is unchanged
+        # — it still keys off $generic_proxy_kind ($entity_path) below and the
+        # /proxy/{type}/{entity_path}/ proxy_pass, both of which use the FULL
+        # registered path. Changing this line does not invalidate existing scopes.
+        #
+        # Normalise to a trailing slash (issue #1501): a bare location prefix-matches
+        # unrelated routes (e.g. /gateway/skill/foobar), hijacking them into this
+        # entity's /validate auth subrequest. A trailing-slash location matches only
+        # the subtree and dedups exactly against the MCP/virtual location paths.
+        location_path = (
+            build_proxy_client_path(entity_type, path, settings.gateway_proxy_prefix).rstrip("/")
+            + "/"
+        )
+        body_size = settings.gateway_generic_client_max_body_size
+        # Streaming variant: disable nginx buffering (so SSE/chunked bytes are not
+        # held), raise the read timeout for long-lived token streams, and set the
+        # $generic_streaming marker (forwarded on /validate, bound into the token).
+        # $generic_streaming is a fixed literal ("1"/"") — no untrusted input — so
+        # it needs no sanitization. Non-streaming keeps the marker empty (map
+        # default), so the mint stays buffered.
+        if streaming:
+            stream_read_timeout = settings.gateway_generic_stream_read_timeout_seconds
+            streaming_directives = f"""
+        # Streaming route: forward SSE/chunked bytes incrementally.
+        set $generic_streaming "1";
+        proxy_buffering off;
+        proxy_read_timeout {stream_read_timeout}s;
+        proxy_set_header Connection "";"""
+        else:
+            streaming_directives = ""
+        # Upstream-auth marker: a fixed literal, never the secret. Signals the hop
+        # to vend + inject the entity's registered upstream headers (values stay
+        # in the registry). Empty (map default) when the entity has none.
+        if has_upstream_auth:
+            upstream_auth_directive = """
+        set $generic_has_upstream_auth "1";"""
+        else:
+            upstream_auth_directive = ""
+        return f"""
+    # Proxied {entity_type}: {location_path}
+    location {{{{ROOT_PATH}}}}{location_path} {{
+        client_max_body_size {body_size};
+        auth_request /validate;
+        auth_request_set $auth_internal_token_generic $upstream_http_x_internal_token_generic;
+        auth_request_set $auth_user $upstream_http_x_user;
+        auth_request_set $auth_scopes $upstream_http_x_scopes;
+
+        # Strip client-authored copies of the body-capture headers. capture_body.lua
+        # is the ONLY trusted producer of X-Body, and it does not run here (a generic
+        # route forwards opaque bytes, and reading the body would break streaming
+        # routes). The shared `location = /validate` block forwards client headers
+        # verbatim (proxy_pass_request_headers on) and does not redefine X-Body, so
+        # without this a caller could author the JSON-RPC view that /validate and the
+        # metrics middleware read -- fabricating tool_execution / protocol_latency
+        # series (with this entity's authz key as server_name) for an entity that
+        # runs no MCP tools. Rewrite phase, so the mutation is visible to the
+        # auth_request subrequest, which shares the parent's headers; clears only, so
+        # no body is read and streaming is unaffected.
+        rewrite_by_lua_block {{
+            ngx.req.clear_header("X-Body")
+            ngx.req.clear_header("X-Body-Uninspectable")
+        }}
+
+        # SEPARATE upstream variable ($generic_backend_url), NOT $backend_url: keeps
+        # X-Resolved-Upstream empty on generic requests so the MCP token mint never
+        # fires and exactly one (generic-audience) token is issued per request.
+        set $generic_backend_url "{target_url}";
+        set $generic_proxy_kind "{entity_type}";
+        set $entity_path "{entity_path}";{streaming_directives}{upstream_auth_directive}
+        proxy_set_header X-Upstream-Url $generic_backend_url;
+
+        proxy_pass {proxy_target};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # The generic hop's verify_generic_proxy_token reads X-Internal-Token-Generic
+        # (distinct from the MCP hop's X-Internal-Token so they never collide). Must
+        # match that header name exactly, or the hop 401s "Missing internal proxy token".
+        proxy_set_header X-Internal-Token-Generic $auth_internal_token_generic;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-User $auth_user;
+        proxy_set_header X-Scopes $auth_scopes;
+        proxy_set_header X-Original-URL $scheme://$host$request_uri;
+        proxy_pass_request_headers on;
+        error_page 401 = @auth_error;
+        error_page 403 = @forbidden_error;
+    }}"""
+
+    def _safe_generic_block(
+        self,
+        entity_type: str,
+        path: str,
+        target_url: str,
+        streaming: bool = False,
+        has_upstream_auth: bool = False,
+    ) -> str | None:
+        """Return a generic block, or None to SKIP if the target is invalid/denied.
+
+        Render-time defense: a single malformed or SSRF-denied target
+        that rendered a broken block would fail ``nginx -t`` and block the reload
+        for EVERY route on the replica. Every guard here skips-with-WARNING and
+        never raises into the render. Runs IN ADDITION to registration-time
+        validation, because a stored row may predate the policy or have arrived
+        via a path that bypassed the edge validators.
+
+        Guards (defense-in-depth; registration validators are the primary line,
+        but a stored row may predate the policy, be corrupt, or have arrived via a
+        bypass path — this is the LAST gate before a live nginx config):
+          - auth_server_url is set (else proxy_pass would be a relative self-loop);
+          - scheme is http(s);
+          - _assert_egress_allowed(target_url) passes (SSRF egress policy);
+          - entity_type matches the strict token grammar (it is interpolated into
+            the location path AND three directives; a corrupt value would break
+            out even though canonical/custom types are validated at registration);
+          - no ``..`` path segment (would path-traverse on the auth-server hop
+            after nginx normalizes the proxy_pass URI);
+          - neither the target, path, nor entity_type contains a character that
+            could break out of the location/proxy_pass/set directive. ``$`` is
+            denied in the target because it is placed inside a double-quoted
+            ``set`` value where nginx would otherwise expand it as a variable.
+        """
+        try:
+            if not settings.auth_server_url:
+                raise ValueError("auth_server_url is not configured")
+            if not (target_url.startswith("http://") or target_url.startswith("https://")):
+                raise ValueError(f"non-http(s) target: {target_url!r}")
+            _assert_egress_allowed(target_url)
+            if not re.fullmatch(r"[a-z0-9_-]+", entity_type):
+                raise ValueError(f"illegal entity_type token: {entity_type!r}")
+            if ".." in path.split("/"):
+                raise ValueError(f"path-traversal segment in path: {path!r}")
+            # Chars that could break out of a location/proxy_pass/set directive.
+            # ``$`` is target-only (nginx would expand it inside the quoted set
+            # value); the rest apply to path and entity_type too.
+            structural = ("\n", "\r", '"', ";", "{", "}", " ", "\t", "\\")
+            if any(c in target_url for c in (*structural, "$")):
+                raise ValueError("illegal character in target")
+            if any(c in path for c in structural):
+                raise ValueError("illegal character in path")
+            return self._create_generic_proxy_block(
+                entity_type, path, target_url, streaming, has_upstream_auth
+            )
+        except Exception as e:
+            logger.warning(
+                "Skipping generic block for %s%s (target=%s, reason=%s)",
+                entity_type,
+                path,
+                redact_url(target_url),
+                type(e).__name__,
+            )
+            GATEWAY_GENERIC_BLOCKS_DROPPED.labels(reason="invalid").inc()
+            return None
+
+    async def _generate_generic_proxy_blocks(
+        self,
+        claimed_paths: set[str],
+    ) -> list[str]:
+        """Generate generic-proxy location blocks for proxied non-MCP entities.
+
+        Fetches the flag-gated proxied-resource list (zero DB queries when the
+        feature is disabled), renders a safe block per entity, and drops any block
+        whose nginx location path collides with an already-claimed path.
+
+        Precedence: legacy MCP and virtual blocks are generated first and
+        their paths passed in via ``claimed_paths``; generic is the LOWEST tier, so
+        a generic block is dropped (never overrides) on collision — including
+        generic-vs-generic, where the first-seen entity wins deterministically
+        (resources are sorted by location path for stable ordering).
+
+        Args:
+            claimed_paths: nginx location paths already taken by higher-precedence
+                (MCP / virtual) blocks. Mutated in place as generic paths are
+                claimed, so later generic blocks see earlier ones.
+
+        Returns:
+            List of rendered generic location block strings (possibly empty).
+        """
+        resources = await _fetch_generic_proxied_resources()
+        if not resources:
+            return []
+
+        blocks: list[str] = []
+        for res in sorted(resources, key=lambda r: (r["entity_type"], r["path"])):
+            block = self._safe_generic_block(
+                res["entity_type"],
+                res["path"],
+                res["target_url"],
+                res.get("streaming", False),
+                res.get("has_upstream_auth", False),
+            )
+            if block is None:
+                continue  # _safe_generic_block already logged + counted the drop
+            block_paths = self._location_paths_in(block)
+            collision = block_paths & claimed_paths
+            if collision:
+                logger.warning(
+                    "Dropping generic block for %s%s: location path(s) %s already "
+                    "claimed by a higher-precedence (MCP/virtual/earlier) block",
+                    res["entity_type"],
+                    res["path"],
+                    sorted(collision),
+                )
+                GATEWAY_GENERIC_BLOCKS_DROPPED.labels(reason="collision").inc()
+                continue
+            claimed_paths |= block_paths
+            blocks.append(block)
+
+        logger.info(f"Generated {len(blocks)} generic-proxy location blocks")
+        return blocks
 
     async def _generate_virtual_backend_locations(
         self,
@@ -1535,21 +2142,13 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
                 parsed_url = urlparse(proxy_pass_url)
                 upstream_host = parsed_url.netloc
 
-                # Build MCP endpoint URL from the server's mcp_endpoint or proxy_pass_url
-                mcp_endpoint = server_info.get("mcp_endpoint", "")
-                if mcp_endpoint:
-                    mcp_parsed = urlparse(mcp_endpoint)
-                    mcp_path = mcp_parsed.path.rstrip("/")
-                    # Construct full MCP URL from proxy_pass host + mcp path
-                    mcp_proxy_url = f"{parsed_url.scheme}://{parsed_url.netloc}{mcp_path}"
-                else:
-                    # Fallback: use proxy_pass_url, appending /mcp only if needed
-                    bare_url = proxy_pass_url.rstrip("/")
-                    # Check if URL already ends with common MCP endpoint paths
-                    if bare_url.endswith("/mcp") or bare_url.endswith("/sse"):
-                        mcp_proxy_url = bare_url
-                    else:
-                        mcp_proxy_url = f"{bare_url}/mcp"
+                # Resolve custom and nested transport paths centrally, but retain
+                # the proxy host because explicit endpoints may use a public host.
+                # Registration-time validation and the render-time sanitizer below
+                # continue to protect both endpoint sources from nginx metacharacters.
+                resolved_endpoint = get_endpoint_url_from_server_info(server_info)
+                endpoint_path = urlparse(resolved_endpoint).path.rstrip("/")
+                mcp_proxy_url = f"{parsed_url.scheme}://{parsed_url.netloc}{endpoint_path}"
 
                 # Use regular internal location (not named @) so proxy_pass
                 # can include a URI path for the MCP endpoint
@@ -1618,6 +2217,12 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         # forwarding the caller's credential.
         proxy_set_header Authorization "";
         proxy_set_header Cookie "";
+        # Forward the validated caller identity so backends can attribute
+        # write operations to the authenticated user.  These are set as
+        # request headers by virtual_router.lua (ngx.req.set_header) before
+        # the ngx.location.capture subrequest.
+        proxy_set_header X-User $http_x_user;
+        proxy_set_header X-Username $http_x_username;
         proxy_buffering off;
         proxy_set_header Accept "application/json, text/event-stream";
         proxy_set_header Content-Type $content_type;
@@ -1723,9 +2328,311 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         except Exception as e:
             logger.error(f"Failed to write virtual server mappings: {e}", exc_info=True)
 
+    @staticmethod
+    async def _agent_backend_resolves(
+        hostname: str,
+    ) -> bool:
+        """Return True if the agent backend hostname resolves right now.
+
+        Used to fail safe before emitting a literal ``proxy_pass`` in an agent
+        block: an unresolvable host would make the whole nginx reload fail. Runs
+        the blocking ``getaddrinfo`` in a thread so it does not block the event
+        loop. An IP literal or a resolvable name (including a bare docker/service
+        name valid on this host's network) returns True; a dead name returns
+        False. Fails safe to False on lookup error so a bad host is skipped, not
+        emitted.
+
+        Args:
+            hostname: Upstream host (no scheme or port); may be empty.
+
+        Returns:
+            True if the host resolves, else False.
+        """
+        if not hostname:
+            return False
+        import socket
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, socket.getaddrinfo, hostname, None)
+            return True
+        except (OSError, UnicodeError) as exc:
+            logger.debug(f"Agent backend host {hostname!r} did not resolve: {exc}")
+            return False
+
+    async def _generate_agent_location_blocks(self) -> str:
+        """Generate nginx reverse-proxy location blocks for enabled A2A agents.
+
+        Mirrors the MCP-server and virtual-server generators: each enabled
+        agent gets location blocks that proxy A2A traffic through the gateway
+        (centralized auth, metrics, network isolation) instead of clients
+        connecting directly to the agent backend.
+
+        Returns:
+            Nginx configuration string, or an empty string when there are no
+            enabled agents.
+        """
+        try:
+            from registry.services.agent_service import agent_service
+
+            enabled_paths = await agent_service.get_enabled_agents()
+            if not enabled_paths:
+                logger.debug("No enabled A2A agents found")
+                return ""
+
+            location_blocks = []
+            for path in enabled_paths:
+                agent = await agent_service.get_agent_info(path)
+                if agent is None:
+                    logger.warning(f"Enabled agent '{path}' has no card; skipping nginx block")
+                    continue
+
+                # Proxy to the real backend. In reverse-proxy mode the advertised
+                # url is the gateway-facing address, so the registrant's backend
+                # lives in proxy_pass_url; fall back to url for agents registered
+                # before the flag was on (proxy_pass_url unset).
+                backend_url = (getattr(agent, "proxy_pass_url", None) or agent.url or "").rstrip(
+                    "/"
+                )
+                if not backend_url:
+                    logger.warning(f"Agent '{path}' has no backend url; skipping nginx block")
+                    continue
+
+                # Only proxy true A2A agents. A non-A2A agent that happens to
+                # carry a URL must not get a JSON-RPC proxy route.
+                if (agent.supported_protocol or "").lower() != "a2a":
+                    logger.debug(
+                        f"Agent '{path}' protocol is {agent.supported_protocol!r} "
+                        "(not 'a2a'); skipping nginx block"
+                    )
+                    continue
+
+                # Never advertise a proxy path to a backend that is not
+                # known-healthy, so the gateway does not route to a dead agent.
+                if not HealthStatus.is_healthy(agent.health_status):
+                    logger.debug(
+                        f"Agent '{path}' health is {agent.health_status!r} "
+                        "(not healthy); skipping nginx block"
+                    )
+                    continue
+
+                # The agent block emits a LITERAL proxy_pass, which nginx resolves
+                # at config-load time; a backend host that does not resolve then
+                # makes the WHOLE nginx reload fail ("host not found in upstream"),
+                # taking every route down, not just this agent. Fail safe: verify
+                # the host resolves now and skip the block with a warning if it
+                # does not (same posture as the health and no-url skips above), so
+                # one dead backend host can never crash the reload. This is a real
+                # DNS check (not the dot heuristic) so a legitimately-resolvable
+                # bare docker/service name is kept and a dead FQDN is caught.
+                backend_host = urlparse(backend_url).hostname or ""
+                if not await self._agent_backend_resolves(backend_host):
+                    logger.warning(
+                        f"Agent '{path}' backend host {backend_host!r} does not "
+                        "resolve; skipping nginx block so the reload cannot fail"
+                    )
+                    continue
+
+                agent_path = (agent.path or path).strip("/")
+                try:
+                    block = self._create_agent_location_block(
+                        agent_path,
+                        backend_url,
+                        agent.name,
+                    )
+                except ValueError as exc:
+                    logger.warning(f"Skipping agent '{path}' with unsafe nginx input: {exc}")
+                    continue
+                location_blocks.append(block)
+                logger.debug(f"Generated A2A agent location block for {agent_path}")
+
+            logger.info(f"Generated {len(location_blocks)} A2A agent location blocks")
+            return "\n".join(location_blocks)
+
+        except Exception as e:
+            logger.error(f"Failed to generate agent location blocks: {e}", exc_info=True)
+            return ""
+
+    def _create_agent_location_block(
+        self,
+        agent_path: str,
+        backend_url: str,
+        agent_name: str,
+    ) -> str:
+        """Create nginx location blocks for a single A2A agent.
+
+        Emits two prefix locations under ``{ROOT_PATH}/agent/{agent_path}/``:
+          1. The agent card (``.well-known/agent-card.json``) for discovery.
+          2. The JSON-RPC endpoint for ``message/send`` / ``message/stream``.
+
+        Both are protected by the ``/validate`` auth subrequest (the same hop
+        used for MCP servers) and proxy straight to the agent backend. A2A is
+        JSON-RPC over HTTP, so no protocol translation is required.
+
+        Args:
+            agent_path: Agent path without surrounding slashes
+                (e.g. ``flight-booking-agent``).
+            backend_url: Agent backend base URL without a trailing slash.
+            agent_name: Human-readable agent name (used in a comment only).
+
+        Returns:
+            Nginx configuration string with the two location blocks.
+
+        Raises:
+            ValueError: If ``agent_path`` or ``backend_url`` contains characters
+                that are unsafe to interpolate into an nginx config.
+        """
+        if not _NGINX_AGENT_PATH_SAFE.match(agent_path):
+            raise ValueError(f"unsafe agent path: {agent_path!r}")
+        if not _NGINX_AGENT_URL_SAFE.match(backend_url):
+            raise ValueError(f"unsafe agent url: {backend_url!r}")
+
+        parsed_url = urlparse(backend_url)
+        upstream_host = parsed_url.netloc
+        # External services (https or FQDN) use the upstream hostname; bare
+        # internal hostnames preserve the original Host header.
+        if parsed_url.scheme == "https" or "." in upstream_host:
+            host_header = upstream_host
+        else:
+            host_header = "$host"
+
+        dns_resolver = os.environ.get("NGINX_DNS_RESOLVER", "8.8.8.8 8.8.4.4")
+        dns_resolver_timeout = os.environ.get("NGINX_DNS_RESOLVER_TIMEOUT", "5")
+        safe_name = self._sanitize_for_nginx_comment(agent_name)
+        route = f"{AGENT_ROUTE_PREFIX}/{agent_path}"
+        # Per the A2A spec the card document lives at a well-known path on the
+        # ORIGIN, while the card's own "url" names the JSON-RPC endpoint and may
+        # carry a path. Appending the suffix to backend_url asks the backend one
+        # level too deep (https://host/a2a/.well-known/... -> 404), which broke the
+        # card route for every spec-following agent while path-less ones looked
+        # fine, since both spellings coincide there. _build_agent_health_urls in
+        # registry/api/agent_routes.py derives this same URL from the origin; the
+        # two must agree or the health check calls an agent healthy while its
+        # gateway card route fails (issue #1724).
+        card_origin = f"{parsed_url.scheme}://{upstream_host}"
+
+        return f"""
+    # A2A agent card (discovery): {safe_name}
+    # Exact match so suffixes (e.g. /.well-known/agent-card.json/../secret)
+    # cannot be smuggled through this proxy.
+    location = {{{{ROOT_PATH}}}}{route}/.well-known/agent-card.json {{
+        resolver {dns_resolver} valid=10s;
+        resolver_timeout {dns_resolver_timeout}s;
+        auth_request /validate;
+        auth_request_set $auth_scopes $upstream_http_x_scopes;
+        proxy_pass {card_origin}/.well-known/agent-card.json;
+        proxy_http_version 1.1;
+        proxy_ssl_server_name on;
+        proxy_set_header Host {host_header};
+        # SECURITY (A2A egress trust model): X-Authorization carries the caller's
+        # gateway credential -- it is validated at /validate and MUST NOT reach
+        # this registrant-controlled backend, or a malicious agent could replay
+        # it against the registry (the B1 / #1391 class of bug). Strip it and the
+        # session Cookie. The standard Authorization header is left intact: per
+        # the A2A spec, credentials are obtained out-of-band by the calling agent
+        # and passed end-to-end in Authorization for the target agent to
+        # authenticate -- the gateway is not a credential broker here.
+        proxy_set_header X-Authorization "";
+        proxy_set_header Cookie "";
+        # Rewrite the card's endpoint URLs from the backend to this gateway so
+        # clients send JSON-RPC back through the proxy. Body size changes, so
+        # Content-Length must be cleared before the rewrite runs.
+        header_filter_by_lua_block {{ ngx.header.content_length = nil }}
+        body_filter_by_lua_file /etc/nginx/lua/agent_card_rewrite.lua;
+        error_page 401 = @auth_error;
+        error_page 403 = @forbidden_error;
+    }}
+
+    # A2A agent JSON-RPC endpoint: {safe_name}
+    location {{{{ROOT_PATH}}}}{route}/ {{
+        resolver {dns_resolver} valid=10s;
+        resolver_timeout {dns_resolver_timeout}s;
+        auth_request /validate;
+        auth_request_set $auth_user $upstream_http_x_user;
+        auth_request_set $auth_username $upstream_http_x_username;
+        auth_request_set $auth_scopes $upstream_http_x_scopes;
+        auth_request_set $auth_method $upstream_http_x_auth_method;
+        # Rate-limit passthrough (issue #295): capture the throttle marker + headers
+        # so @forbidden_error can turn a throttle-403 into a real 429 + Retry-After.
+        auth_request_set $rl_throttled $upstream_http_x_ratelimit_throttled;
+        auth_request_set $rl_limit $upstream_http_x_ratelimit_limit;
+        auth_request_set $rl_reset $upstream_http_x_ratelimit_reset;
+        auth_request_set $rl_retry $upstream_http_retry_after;
+
+        # Attribute metrics to this specific agent. Without this, emit_metrics
+        # derives the name from the first URI segment ("agent"), bucketing every
+        # agent together. agent_path is validated by _NGINX_AGENT_PATH_SAFE.
+        set $metrics_server_name "agent/{agent_path}";
+        # Capture the JSON-RPC body (rewrite phase) so emit_metrics can record
+        # the A2A method; per-agent invoke is enforced by the auth server via
+        # the /validate subrequest above.
+        rewrite_by_lua_file /etc/nginx/lua/capture_body.lua;
+        log_by_lua_file /etc/nginx/lua/emit_metrics.lua;
+
+        proxy_pass {backend_url}/;
+        proxy_http_version 1.1;
+        proxy_ssl_server_name on;
+        # message/stream (SSE) can stay open for minutes; override nginx's 60s
+        # default so streaming responses are not killed mid-flight.
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_set_header Host {host_header};
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Original-URL $scheme://$host$request_uri;
+        # SECURITY (A2A egress trust model): X-Authorization carries the caller's
+        # gateway credential -- it is validated at /validate and MUST NOT reach
+        # this registrant-controlled backend, or a malicious agent could replay
+        # it against the registry (the B1 / #1391 class of bug). Strip it and the
+        # session Cookie (nginx forwards client request headers by default, so
+        # Cookie must be cleared explicitly). The standard Authorization header is
+        # left intact and forwarded end-to-end: per the A2A spec, the calling
+        # agent obtains the target agent's credential out-of-band and presents it
+        # in Authorization for the target to authenticate. The gateway is a policy
+        # gate, not a credential broker -- it never mints or vends the agent's
+        # credential. /validate authenticates the caller on X-Authorization only
+        # (no Authorization fallback for agent paths) and refuses to forward an
+        # Authorization equal to the validated X-Authorization, so a caller that
+        # duplicates its gateway token into both headers cannot leak it here.
+        proxy_set_header X-Authorization "";
+        proxy_set_header Cookie "";
+
+        # Forward validated auth context to the agent backend
+        proxy_set_header X-User $auth_user;
+        proxy_set_header X-Username $auth_username;
+        proxy_set_header X-Scopes $auth_scopes;
+        proxy_set_header X-Auth-Method $auth_method;
+
+        # message/stream uses SSE; disable buffering for incremental delivery
+        proxy_buffering off;
+        proxy_set_header Accept $http_accept;
+
+        error_page 401 = @auth_error;
+        error_page 403 = @forbidden_error;
+    }}"""
+
     def _generate_transport_location_blocks(self, path: str, server_info: dict[str, Any]) -> list:
         """Generate nginx location blocks for different transport types."""
-        blocks = []
+        blocks: list[str] = []
+
+        # Render-time mirror of validate_server_path (issue #1501). A path that
+        # normalizes to empty (a slashes-only value that bypassed registration
+        # validation -- e.g. legacy data persisted before the guard existed)
+        # would render as a gateway-wide `location /` block, subjecting every URL
+        # to the /validate auth subrequest and shadowing the static catch-all.
+        # Skip it and log, rather than emit a config that hijacks the whole
+        # gateway: fail closed for this one server, keep the rest of the config.
+        if not path or not path.strip("/"):
+            logger.error(
+                "Skipping nginx location block for server with empty/slashes-only "
+                "path %r: it would render as a gateway-wide 'location /' block. "
+                "This path should have been rejected at registration.",
+                path,
+            )
+            return blocks
+
         proxy_pass_url = server_info.get("proxy_pass_url", "")
         supported_transports = server_info.get("supported_transports", ["streamable-http"])
 
@@ -1910,6 +2817,14 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
 
         # Common proxy settings
         common_settings = f"""
+        # Inbound rate limiting: every MCP request fans out to the shared
+        # /validate auth subrequest, so bound it at the edge (zones + rationale
+        # are declared at http scope in docker/nginx_rev_proxy_*.conf). Keeps a
+        # flood on one server's /mcp-proxy/ path from exhausting /validate for
+        # all servers. burst+nodelay give bursty MCP clients headroom.
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         # DNS resolver for dynamic proxy_pass upstreams.
         # Default: 8.8.8.8 8.8.4.4 (public DNS).
         # Override with NGINX_DNS_RESOLVER env var for environments where
@@ -1944,6 +2859,13 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         # Capture the /validate-minted internal JWT (binds identity/scopes/upstream).
         # mcp_proxy verifies this instead of trusting the forgeable X-* headers below.
         auth_request_set $auth_internal_token $upstream_http_x_internal_token;
+        # Rate-limit passthrough (issue #295): capture the throttle marker + headers
+        # so @forbidden_error can turn a throttle-403 into a real 429 + Retry-After.
+        # auth_request only forwards 401/403, so /validate signals throttles as 403.
+        auth_request_set $rl_throttled $upstream_http_x_ratelimit_throttled;
+        auth_request_set $rl_limit $upstream_http_x_ratelimit_limit;
+        auth_request_set $rl_reset $upstream_http_x_ratelimit_reset;
+        auth_request_set $rl_retry $upstream_http_retry_after;
 {proxy_directive}
         proxy_http_version 1.1;
         proxy_ssl_server_name on;
@@ -2024,9 +2946,18 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         proxy_set_header Upgrade $http_upgrade;
         chunked_transfer_encoding off;"""
 
-        # Use the location path exactly as specified in the server configuration
-        # Users have full control over the location path format (with or without trailing slash)
-        location_path = path
+        # Always normalise the location path to end with a trailing slash (issue #1501).
+        # nginx treats `location /a` as a prefix match against ANY URL starting with
+        # `/a` (e.g. /api/, /auth, /about), so a server registered at a short path
+        # would silently hijack unrelated browser/API routes and subject them to
+        # auth_request /validate. `location /a/` only matches /a/ and paths that
+        # literally continue past the slash, so `/api/...` no longer matches. MCP
+        # clients already call `/server-name/mcp` (or /sse), which continue to match.
+        # A bare `GET /a` (no trailing slash) no longer matches this block; nginx does
+        # NOT auto-redirect it to `/a/` for a proxy_pass location, so it falls through
+        # to the catch-all. This is fine because the discovery/connect URLs always
+        # include the `/mcp` (or `/sse`) suffix -- no client connects at the bare path.
+        location_path = path.rstrip("/") + "/"
         logger.info(f"Creating location block for {location_path} with {transport_type} transport")
 
         return f"""
@@ -2152,6 +3083,88 @@ async def _fetch_all_enabled_servers() -> dict[str, Any]:
         if info:
             enabled_servers[path] = info
     return enabled_servers
+
+
+# Non-MCP entity types that route through the generic proxy hop. MCP servers keep
+# their existing legacy path; virtual servers are alias-only (this feature does not
+# emit generic blocks for them). Each maps to the repository factory getter.
+_GENERIC_PROXY_ENTITY_TYPES: tuple[str, ...] = ("a2a_agent", "skill", "custom")
+
+
+class _ProxiedRepository(Protocol):
+    """Structural type shared by repositories queried for proxied records."""
+
+    async def list_proxied(self) -> list[dict[str, Any]]: ...
+
+
+async def _fetch_generic_proxied_resources() -> list[dict[str, Any]]:
+    """Collect non-MCP entities that opt into the generic gateway proxy.
+
+    Returns a list of ``{"entity_type", "path", "target_url"}`` for every
+    agent/skill/custom entity that is proxied AND resolves to a target (via
+    ``resolve_proxy_target``, which drops federated / disabled / auto-disabled /
+    targetless rows). SSRF is NOT re-checked here — the render-time
+    ``_safe_generic_block`` guard does that before emitting a block.
+
+    SRE gate: when ``gateway_generic_proxy_enabled`` is false this
+    issues ZERO DB queries — an upgraded deployment that hasn't enabled the
+    feature pays no new per-tick fan-out. Block-generation gating alone is not
+    enough; the FETCH itself is skipped.
+    """
+    if not settings.gateway_generic_proxy_enabled:
+        return []
+
+    # MCP servers keep their legacy /path block (handled by the enabled-server
+    # path); only agents/skills/custom entities route through the generic hop.
+    from registry.repositories.factory import (
+        get_agent_repository,
+        get_custom_entity_repository,
+        get_skill_repository,
+    )
+    from registry.schemas.proxy_mixin import resolve_proxy_target
+
+    repos: dict[str, _ProxiedRepository] = {
+        "a2a_agent": get_agent_repository(),
+        "skill": get_skill_repository(),
+        "custom": get_custom_entity_repository(),
+    }
+    resources: list[dict[str, Any]] = []
+    for entity_type, repo in repos.items():
+        try:
+            rows = await repo.list_proxied()
+        except Exception as e:  # noqa: BLE001 - one repo failing must not break the render
+            logger.error("list_proxied failed for %s: %s", entity_type, e, exc_info=True)
+            continue
+        for doc in rows:
+            # Custom records carry their own type token; use it so the canonical
+            # /{type}/{path} namespace matches the record's actual type.
+            row_type = doc.get("entity_type") or entity_type
+            target = resolve_proxy_target(row_type, doc)
+            if not target:
+                # Not renderable (federated / disabled / auto-disabled / no target).
+                continue
+            resources.append(
+                {
+                    "entity_type": row_type,
+                    "path": doc["path"],
+                    "target_url": target,
+                    # Opt-in streaming: chunk-forward + buffering-off nginx route.
+                    # Coerced to bool so a missing/None projection field is False.
+                    "streaming": bool(doc.get("proxy_streaming")),
+                    # Any stored/vended credential signal forces the hop through
+                    # strict vending. This intentionally includes malformed legacy
+                    # or bypass-written rows (for example orphaned ciphertext with
+                    # no name metadata): the vend endpoint then rejects inconsistent
+                    # storage instead of forwarding the request unauthenticated.
+                    # Only this boolean enters nginx/the token; secret values do not.
+                    "has_upstream_auth": bool(
+                        doc.get("custom_header_names")
+                        or doc.get("custom_header_overridable_names")
+                        or doc.get("custom_headers_encrypted")
+                    ),
+                }
+            )
+    return resources
 
 
 # Module-level singleton

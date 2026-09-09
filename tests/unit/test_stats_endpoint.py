@@ -6,7 +6,7 @@ Tests the new /api/stats endpoint and count() methods added to repositories.
 
 import logging
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -262,8 +262,14 @@ class TestGetCachedStats:
                     "registry.repositories.factory.get_skill_repository",
                     return_value=mock_repositories["skill"],
                 ):
-                    with patch("registry.api.system_routes.settings") as mock_settings, \
-                         patch("registry.api.system_routes._get_database_status", new_callable=AsyncMock, return_value={"backend": "mongodb-ce", "status": "Healthy"}):
+                    with (
+                        patch("registry.api.system_routes.settings") as mock_settings,
+                        patch(
+                            "registry.api.system_routes._get_database_status",
+                            new_callable=AsyncMock,
+                            return_value={"backend": "mongodb-ce", "status": "Healthy"},
+                        ),
+                    ):
                         mock_settings.storage_backend = "mongodb-ce"
                         mock_settings.deployment_mode.value = "standalone"
 
@@ -328,8 +334,14 @@ class TestStatsEndpoint:
                     "registry.repositories.factory.get_skill_repository",
                     return_value=mock_repositories["skill"],
                 ):
-                    with patch("registry.api.system_routes.settings") as mock_settings, \
-                         patch("registry.api.system_routes._get_database_status", new_callable=AsyncMock, return_value={"backend": "mongodb-ce", "status": "Healthy"}):
+                    with (
+                        patch("registry.api.system_routes.settings") as mock_settings,
+                        patch(
+                            "registry.api.system_routes._get_database_status",
+                            new_callable=AsyncMock,
+                            return_value={"backend": "mongodb-ce", "status": "Healthy"},
+                        ),
+                    ):
                         mock_settings.storage_backend = "mongodb-ce"
                         mock_settings.deployment_mode.value = "standalone"
 

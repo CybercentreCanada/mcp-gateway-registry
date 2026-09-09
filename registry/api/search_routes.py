@@ -9,15 +9,19 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from ..audit import set_audit_action
+from ..auth.asset_permissions import user_has_asset_permission
 from ..auth.dependencies import nginx_proxied_auth
 from ..auth.tool_filter import filter_tools_for_user, tool_allowed_for_user
 from ..constants import DeploymentType
 from ..core.config import DeploymentMode, RegistryMode, settings
-from ..repositories.factory import get_search_repository
+from ..repositories.factory import get_search_repository, get_skill_repository
 from ..repositories.interfaces import SearchRepositoryBase
 from ..services.agent_service import agent_service
+from ..services.custom_entity_scopes import entity_scope as _entity_scope
+from ..services.custom_entity_scopes import resolve_list_grant as _resolve_list_grant
 from ..services.server_service import server_service
 from ..services.virtual_server_service import get_virtual_server_service
+from ..utils.metadata import parse_and_validate_metadata_fields, project_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +167,10 @@ class ServerSearchResult(BaseModel):
             "required_env, version, image_digest). Null for remote."
         ),
     )
+    metadata: dict | None = Field(
+        default=None,
+        description="Projected metadata fields. Only populated when metadata_fields is requested.",
+    )
 
 
 class ToolSearchResult(BaseModel):
@@ -213,6 +221,10 @@ class SkillSearchResult(BaseModel):
     status: str = Field(default="active", description="Lifecycle status")
     relevance_score: float = Field(..., ge=0.0, le=1.0)
     match_context: str | None = None
+    metadata: dict | None = Field(
+        default=None,
+        description="Projected metadata fields. Only populated when metadata_fields is requested.",
+    )
 
 
 class VirtualServerSearchResult(BaseModel):
@@ -285,6 +297,16 @@ class SemanticSearchRequest(BaseModel):
     include_disabled: bool = Field(
         default=False,
         description="Include disabled assets (is_enabled=False) in search results",
+    )
+    metadata_fields: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated list of metadata field paths to include in results. "
+            "Uses dot-notation for nested paths (e.g. 'owner,config.region'). "
+            "When supplied, ServerSearchResult and SkillSearchResult gain a 'metadata' "
+            "field containing only the listed paths; AgentSearchResult.agent_card.metadata "
+            "is pruned to the listed paths. When omitted, existing behavior is preserved."
+        ),
     )
 
 
@@ -364,6 +386,7 @@ async def _get_tool_schema_for_virtual_server(
 # original underscore-prefixed names so existing callers in this module
 # don't have to change.
 from ..services.visibility import (
+    redact_agent_backend_fields,
     should_redact_backend_urls,
 )
 from ..services.visibility import (
@@ -440,6 +463,9 @@ async def semantic_search(
     """
     Run a semantic search against MCP servers (and their tools) using DocumentDB vector search.
     """
+    # Parse and validate metadata_fields projection (Issue #1277)
+    _metadata_paths = parse_and_validate_metadata_fields(request.metadata_fields)
+
     # Parse #tag tokens from query for exact tag matching
     search_query, hashtag_tags = _parse_hashtags(request.query)
 
@@ -626,6 +652,11 @@ async def semantic_search(
                 local_runtime=server_local_runtime,
                 record_kind=(server_full_info or {}).get("record_kind"),
                 ard_source_url=(server_full_info or {}).get("ard_source_url"),
+                metadata=(
+                    project_metadata((server_full_info or {}).get("metadata"), _metadata_paths)
+                    if _metadata_paths is not None
+                    else None
+                ),
             )
         )
 
@@ -689,6 +720,13 @@ async def semantic_search(
             agent_card_obj.model_dump() if agent_card_obj else agent.get("agent_card", {})
         )
 
+        # Non-admins in with-gateway mode must never receive the internal backend
+        # (proxy_pass_url); strip it so search returns only the gateway-facing url.
+        # Mirrors the server-branch redaction above and the /api/agents/discover/
+        # semantic fix. Uses the same redact_backend decision computed once above.
+        if redact_backend and agent_card_dict:
+            redact_agent_backend_fields(agent_card_dict)
+
         # Ensure agent_card has the path for consistency
         if agent_card_dict and "path" not in agent_card_dict:
             agent_card_dict["path"] = agent_path
@@ -696,6 +734,12 @@ async def semantic_search(
         # Compute trust verification status from ANS metadata
         ans_meta = agent_card_dict.get("ans_metadata") if agent_card_dict else None
         trust_verified = _compute_trust_verified(ans_meta)
+
+        # Apply metadata projection to the agent_card if requested (Issue #1277)
+        if _metadata_paths is not None and agent_card_dict:
+            agent_card_dict["metadata"] = project_metadata(
+                agent_card_dict.get("metadata"), _metadata_paths
+            )
 
         filtered_agents.append(
             AgentSearchResult(
@@ -713,6 +757,14 @@ async def semantic_search(
         if not skill_path:
             continue
 
+        skill_name = skill.get("skill_name", skill_path.strip("/"))
+
+        # Discovery gate FIRST (list_skills, parity with list_service and the
+        # custom-entity type gate): a caller with no list_skills grant sees no
+        # skills -- not even public ones -- before the per-record visibility check.
+        if not user_has_asset_permission("skill", "list", skill_name, user_context):
+            continue
+
         visibility = skill.get("visibility", "public")
         owner = skill.get("owner", "")
         allowed_groups = skill.get("allowed_groups", [])
@@ -721,6 +773,12 @@ async def semantic_search(
             skill_path, visibility, owner, allowed_groups, user_context
         ):
             continue
+
+        # Build projected metadata for skills if requested (Issue #1277).
+        # The actual projection is applied after the loop via a batch fetch
+        # from the skills collection (avoids N+1 and gives access to full
+        # metadata including extra.*).
+        _skill_metadata_for_projection: dict | None = None
 
         filtered_skills.append(
             SkillSearchResult(
@@ -740,8 +798,27 @@ async def semantic_search(
                 status=skill.get("status", "active"),
                 relevance_score=skill.get("relevance_score", 0.0),
                 match_context=skill.get("match_context"),
+                metadata=_skill_metadata_for_projection,
             )
         )
+
+    # Batch-fetch full skill metadata and apply projection (Issue #1277).
+    # Only fires when metadata_fields is supplied AND skills were found.
+    if _metadata_paths is not None and filtered_skills:
+        skill_repo = get_skill_repository()
+        skill_paths = [s.path for s in filtered_skills]
+        full_skill_docs = await skill_repo.list_by_paths(skill_paths)
+        for skill_result in filtered_skills:
+            full_doc = full_skill_docs.get(skill_result.path)
+            if full_doc:
+                raw_meta = full_doc.get("metadata", {})
+                # SkillMetadata is stored as {"author":..,"version":..,"extra":{..}}
+                if isinstance(raw_meta, dict):
+                    skill_result.metadata = project_metadata(raw_meta, _metadata_paths)
+                else:
+                    skill_result.metadata = project_metadata({}, _metadata_paths)
+            else:
+                skill_result.metadata = project_metadata({}, _metadata_paths)
 
     # Process virtual servers
     filtered_virtual_servers: list[VirtualServerSearchResult] = []
@@ -769,7 +846,7 @@ async def semantic_search(
         )
         # Build matching tools with schema lookup from backend servers
         # Only include tools that matched the search query
-        matching_tools: list[MatchingToolResult] = []
+        matching_tools = []
         for tool in allowed_vs_matching:
             tool_name = tool.get("tool_name") or tool.get("name", "")
             # Look up the tool schema from the backend server
@@ -840,9 +917,34 @@ async def semantic_search(
     # agreement: off = feature invisible, existing records dormant.
     custom_results = raw_results.get("custom", []) if settings.custom_entity_types_enabled else []
     filtered_custom: list[CustomEntitySearchResult] = []
+    # Discovery check first (per-record aware): the list_<type>_entity grant may
+    # open the whole type ("all"/type name) or only specific record paths. Resolve
+    # the grant ONCE per type into (whole, paths) — the grant is constant per type,
+    # so this avoids re-reading ui_permissions and re-extracting paths on every
+    # hit. Each hit then passes discovery iff the type is whole-open OR its own
+    # path is in the granted set (so granting one record surfaces only that
+    # record, never every public record of the type). Runs before the per-record
+    # visibility check.
+    is_admin = bool(user_context.get("is_admin", False))
+    ui_permissions = user_context.get("ui_permissions") or {}
+    # entity_type -> (whole_type_open, granted_record_paths). resolve_list_grant
+    # is the shared tier resolver used by user_can_list_custom_entity_type too, so
+    # the two enforcement sites can never disagree; admin bypass is applied here.
+    discovery_cache: dict[str, tuple[bool, set[str]]] = {}
     for record in custom_results:
         record_path = record.get("path", "")
         if not record_path:
+            continue
+
+        entity_type = record.get("entity_type", "")
+        decision = discovery_cache.get(entity_type)
+        if decision is None:
+            granted = ui_permissions.get(_entity_scope("list", entity_type)) or []
+            whole, paths = _resolve_list_grant(entity_type, granted)
+            decision = (is_admin or whole, paths)
+            discovery_cache[entity_type] = decision
+        whole_open, granted_paths = decision
+        if not whole_open and record_path not in granted_paths:
             continue
 
         visibility = record.get("visibility", "private")

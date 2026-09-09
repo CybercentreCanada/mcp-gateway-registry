@@ -63,11 +63,28 @@ class TestGrantsAdmin:
             {"list_service": ["all"]},
             {"register_service": ["currenttime"]},
             {},
+            # Per-type entity scopes are excluded from BOTH consumers.
+            {"create_dataset_entity": ["all"]},
+            {"modify_dataset_entity": ["all"]},
+            {"delete_dataset_entity": ["all"]},
+            {"list_dataset_entity": ["all"]},
         ]
         for ui_permissions in cases:
             assert _grants_admin(ui_permissions) == _user_is_admin(ui_permissions), (
                 f"disagreement on {ui_permissions}"
             )
+
+    # ── Per-type entity mutation scopes are NOT admin-conferring here ──
+    def test_per_type_entity_scope_does_not_grant_admin(self):
+        assert _grants_admin({"create_dataset_entity": ["all"]}) is False
+        assert _grants_admin({"modify_dataset_entity": ["all"]}) is False
+        assert _grants_admin({"delete_dataset_entity": ["all"]}) is False
+        assert _grants_admin({"list_dataset_entity": ["all"]}) is False
+
+    def test_real_admin_action_alongside_entity_scope_still_grants(self):
+        assert (
+            _grants_admin({"create_dataset_entity": ["all"], "register_service": ["all"]}) is True
+        )
 
 
 def _make_repo() -> DocumentDBScopeRepository:
@@ -140,9 +157,7 @@ class TestIsPrivilegedWrite:
         assert _is_privileged_write("eng", ["eng"], {"register_service": ["all"]}) is True
 
     def test_benign_write_not_flagged(self):
-        assert (
-            _is_privileged_write("eng", ["eng"], {"list_service": ["currenttime"]}) is False
-        )
+        assert _is_privileged_write("eng", ["eng"], {"list_service": ["currenttime"]}) is False
 
 
 class TestImportGroupMappingGuard:

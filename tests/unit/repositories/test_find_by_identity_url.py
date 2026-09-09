@@ -74,6 +74,9 @@ class _FakeServerRepo(ServerRepositoryBase):
     async def count(self):  # pragma: no cover
         return len(self._servers)
 
+    async def count_tools(self):  # pragma: no cover
+        return 0
+
     async def update_field(self, path, field, value):  # pragma: no cover
         return False
 
@@ -146,6 +149,9 @@ class _FakeSkillRepo(SkillRepositoryBase):
 
     async def list_paginated(self, skip=0, limit=100):  # pragma: no cover
         return []
+
+    async def list_by_paths(self, paths):  # pragma: no cover
+        return {}
 
     async def list_filtered(self, **kwargs):  # pragma: no cover
         return []

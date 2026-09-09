@@ -2,15 +2,50 @@ import asyncio
 import logging
 from typing import Any
 
+from ..core.metrics import ASSET_ID_CONFLICT_TOTAL
+from ..exceptions import AssetIdConflictError
 from ..repositories.factory import get_server_repository
 from ..repositories.interfaces import ServerRepositoryBase
 from ..utils.credential_encryption import (
     _migrate_auth_type_to_auth_scheme,
     strip_credentials_from_dict,
 )
-from ..utils.url_guard import validate_proxy_pass_url, validate_server_path
+from ..utils.url_guard import (
+    proxy_profile_for_entity_target,
+    validate_proxy_pass_url,
+    validate_server_path,
+    validate_url,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_endpoint_fields(
+    server_info: dict[str, Any],
+    *,
+    server_path: str | None,
+    registered_target_url: str | None,
+) -> None:
+    """Validate optional endpoint overrides against the registered target.
+
+    Ordinary servers use the standard proxy profile. The built-in
+    ``airegistry-tools`` record may use its private-host profile only when the
+    actual override has an exact normalized outbound identity approved by that
+    profile; a different host, port, path, or query is rejected.
+    """
+    for field_name in ("mcp_endpoint", "sse_endpoint"):
+        value = server_info.get(field_name)
+        if not value:
+            continue
+        profile = proxy_profile_for_entity_target(
+            "mcp_server", server_path, registered_target_url, value
+        )
+        validate_url(
+            value,
+            profile=profile,
+            reject_nginx_metacharacters=True,
+            resolve=False,
+        )
 
 
 class ServerService:
@@ -37,10 +72,11 @@ class ServerService:
             Prepared server dict with auth_scheme migrated and credentials
             optionally stripped.
         """
-        _migrate_auth_type_to_auth_scheme(server_dict)
+        prepared = dict(server_dict)
+        _migrate_auth_type_to_auth_scheme(prepared)
         if not include_credentials:
-            strip_credentials_from_dict(server_dict)
-        return server_dict
+            prepared = strip_credentials_from_dict(prepared)
+        return prepared
 
     async def load_servers_and_state(self):
         """Load server definitions and persisted state from repository."""
@@ -76,7 +112,12 @@ class ServerService:
         # target). Raises UrlValidationError -> HTTP 400.
         proxy_pass_url = server_info.get("proxy_pass_url")
         if proxy_pass_url:
-            validate_proxy_pass_url(proxy_pass_url)
+            validate_proxy_pass_url(proxy_pass_url, server_path=path)
+
+        # Alternate endpoints are bound to the registered target identity.
+        _validate_endpoint_fields(
+            server_info, server_path=path, registered_target_url=proxy_pass_url
+        )
 
         # The path is interpolated into nginx location directives; reject any
         # nginx metacharacters so a crafted path cannot inject config.
@@ -125,13 +166,49 @@ class ServerService:
                 "is_new_version": False,
             }
 
+        # Id uniqueness pre-check (#1276): a caller-supplied id must not
+        # collide with an existing asset. Return a failure dict (mirrors the
+        # path-conflict contract above) so the routes surface a 409.
+        asset_id = server_info.get("id")
+        if asset_id and await self._repo.find_by_id(asset_id):
+            logger.warning(f"Server registration rejected: id '{asset_id}' already exists")
+            ASSET_ID_CONFLICT_TOTAL.labels(asset_type="server").inc()
+            return {
+                "success": False,
+                "message": f"Server with id '{asset_id}' already exists",
+                "is_new_version": False,
+                "error_type": "id_conflict",
+            }
+
         # New server - create it
         # Initialize version metadata for new servers
         if not server_info.get("version"):
             server_info["version"] = "v1.0.0"
         server_info["is_active"] = True
 
-        result = await self._repo.create(server_info)
+        # Gateway-proxy SSRF layer 2 (no-op unless is_proxied): resolve the target
+        # hostname and validate every resolved IP against the egress policy, then
+        # pin the resolved IPs. Rejects a metadata/private target at registration.
+        if server_info.get("is_proxied"):
+            from ..schemas.proxy_mixin import validate_and_pin_proxy_target
+
+            pin = await validate_and_pin_proxy_target("mcp_server", server_info)
+            if pin:
+                server_info["proxy_resolved_ips"] = pin["proxy_resolved_ips"]
+                server_info["proxy_target_host"] = pin["proxy_target_host"]
+
+        try:
+            result = await self._repo.create(server_info)
+        except AssetIdConflictError as e:
+            # Lost the insert race after the pre-check (#1276).
+            logger.warning(f"Server registration id conflict (race): {e}")
+            ASSET_ID_CONFLICT_TOTAL.labels(asset_type="server").inc()
+            return {
+                "success": False,
+                "message": f"Server with id '{e.asset_id}' already exists",
+                "is_new_version": False,
+                "error_type": "id_conflict",
+            }
 
         if result:
             # Index in search backend
@@ -163,9 +240,64 @@ class ServerService:
                 payload actually carries a proxy_pass_url, so health-status and
                 tool-list updates are unaffected.
         """
-        # Fail-closed URL validation on edit paths that change the backend URL.
-        if server_info.get("proxy_pass_url"):
-            validate_proxy_pass_url(server_info["proxy_pass_url"])
+        # Validate the merged target state whenever a target-bearing field is
+        # edited. This prevents an existing built-in registration from lending
+        # its privileged profile to a different mcp_endpoint/sse_endpoint.
+        target_fields = ("proxy_pass_url", "mcp_endpoint", "sse_endpoint")
+        if any(field in server_info for field in target_fields):
+            existing = await self._repo.get(path)
+            merged = dict(existing or {})
+            merged.update(server_info)
+            registered_target = merged.get("proxy_pass_url")
+            if registered_target:
+                validate_proxy_pass_url(registered_target, server_path=path)
+            _validate_endpoint_fields(
+                merged,
+                server_path=path,
+                registered_target_url=registered_target,
+            )
+        # Gateway-proxy SSRF layer 2 on the MERGED state. This is the single choke
+        # point for every server-update call site (PATCH, version swap, etc.), so
+        # a hostname proxy target that resolves to a metadata/private IP is rejected
+        # here rather than persisted unchecked. Only touches the DB when a proxy
+        # field is present in the update payload. Mirrors the skill/agent pattern.
+        # proxy_pass_url is included: for an MCP server resolve_proxy_target falls
+        # back to it when proxy_target_url is unset, so changing it on an already
+        # is_proxied server changes the effective target and must re-validate.
+        _proxy_fields = ("is_proxied", "proxy_target_url", "proxy_pass_url")
+        if any(f in server_info for f in _proxy_fields):
+            from ..schemas.proxy_mixin import (
+                clear_upstream_headers_on_repoint,
+                effective_proxy_target,
+                validate_and_pin_proxy_target,
+            )
+
+            existing = await self._repo.get(path)
+            merged = dict(existing or {})
+            merged.update(server_info)
+            # An update touching the proxy config re-validates from scratch, so a
+            # prior refresh auto-disable must not suppress resolution here.
+            merged["proxy_disabled_reason"] = None
+            if merged.get("is_proxied"):
+                pin = await validate_and_pin_proxy_target("mcp_server", merged)
+                if pin:
+                    server_info["proxy_resolved_ips"] = pin["proxy_resolved_ips"]
+                    server_info["proxy_target_host"] = pin["proxy_target_host"]
+                # Re-enabling clears any prior refresh auto-disable.
+                server_info["proxy_disabled_reason"] = None
+            # Credential-misdirection guard: an MCP server's effective target is
+            # proxy_target_url OR (fallback) proxy_pass_url. Use effective_proxy_target
+            # (NOT resolve_proxy_target) so the comparison is routability-agnostic:
+            # a freshly-registered server starts DISABLED, and resolve_proxy_target
+            # returns None for a disabled entity -- which would make both sides None
+            # and skip the clear, letting a repoint-before-enable carry the old
+            # host's secret to a new host. effective_proxy_target omits that gate,
+            # so a host change is caught even while the server is disabled.
+            clear_upstream_headers_on_repoint(
+                server_info,
+                existing_target=effective_proxy_target("mcp_server", dict(existing or {})),
+                new_target=effective_proxy_target("mcp_server", merged),
+            )
 
         result = await self._repo.update(path, server_info)
 
@@ -213,8 +345,8 @@ class ServerService:
         """
         result = await self._repo.get(path)
         if result:
-            self._prepare_server_dict(result, include_credentials)
-        return result
+            return self._prepare_server_dict(result, include_credentials)
+        return None
 
     async def get_all_servers(
         self,
@@ -238,9 +370,11 @@ class ServerService:
         # Query repository directly instead of using cache
         all_servers = await self._repo.list_all(exclude_tool_list=exclude_tool_list)
 
-        # Apply read-time migration and credential stripping
-        for server_info in all_servers.values():
-            self._prepare_server_dict(server_info, include_credentials)
+        # Apply read-time migration and credential stripping as fresh projections.
+        all_servers = {
+            path: self._prepare_server_dict(server_info, include_credentials)
+            for path, server_info in all_servers.items()
+        }
 
         # Filter out inactive servers (non-default versions) unless requested
         if not include_inactive:
@@ -257,6 +391,7 @@ class ServerService:
         skip: int = 0,
         limit: int = 100,
         exclude_tool_list: bool = False,
+        metadata_paths: list[str] | None = None,
     ) -> tuple[dict[str, dict[str, Any]], int]:
         """Get a page of servers with total count.
 
@@ -272,18 +407,25 @@ class ServerService:
             limit: Maximum number of servers to return.
             exclude_tool_list: If True, omit the heavy tool_list field for
                 callers that only need metadata. num_tools is unaffected.
+            metadata_paths: If provided, project metadata to only these paths
+                at the DB level (Issue #1277).
 
         Returns:
             Tuple of (servers dict for the requested page, total count of all servers).
         """
         servers = await self._repo.list_paginated(
-            skip=skip, limit=limit, exclude_tool_list=exclude_tool_list
+            skip=skip,
+            limit=limit,
+            exclude_tool_list=exclude_tool_list,
+            metadata_paths=metadata_paths,
         )
         total = await self._repo.count()
 
-        # Apply read-time migration and credential stripping
-        for server_info in servers.values():
-            self._prepare_server_dict(server_info, include_credentials=False)
+        # Apply read-time migration and credential stripping as fresh projections.
+        servers = {
+            path: self._prepare_server_dict(server_info, include_credentials=False)
+            for path, server_info in servers.items()
+        }
 
         # Filter out inactive servers (non-default versions)
         servers = {
@@ -333,9 +475,11 @@ class ServerService:
         # Query repository directly instead of using cache
         all_servers = await self._repo.list_all()
 
-        # Apply read-time migration and credential stripping
-        for server_info in all_servers.values():
-            self._prepare_server_dict(server_info, include_credentials=False)
+        # Apply read-time migration and credential stripping as fresh projections.
+        all_servers = {
+            path: self._prepare_server_dict(server_info, include_credentials=False)
+            for path, server_info in all_servers.items()
+        }
 
         # Filter out inactive servers (non-default versions) unless requested
         if not include_inactive:
@@ -420,10 +564,13 @@ class ServerService:
 
             filtered_servers = await self._repo.list_by_ids(candidate_paths)
 
-            # Apply read-time migration and credential stripping
-            for server_info in filtered_servers.values():
-                self._prepare_server_dict(server_info, include_credentials=False)
-                if exclude_tool_list:
+            # Apply read-time migration and credential stripping as fresh projections.
+            filtered_servers = {
+                path: self._prepare_server_dict(server_info, include_credentials=False)
+                for path, server_info in filtered_servers.items()
+            }
+            if exclude_tool_list:
+                for server_info in filtered_servers.values():
                     server_info.pop("tool_list", None)
 
             # Filter out inactive servers (non-default versions) for parity with
@@ -638,7 +785,7 @@ class ServerService:
         """
         # Fail-closed URL validation before persisting a new version's backend.
         if proxy_pass_url:
-            validate_proxy_pass_url(proxy_pass_url)
+            validate_proxy_pass_url(proxy_pass_url, server_path=path)
 
         # Get active server document
         active_server = await self._repo.get(path)
@@ -823,6 +970,19 @@ class ServerService:
         new_inactive["is_active"] = False
         new_inactive["active_version_id"] = path
         new_inactive.pop("other_version_ids", None)
+
+        # Gateway-proxy SSRF layer 2: the promoted version's proxy_pass_url becomes
+        # the live effective target. If the promoted doc is proxied, resolve+validate
+        # it (a version added earlier bypassed the register/update check) and pin the
+        # IPs before it goes active. Rejects promoting a version whose target now
+        # resolves to a metadata/private IP.
+        if new_active.get("is_proxied"):
+            from ..schemas.proxy_mixin import validate_and_pin_proxy_target
+
+            pin = await validate_and_pin_proxy_target("mcp_server", new_active)
+            if pin:
+                new_active["proxy_resolved_ips"] = pin["proxy_resolved_ips"]
+                new_active["proxy_target_host"] = pin["proxy_target_host"]
 
         # Execute swap: delete old docs, insert new docs
         await self._repo.delete(path)

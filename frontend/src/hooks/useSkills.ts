@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import axios from 'axios';
 import { Skill } from '../types/skill';
+import { fetchAllPages } from '../utils/fetchAllPages';
 
 export type { Skill } from '../types/skill';
 
@@ -22,11 +22,12 @@ export const useSkills = (): UseSkillsReturn => {
       setLoading(true);
       setError(null);
 
-      const response = await axios.get('/api/skills?include_disabled=true&limit=2000');
-
-      // The API returns {"skills": [...]}
-      const responseData = response.data || {};
-      const skillsList = responseData.skills || [];
+      // Issue #880: page through /api/skills (max 2000 per request)
+      const skillsList = await fetchAllPages<any>({
+        url: '/api/skills',
+        itemsKey: 'skills',
+        params: { include_disabled: true },
+      });
 
       console.log(`Skills returned from API: ${skillsList.length}`);
 
@@ -63,6 +64,12 @@ export const useSkills = (): UseSkillsReturn => {
         // descriptor URL so the SkillCard can render the discovery treatment.
         is_read_only: skillInfo.is_read_only ?? false,
         ard_source_url: skillInfo.ard_source_url,
+        // Gateway-proxy opt-in. Carry through so the card badge and edit modal
+        // reflect the stored state. proxy_client_url is the read-only,
+        // auto-derived client path; proxy_target_url is the origin/backend URL.
+        is_proxied: skillInfo.is_proxied ?? false,
+        proxy_target_url: skillInfo.proxy_target_url ?? undefined,
+        proxy_client_url: skillInfo.proxy_client_url ?? undefined,
       }));
 
       setSkills(transformedSkills);

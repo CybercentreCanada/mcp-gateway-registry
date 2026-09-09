@@ -146,7 +146,12 @@ async def ard_search(
         source = f"{_base_url_from_request(http_request)}/api/ard/search"
         try:
             results, scoped_out, referrals = await ard_search_service.search_and_scope(
-                body.query.text, entity_types, tags, window, user_context, source,
+                body.query.text,
+                entity_types,
+                tags,
+                window,
+                user_context,
+                source,
                 federation=body.federation,
             )
         except Exception as e:  # noqa: BLE001 - reshape to ARD envelope, detail to logs

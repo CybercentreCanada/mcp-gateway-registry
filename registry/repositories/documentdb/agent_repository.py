@@ -8,14 +8,21 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorCollection
 from pymongo.errors import DuplicateKeyError
 
+from ...exceptions import AssetIdConflictError
 from ...schemas.agent_models import AgentCard
 from ...utils.url_normalize import ENTITY_TYPE_AGENT, NORMALIZED_IDENTITY_URL_FIELD
 from ..interfaces import AgentRepositoryBase
 from ._identity_url_sidecar import (
     backfill_normalized_identity_url,
+    ensure_is_proxied_index,
     ensure_normalized_identity_url_index,
     find_by_normalized_identity_url,
     populate_normalized_identity_url,
+)
+from ._unique_id_index import (
+    backfill_missing_id,
+    ensure_unique_id_index,
+    find_doc_by_id,
 )
 from .client import get_collection_name, get_documentdb_client
 
@@ -53,11 +60,18 @@ class DocumentDBAgentRepository(AgentRepositoryBase):
                 collection,
                 self._collection_name,
             )
+            # Index backing list_proxied() (partial, with plain fallback for
+            # DocumentDB; never raises). See ensure_is_proxied_index.
+            await ensure_is_proxied_index(collection, self._collection_name)
             await backfill_normalized_identity_url(
                 collection,
                 self._collection_name,
                 ENTITY_TYPE_AGENT,
             )
+            # Unique id index (#1276): backfill BEFORE building the unique
+            # partial index so the build never fails on legacy rows.
+            await backfill_missing_id(collection, self._collection_name)
+            await ensure_unique_id_index(collection, self._collection_name)
             self._collection = collection
             return self._collection
 
@@ -89,6 +103,40 @@ class DocumentDBAgentRepository(AgentRepositoryBase):
         except Exception as e:
             logger.error(f"Error getting agent '{path}' from DocumentDB: {e}", exc_info=True)
             return None
+
+    async def list_proxied(self) -> list[dict[str, Any]]:
+        """Projected list of proxied agents for the nginx render hot path.
+
+        Indexed ``is_proxied=True`` query projecting only the render/resolve
+        fields (native fallback: url). Returns raw dicts (not AgentCard) — the
+        render only needs the scalars, and a bypass-written invalid row must not
+        crash the reload via model reconstruction.
+        """
+        projection = {
+            "is_proxied": 1,
+            "is_enabled": 1,
+            "proxy_target_url": 1,
+            "proxy_streaming": 1,
+            "custom_header_names": 1,
+            "custom_header_overridable_names": 1,
+            "custom_headers_encrypted": 1,
+            "proxy_resolved_ips": 1,
+            "proxy_target_host": 1,
+            "proxy_disabled_reason": 1,
+            "url": 1,
+            "sync_metadata": 1,
+        }
+        try:
+            collection = await self._get_collection()
+            cursor = collection.find({"is_proxied": True}, projection)
+            rows = []
+            async for doc in cursor:
+                doc["path"] = doc.pop("_id")
+                rows.append(doc)
+            return rows
+        except Exception as e:
+            logger.error(f"Error listing proxied agents from DocumentDB: {e}", exc_info=True)
+            return []
 
     async def list_all(self) -> list[AgentCard]:
         """List all agents."""
@@ -158,12 +206,29 @@ class DocumentDBAgentRepository(AgentRepositoryBase):
             await collection.insert_one(doc)
             logger.info(f"Created agent '{agent.name}' at '{path}'")
             return agent
-        except DuplicateKeyError:
+        except DuplicateKeyError as exc:
+            # Disambiguate id-collision from path-collision (#1276). An id
+            # collision here means two registrations raced past the pre-check.
+            key_pattern = (exc.details or {}).get("keyPattern", {})
+            if "id" in key_pattern:
+                raise AssetIdConflictError(
+                    asset_type="agent", asset_id=getattr(agent, "id", "")
+                ) from exc
             logger.error(f"Agent path '{path}' already exists")
             raise ValueError(f"Agent path '{path}' already exists")
         except Exception as e:
             logger.error(f"Failed to create agent in DocumentDB: {e}", exc_info=True)
             raise ValueError(f"Failed to create agent: {e}")
+
+    async def find_by_id(
+        self,
+        asset_id: str,
+    ) -> dict[str, Any] | None:
+        """Indexed lookup by ``id`` (#1276). Overrides the scanning default."""
+        if not asset_id:
+            return None
+        collection = await self._get_collection()
+        return await find_doc_by_id(collection, asset_id)
 
     async def update(
         self,

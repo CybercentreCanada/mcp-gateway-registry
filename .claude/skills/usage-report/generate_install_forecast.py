@@ -50,10 +50,11 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys
+
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import seaborn as sns
-import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -117,11 +118,11 @@ def _ols_linear(
         raise ValueError("need at least 2 points to fit a line")
     mean_x = sum(x) / n
     mean_y = sum(y) / n
-    num = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y))
+    num = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y, strict=False))
     den = sum((xi - mean_x) ** 2 for xi in x)
     a = num / den
     b = mean_y - a * mean_x
-    residuals = [yi - (a * xi + b) for xi, yi in zip(x, y)]
+    residuals = [yi - (a * xi + b) for xi, yi in zip(x, y, strict=False)]
     if n > 2:
         rss = sum(r * r for r in residuals)
         residual_std = math.sqrt(rss / (n - 2))
@@ -208,9 +209,7 @@ def _generate_chart(
     eta_lin = _eta_for_threshold(a_lin, b_lin, target, "linear", base_date)
 
     # Recent-pace projection (7-day SMA of daily additions)
-    eta_pace, daily_add_rate = _recent_pace_projection(
-        series, target, RECENT_PACE_WINDOW_DAYS
-    )
+    eta_pace, daily_add_rate = _recent_pace_projection(series, target, RECENT_PACE_WINDOW_DAYS)
 
     # Pick the chart's right-edge: latest of the two ETAs (with a sane cap).
     candidate_etas = [e for e in (eta_lin, eta_pace) if e is not None]
@@ -239,9 +238,7 @@ def _generate_chart(
 
     # Recent-pace line
     if eta_pace is not None:
-        pace_pred = [
-            series[-1][1] + daily_add_rate * (d - full_x[-1]) for d in forecast_days
-        ]
+        pace_pred = [series[-1][1] + daily_add_rate * (d - full_x[-1]) for d in forecast_days]
     else:
         pace_pred = []
 
@@ -259,12 +256,19 @@ def _generate_chart(
 
     # Linear model + band
     ax.fill_between(
-        forecast_dates, lin_lo, lin_hi,
-        color=palette[0], alpha=0.15, label="Linear 95% PI",
+        forecast_dates,
+        lin_lo,
+        lin_hi,
+        color=palette[0],
+        alpha=0.15,
+        label="Linear 95% PI",
     )
     ax.plot(
-        forecast_dates, lin_pred,
-        color=palette[0], linewidth=2.0, linestyle="--",
+        forecast_dates,
+        lin_pred,
+        color=palette[0],
+        linewidth=2.0,
+        linestyle="--",
         label=(
             f"Linear OLS, trailing {actual_fit_window_days}d window "
             f"({a_lin:.1f}/day, ETA "
@@ -275,8 +279,11 @@ def _generate_chart(
     # Recent-pace line (no band)
     if pace_pred:
         ax.plot(
-            forecast_dates, pace_pred,
-            color=palette[2], linewidth=2.0, linestyle=":",
+            forecast_dates,
+            pace_pred,
+            color=palette[2],
+            linewidth=2.0,
+            linestyle=":",
             label=(
                 f"Recent {RECENT_PACE_WINDOW_DAYS}d pace "
                 f"({daily_add_rate:.1f}/day, ETA "
@@ -288,16 +295,22 @@ def _generate_chart(
     hist_dates = [d for d, _n in series]
     hist_counts = [n for _d, n in series]
     ax.scatter(
-        hist_dates, hist_counts,
-        color="black", s=22, zorder=5, label="Observed daily snapshot",
+        hist_dates,
+        hist_counts,
+        color="black",
+        s=22,
+        zorder=5,
+        label="Observed daily snapshot",
     )
 
     # Reference line at target
     ax.axhline(target, color="grey", linewidth=1, linestyle="-", alpha=0.5)
     ax.text(
-        forecast_dates[0], target * 1.02,
+        forecast_dates[0],
+        target * 1.02,
         f"target = {target}",
-        fontsize=9, color="grey",
+        fontsize=9,
+        color="grey",
     )
 
     ax.set_ylabel("Cumulative unique installs", fontsize=11)
@@ -306,9 +319,7 @@ def _generate_chart(
     ax.set_xlim(hist_dates[0] - timedelta(days=1), forecast_dates[-1])
     ax.set_ylim(0, max(target * 1.2, max(lin_hi) * 1.05))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-    ax.xaxis.set_major_locator(
-        mdates.DayLocator(interval=max(1, len(forecast_days) // 14))
-    )
+    ax.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, len(forecast_days) // 14)))
     plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha="right")
 
     for _ax in fig.axes:
@@ -332,12 +343,18 @@ def _generate_chart(
             "residual_std": sigma_lin,
             "eta": eta_lin.strftime("%Y-%m-%d") if eta_lin else None,
             "eta_lower_95": (
-                _eta_for_threshold(a_lin, b_lin + pi_z * sigma_lin, target, "linear", base_date).strftime("%Y-%m-%d")
-                if a_lin > 0 else None
+                _eta_for_threshold(
+                    a_lin, b_lin + pi_z * sigma_lin, target, "linear", base_date
+                ).strftime("%Y-%m-%d")
+                if a_lin > 0
+                else None
             ),
             "eta_upper_95": (
-                _eta_for_threshold(a_lin, b_lin - pi_z * sigma_lin, target, "linear", base_date).strftime("%Y-%m-%d")
-                if a_lin > 0 else None
+                _eta_for_threshold(
+                    a_lin, b_lin - pi_z * sigma_lin, target, "linear", base_date
+                ).strftime("%Y-%m-%d")
+                if a_lin > 0
+                else None
             ),
         },
         "recent_pace": {
@@ -365,8 +382,8 @@ def main() -> None:
     parser.add_argument(
         "--target",
         type=int,
-        default=1000,
-        help="Target install count to forecast (default: 1000)",
+        default=2000,
+        help="Target install count to forecast (default: 2000)",
     )
     parser.add_argument(
         "--output",

@@ -44,6 +44,7 @@ import ServerRegisterModal, {
 } from '../components/entities/forms/ServerRegisterModal';
 import { useEntityToggle } from '../hooks/useEntityToggle';
 import { filterEntities } from '../utils/entityFilters';
+import { upstreamHeaderRowError } from '../components/formFields';
 
 // Federated-registry header accents (local groups are always green/emerald).
 const SERVER_REGISTRY_ACCENT: RegistryAccent = {
@@ -71,7 +72,8 @@ import type {
 } from '../types/customEntity';
 import axios from 'axios';
 import { getBaseURL } from '../utils/basePath';
-import { isEgressAuthEnabled } from '../utils/egressAuth';
+import { isEgressAuthEnabled, loadEgressCardState, type EgressCardState } from '../utils/egressAuth';
+import { EgressConnectProvider } from '../contexts/EgressConnectContext';
 import {
   buildLocalRuntimeForm,
   buildLocalRuntimeJson,
@@ -150,6 +152,11 @@ interface Agent {
     last_verified?: string;
   };
   registered_by?: string | null;
+  // Gateway-proxy opt-in (registry extension): served through the generic hop.
+  is_proxied?: boolean;
+  proxy_target_url?: string;
+  // Read-only, auto-derived client path ({prefix}/{type}/{name}).
+  proxy_client_url?: string;
 }
 
 // Toast notification component
@@ -305,16 +312,21 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
     },
     custom_headers: [] as Array<{ name: string; value: string }>,
     // Egress auth to the upstream (admin config).
-    egress_auth_mode: 'none' as 'none' | 'oauth_user' | 'obo_exchange',
+    egress_auth_mode: 'none' as 'none' | 'oauth_user' | 'obo_exchange' | 'pat',
     egress_provider: '',
     egress_client_id: '',
     egress_client_secret: '',  // write-only; blank on edit keeps the stored one
     egress_scopes: '',  // comma/space separated
     egress_custom_authorize_url: '',
     egress_custom_token_url: '',
+    egress_custom_token_auth_style: '',  // '' = backend default (post_body)
+    egress_custom_resource: '',  // RFC 8707 resource indicator (optional)
     egress_target_audience: '',
   });
   const [egressEnabled, setEgressEnabled] = useState(false);
+  // Per-server egress connect state (card icon + connect-modal callout). Keyed by
+  // server path; empty when the feature is off or the caller is not per-user.
+  const [egressStateByPath, setEgressStateByPath] = useState<Map<string, EgressCardState>>(new Map());
   const [editLoading, setEditLoading] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
@@ -334,6 +346,20 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
     | 'external'
     | `custom:${string}`;
   const [viewFilter, setViewFilter] = useState<ViewFilter>('discover');
+
+  // Whether the user can DISCOVER any resource of an entity family, i.e. holds
+  // the family's list_ scope for at least one resource (or "all"). Admins always
+  // can. Used to hide entity tabs the user could never see anything in — a
+  // frontend-convenience mirror of the backend list/search discovery gate (which
+  // remains authoritative: hitting a hidden tab's endpoint still returns
+  // empty/404). Keep the scope names in sync with
+  // registry/auth/asset_permissions.py. Declared here (before the tab-redirect
+  // effect that uses it) so it precedes its first use.
+  const hasListAccess = useCallback((listScope: string): boolean => {
+    if (user?.is_admin) return true;
+    const granted = user?.ui_permissions?.[listScope];
+    return Array.isArray(granted) && granted.length > 0;
+  }, [user?.is_admin, user?.ui_permissions]);
 
   // Pagination state (per entity type)
   const PAGE_SIZE = 50;
@@ -360,7 +386,26 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
     };
   }, []);
 
-  // Reset viewFilter to 'discover' when the active tab is hidden by config
+  // Load the per-server egress connect state for the card icon + modal callout.
+  // Returns an empty map when the feature is off or the caller is not per-user.
+  // Extracted so the modal can re-run it after a connect/disconnect.
+  const reloadEgressState = useCallback(() => {
+    void loadEgressCardState().then(setEgressStateByPath);
+  }, []);
+
+  useEffect(() => {
+    reloadEgressState();
+  }, [reloadEgressState]);
+
+  // Reset viewFilter to 'discover' when the active tab is hidden by the
+  // deployment feature flag. For servers and custom-entity types we ALSO redirect
+  // when the user lacks the entity's list_ scope (those tabs stay hidden). Agents
+  // and Skills are deliberately NOT redirected on a missing scope: their tabs stay
+  // visible and render an access hint (see the agents/skills empty states) so a
+  // user whose skills/agents access changed learns why the tab is empty and what
+  // a registry admin must grant, rather than the tab silently disappearing. The
+  // backend discovery gate remains authoritative (the endpoints still return
+  // empty/404 without the scope).
   useEffect(() => {
     if (viewFilter === 'virtual' && registryConfig?.features.virtual_servers === false) {
       setViewFilter('discover');
@@ -371,18 +416,20 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
     if (viewFilter === 'skills' && registryConfig?.features.skills === false) {
       setViewFilter('discover');
     }
-    if (viewFilter === 'servers' && registryConfig?.features.mcp_servers === false) {
+    if (viewFilter === 'servers' &&
+        (registryConfig?.features.mcp_servers === false || !hasListAccess('list_service'))) {
       setViewFilter('discover');
     }
-    // A custom-type tab whose type is no longer in config (admin deleted it).
+    // A custom-type tab whose type is no longer in config (admin deleted it) OR
+    // that the user lacks list access to.
     if (viewFilter.startsWith('custom:')) {
       const typeName = viewFilter.slice('custom:'.length);
       const exists = (registryConfig?.custom_types ?? []).some((t) => t.name === typeName);
-      if (registryConfig && !exists) {
+      if (registryConfig && (!exists || !hasListAccess(`list_${typeName}_entity`))) {
         setViewFilter('discover');
       }
     }
-  }, [viewFilter, registryConfig]);
+  }, [viewFilter, registryConfig, hasListAccess]);
 
   // Collapsible state for registry groups (tracks which groups are expanded)
   // Key is registry name: 'local' or peer registry ID like 'peer-registry-lob-1'
@@ -481,6 +528,9 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
     skillsJson: '[]',
     metadata: '',
     status: 'active' as 'active' | 'draft' | 'deprecated' | 'beta',
+    is_proxied: false,
+    proxy_target_url: '',
+    proxy_client_url: '',
   });
   const [editAgentLoading, setEditAgentLoading] = useState(false);
   const [skillsJsonError, setSkillsJsonError] = useState<string | null>(null);
@@ -502,6 +552,10 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
     auth_scheme: 'none' as 'none' | 'global_credentials' | 'bearer' | 'api_key',
     auth_credential: '',
     auth_header_name: '',
+    is_proxied: false,
+    proxy_target_url: '',
+    proxy_client_url: '',
+    custom_headers: [],
   });
   const [skillFormLoading, setSkillFormLoading] = useState(false);
   const [showDeleteSkillConfirm, setShowDeleteSkillConfirm] = useState<string | null>(null);
@@ -577,6 +631,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
     return permissions.includes('all') || permissions.includes(serviceName);
   }, [user?.ui_permissions]);
 
+
   // External registry tags - can be configured via environment or constants
   // Default tags that identify servers from external registries
   const EXTERNAL_REGISTRY_TAGS = ['anthropic-registry', 'workday-asor', 'asor', 'federated'];
@@ -623,6 +678,10 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
       ans_metadata: a.ans_metadata,
       registered_by: a.registered_by,
       lifecycle_status: a.lifecycle_status,
+      // Gateway-proxy opt-in — carry through for the card badge + edit modal.
+      is_proxied: a.is_proxied ?? false,
+      proxy_target_url: a.proxy_target_url,
+      proxy_client_url: a.proxy_client_url,
     }));
   }, [agentsFromStats]);
 
@@ -1253,13 +1312,15 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
         deployment,
         local_runtime: buildLocalRuntimeForm(localRuntimeRaw),
         custom_headers: (serverDetails.custom_header_names || []).map((name: string) => ({ name, value: '' })),
-        egress_auth_mode: (serverDetails.egress_auth_mode || 'none') as 'none' | 'oauth_user' | 'obo_exchange',
+        egress_auth_mode: (serverDetails.egress_auth_mode || 'none') as 'none' | 'oauth_user' | 'obo_exchange' | 'pat',
         egress_provider: serverDetails.egress_oauth?.provider || '',
         egress_client_id: serverDetails.egress_oauth?.client_id || '',
         egress_client_secret: '',  // never round-trip the secret
         egress_scopes: (serverDetails.egress_oauth?.scopes || []).join(', '),
         egress_custom_authorize_url: serverDetails.egress_oauth?.custom_authorize_url || '',
         egress_custom_token_url: serverDetails.egress_oauth?.custom_token_url || '',
+        egress_custom_token_auth_style: serverDetails.egress_oauth?.custom_token_auth_style || '',
+        egress_custom_resource: serverDetails.egress_oauth?.custom_resource || '',
         egress_target_audience: serverDetails.egress_oauth?.target_audience || '',
       });
     } catch (error) {
@@ -1291,6 +1352,8 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
         egress_scopes: '',
         egress_custom_authorize_url: '',
         egress_custom_token_url: '',
+        egress_custom_token_auth_style: '',
+        egress_custom_resource: '',
         egress_target_audience: '',
       });
     }
@@ -1327,6 +1390,11 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
           ? JSON.stringify(fullAgent.metadata, null, 2)
           : '',
         status: (fullAgent.status || agent.lifecycle_status || 'active') as 'active' | 'draft' | 'deprecated' | 'beta',
+        // The proxy mixin fields have no camelCase alias, so the API serializes
+        // them snake_case even where sibling fields are camelCased.
+        is_proxied: (fullAgent.is_proxied ?? agent.is_proxied) ?? false,
+        proxy_target_url: fullAgent.proxy_target_url || agent.proxy_target_url || '',
+        proxy_client_url: fullAgent.proxy_client_url || agent.proxy_client_url || '',
       });
     } catch (error) {
       console.error('Failed to fetch agent details for editing:', error);
@@ -1345,6 +1413,9 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
         skillsJson: '[]',
         metadata: '',
         status: agent.lifecycle_status || 'active',
+        is_proxied: agent.is_proxied ?? false,
+        proxy_target_url: agent.proxy_target_url || '',
+        proxy_client_url: agent.proxy_client_url || '',
       });
     }
   }, [agentApiToken]);
@@ -1499,6 +1570,19 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
                 scopes: scopesList,
                 custom_authorize_url: editForm.egress_custom_authorize_url || undefined,
                 custom_token_url: editForm.egress_custom_token_url || undefined,
+                custom_token_auth_style: editForm.egress_custom_token_auth_style || undefined,
+                custom_resource: editForm.egress_custom_resource || undefined,
+              },
+              { headers: csrfHeaders }
+            );
+          } else if (mode === 'pat') {
+            await axios.post(
+              `/api/servers${editingServer.path}/egress-auth`,
+              {
+                egress_auth_mode: 'pat',
+                egress_provider: editForm.egress_provider.trim(),
+                // The inject header is inherited from Backend Authentication at
+                // vend time, so it is not sent here.
               },
               { headers: csrfHeaders }
             );
@@ -1577,6 +1661,13 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
         skills: parsedSkills,
         status: editAgentForm.status,
         ...(editAgentForm.metadata.trim() ? { metadata: JSON.parse(editAgentForm.metadata) } : {}),
+        // Gateway-proxy opt-in. snake_case (the mixin fields have no camelCase
+        // alias; populate_by_name accepts them). Always send is_proxied so
+        // toggling off persists; target optional (agent url is the fallback).
+        is_proxied: editAgentForm.is_proxied,
+        ...(editAgentForm.is_proxied && editAgentForm.proxy_target_url.trim()
+          ? { proxy_target_url: editAgentForm.proxy_target_url.trim() }
+          : {}),
       };
 
       await axios.put(
@@ -1710,6 +1801,17 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
         auth_scheme: (skill.auth_scheme || 'none') as 'none' | 'global_credentials' | 'bearer' | 'api_key',
         auth_credential: '',
         auth_header_name: skill.auth_header_name || '',
+        is_proxied: skill.is_proxied ?? false,
+        proxy_target_url: skill.proxy_target_url || '',
+        proxy_client_url: skill.proxy_client_url || '',
+        // Rebuild the editor rows from the registered NAMES (values are
+        // write-only and never returned): each name gets a blank value, and the
+        // overridable flag is set from custom_header_overridable_names.
+        custom_headers: (skill.custom_header_names || []).map((name) => ({
+          name,
+          value: '',
+          overridable: (skill.custom_header_overridable_names || []).includes(name),
+        })),
       });
     } else {
       // Create mode - reset form
@@ -1729,6 +1831,10 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
         auth_scheme: 'none',
         auth_credential: '',
         auth_header_name: '',
+        is_proxied: false,
+        proxy_target_url: '',
+        proxy_client_url: '',
+        custom_headers: [],
       });
     }
     setShowSkillModal(true);
@@ -1783,6 +1889,29 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
   }, [skillForm.skill_md_url, skillForm.auth_scheme, skillForm.auth_credential, skillForm.auth_header_name, skillParseLoading, showToast]);
 
   const performSkillSave = useCallback(async (): Promise<void> => {
+    // A skill has no native backend URL, so a proxied skill must carry an
+    // explicit target. Block here with an inline toast rather than letting the
+    // backend reject it with a 422 the user can't easily map to a field.
+    if (skillForm.is_proxied && !skillForm.proxy_target_url.trim()) {
+      showToast('A proxy target URL is required when proxying is enabled', 'error');
+      return;
+    }
+
+    // Block submit client-side on any known-invalid upstream header row
+    // (reserved name, fixed Authorization, value-less fixed header) so this
+    // credential form fails fast with a specific message rather than a generic
+    // backend reject. Only when proxied and there are rows. The backend still
+    // re-validates the full policy — it remains the security boundary.
+    if (skillForm.is_proxied) {
+      for (const h of skillForm.custom_headers) {
+        const rowError = upstreamHeaderRowError(h, !!editingSkill);
+        if (rowError) {
+          showToast(rowError, 'error');
+          return;
+        }
+      }
+    }
+
     try {
       setSkillFormLoading(true);
 
@@ -1825,14 +1954,47 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
         }
       }
 
+      // Gateway-proxy opt-in. Always send is_proxied so toggling OFF persists;
+      // include the target only when proxied (backend requires it for skills).
+      payload.is_proxied = skillForm.is_proxied;
+      if (skillForm.is_proxied) {
+        payload.proxy_target_url = skillForm.proxy_target_url.trim() || undefined;
+      }
+
+      // Upstream headers, only meaningful when proxied. Drop fully-blank rows
+      // (no name); trim the name and (non-blank) value so stray whitespace is
+      // never persisted. A blank value is preserved server-side (write-only UX)
+      // on edit; on create it must be a caller-only overridable slot. An
+      // all-whitespace value trims to blank and keeps that keep-stored meaning.
+      const upstreamHeaders = skillForm.is_proxied
+        ? skillForm.custom_headers
+            .filter((h) => h.name.trim())
+            .map((h) => ({
+              name: h.name.trim(),
+              value: h.value.trim(),
+              overridable: h.overridable,
+            }))
+        : [];
+
       if (editingSkill) {
         // Update existing skill
         const skillPath = editingSkill.path.replace(/^\/skills\//, '');
         await axios.put(`/api/skills/${skillPath}`, payload);
+        // Headers are NOT settable on the general PUT (it strips them); rotate
+        // them through the dedicated endpoint. Only when proxied — a non-proxied
+        // skill has no upstream to authenticate to.
+        if (skillForm.is_proxied) {
+          await axios.patch(`/api/skills/${skillPath}/upstream-headers`, {
+            custom_headers: upstreamHeaders,
+          });
+        }
         showToast('Skill updated successfully!', 'success');
         notifyDataChanged();
       } else {
-        // Create new skill
+        // Create new skill (custom_headers accepted on the create payload).
+        if (upstreamHeaders.length > 0) {
+          payload.custom_headers = upstreamHeaders;
+        }
         await axios.post('/api/skills', payload);
         showToast('Skill registered successfully!', 'success');
         notifyDataChanged();
@@ -2188,6 +2350,8 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
                       onShowToast={showToast}
                       onServerUpdate={handleServerUpdate}
                       authToken={agentApiToken}
+                      egressConnect={egressStateByPath.get(server.path)}
+                      onEgressChanged={reloadEgressState}
                     />
                   );
 
@@ -2315,12 +2479,34 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
               </div>
             ) : filteredAgents.length === 0 ? (
               <div className="text-center py-12 bg-cyan-50 dark:bg-cyan-900/20 rounded-lg border border-cyan-200 dark:border-cyan-800">
-                <div className="text-gray-400 text-lg mb-2">No agents found</div>
-                <p className="text-gray-500 dark:text-gray-300 text-sm">
-                  {searchTerm || activeFilter !== 'all'
-                    ? 'Press Enter in the search bar to search semantically'
-                    : 'No agents are registered yet'}
-                </p>
+                {!hasListAccess('list_agents') ? (
+                  <>
+                    <div className="text-gray-400 text-lg mb-2">
+                      You don't have access to view agents
+                    </div>
+                    <p className="text-gray-500 dark:text-gray-300 text-sm max-w-md mx-auto">
+                      Agent discovery is managed by your registry administrator. Ask them to
+                      grant your group the "list_agents" permission so agents appear here.{' '}
+                      <a
+                        href="https://github.com/agentic-community/mcp-gateway-registry/blob/main/docs/faq/granting-skill-and-agent-discovery-permissions.md"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-cyan-600 dark:text-cyan-400 hover:underline"
+                      >
+                        Learn more
+                      </a>
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-gray-400 text-lg mb-2">No agents found</div>
+                    <p className="text-gray-500 dark:text-gray-300 text-sm">
+                      {searchTerm || activeFilter !== 'all'
+                        ? 'Press Enter in the search bar to search semantically'
+                        : 'No agents are registered yet'}
+                    </p>
+                  </>
+                )}
               </div>
             ) : (
               <div className="space-y-6">
@@ -2423,6 +2609,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
             loading={skillsLoading}
             error={skillsError}
             isFiltered={!!searchTerm || activeFilter !== 'all'}
+            hasListAccess={hasListAccess('list_skills')}
             canModify={user?.can_modify_servers || false}
             page={skillPage}
             totalPages={skillTotalPages}
@@ -2490,6 +2677,8 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
               onServerUpdate={handleServerUpdate}
               onDelete={handleDeleteServer}
               authToken={agentApiToken}
+              egressConnect={egressStateByPath.get(server.path)}
+              onEgressChanged={reloadEgressState}
             />
           )}
           renderAgentCard={(agent) => (
@@ -2575,7 +2764,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
   }
 
   return (
-    <>
+    <EgressConnectProvider value={{ stateByPath: egressStateByPath, reload: reloadEgressState }}>
       {/* Toast Notification */}
       {toast && (
         <Toast
@@ -2601,7 +2790,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
             >
               Discover
             </button>
-            {registryConfig?.features.mcp_servers !== false && (
+            {registryConfig?.features.mcp_servers !== false && hasListAccess('list_service') && (
               <button
                 onClick={() => handleChangeViewFilter('servers')}
                 className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors border-b-2 ${
@@ -2652,7 +2841,9 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
             {/* Custom entity type tabs render before External Registries, which
                 is always the last tab. */}
             {registryConfig?.features.custom_types &&
-              (registryConfig?.custom_types ?? []).map((ct) => {
+              (registryConfig?.custom_types ?? [])
+                .filter((ct) => hasListAccess(`list_${ct.name}_entity`))
+                .map((ct) => {
                 const filter = `custom:${ct.name}` as const;
                 return (
                   <button
@@ -3070,7 +3261,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
         isLoading={customDeleteLoading}
       />
 
-    </>
+    </EgressConnectProvider>
   );
 };
 

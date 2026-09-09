@@ -276,6 +276,86 @@ class TestServerNameNormalization:
         assert _server_names_match("*", "another-server")
 
 
+class TestIsRedirectWithinCookieDomain:
+    """Tests for _is_redirect_within_cookie_domain same-origin validation.
+
+    The registry's server-to-server logout hop (issue #1503) forwards a raw
+    X-Forwarded-Host that may carry a port (e.g. "localhost:7860"), while the
+    redirect_uri host is port-stripped by urlparse. These tests guard against
+    the port causing a false same-origin rejection.
+    """
+
+    def _request(self, forwarded_host="", forwarded_proto="", url_host="localhost", scheme="http"):
+        request = MagicMock()
+        headers = {"x-forwarded-host": forwarded_host, "x-forwarded-proto": forwarded_proto}
+        request.headers = MagicMock()
+        request.headers.get = lambda key, default="": headers.get(key, default)
+        request.url = MagicMock()
+        request.url.hostname = url_host
+        request.url.scheme = scheme
+        return request
+
+    def test_forwarded_host_with_port_matches_portless_redirect(self):
+        """X-Forwarded-Host: localhost:7860 must match http://localhost:7860/logout."""
+        from auth_server.server import _is_redirect_within_cookie_domain
+
+        request = self._request(forwarded_host="localhost:7860", forwarded_proto="http")
+        assert _is_redirect_within_cookie_domain("http://localhost:7860/logout", "", request)
+
+    def test_forwarded_host_https_with_domain(self):
+        """A real public host forwarded with https matches an https redirect."""
+        from auth_server.server import _is_redirect_within_cookie_domain
+
+        request = self._request(forwarded_host="app.example.com", forwarded_proto="https")
+        assert _is_redirect_within_cookie_domain("https://app.example.com/logout", "", request)
+
+    def test_different_host_rejected(self):
+        """A redirect to a different host is rejected when no cookie domain covers it."""
+        from auth_server.server import _is_redirect_within_cookie_domain
+
+        request = self._request(forwarded_host="app.example.com", forwarded_proto="https")
+        assert not _is_redirect_within_cookie_domain("https://evil.example.net/logout", "", request)
+
+    def test_scheme_mismatch_rejected(self):
+        """A proto mismatch (http forwarded vs https redirect) is rejected."""
+        from auth_server.server import _is_redirect_within_cookie_domain
+
+        request = self._request(forwarded_host="localhost:7860", forwarded_proto="http")
+        assert not _is_redirect_within_cookie_domain("https://localhost:7860/logout", "", request)
+
+    def test_configured_external_host_trusted_on_s2s_hop(self, monkeypatch):
+        """Issue #1503: on the internal S2S logout hop the request scheme reconstructs
+        as http and X-Forwarded-Host is absent, so the same-origin match fails for a
+        legitimate https public redirect_uri. The redirect_uri host matching the
+        deployment's own AUTH_SERVER_EXTERNAL_URL must still be accepted."""
+        from auth_server.server import _is_redirect_within_cookie_domain
+
+        monkeypatch.setenv("AUTH_SERVER_EXTERNAL_URL", "https://d2xl2zfuhgc4l0.cloudfront.net")
+        # Reconstructed request origin is internal (http, no forwarded host).
+        request = self._request(forwarded_host="", forwarded_proto="", url_host="127.0.0.1")
+        assert _is_redirect_within_cookie_domain(
+            "https://d2xl2zfuhgc4l0.cloudfront.net/logout", "", request
+        )
+
+    def test_configured_external_host_falls_back_to_registry_url(self, monkeypatch):
+        """REGISTRY_URL is used when AUTH_SERVER_EXTERNAL_URL is unset."""
+        from auth_server.server import _is_redirect_within_cookie_domain
+
+        monkeypatch.delenv("AUTH_SERVER_EXTERNAL_URL", raising=False)
+        monkeypatch.setenv("REGISTRY_URL", "https://app.example.com")
+        request = self._request(forwarded_host="", forwarded_proto="", url_host="127.0.0.1")
+        assert _is_redirect_within_cookie_domain("https://app.example.com/logout", "", request)
+
+    def test_non_configured_host_still_rejected_on_s2s_hop(self, monkeypatch):
+        """A redirect to a host that is NOT the configured external host is still
+        rejected even on the internal hop (the fix does not open a general bypass)."""
+        from auth_server.server import _is_redirect_within_cookie_domain
+
+        monkeypatch.setenv("AUTH_SERVER_EXTERNAL_URL", "https://d2xl2zfuhgc4l0.cloudfront.net")
+        request = self._request(forwarded_host="", forwarded_proto="", url_host="127.0.0.1")
+        assert not _is_redirect_within_cookie_domain("https://evil.example.net/logout", "", request)
+
+
 class TestGroupToScopeMapping:
     """Tests for mapping IdP groups to MCP scopes."""
 
@@ -435,6 +515,129 @@ class TestScopeValidation:
 
             # Assert
             assert result is True
+
+    @pytest.mark.asyncio
+    async def test_allow_does_not_log_scopes_or_config_at_info(
+        self, mock_scope_repository_with_data, caplog
+    ):
+        """An allow does not leak user_scopes/scope_config at INFO.
+
+        The verbose per-request trace (user scopes, the full scope_config
+        authorization policy) must stay at DEBUG. Exactly one INFO line, the
+        access decision, is emitted and it must not carry the scopes list.
+        """
+        from auth_server.server import validate_server_tool_access
+
+        with patch(
+            "auth_server.server.get_scope_repository",
+            return_value=mock_scope_repository_with_data,
+        ):
+            caplog.set_level(logging.INFO, logger="auth_server.server")
+            server_name = "test-server"
+            method = "initialize"
+            user_scopes = ["read:servers"]
+
+            result = await validate_server_tool_access(server_name, method, None, user_scopes)
+
+        assert result is True
+
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+        info_text = "\n".join(r.getMessage() for r in info_records)
+
+        # The full scope config (its dict repr) and the raw scopes list must not
+        # appear at INFO.
+        assert "'methods'" not in info_text
+        assert str(user_scopes) not in info_text
+        assert "User scopes" not in info_text
+
+        # Exactly one INFO decision line, and it records the grant.
+        decision_lines = [line for line in info_text.splitlines() if "Access " in line]
+        assert len(decision_lines) == 1
+        assert "Access granted" in decision_lines[0]
+        assert "test-server" in decision_lines[0]
+
+    @pytest.mark.asyncio
+    async def test_deny_does_not_log_scopes_or_config_at_info(
+        self, mock_scope_repository_with_data, caplog
+    ):
+        """A deny emits exactly one INFO decision line, no scopes dump."""
+        from auth_server.server import validate_server_tool_access
+
+        with patch(
+            "auth_server.server.get_scope_repository",
+            return_value=mock_scope_repository_with_data,
+        ):
+            caplog.set_level(logging.INFO, logger="auth_server.server")
+            server_name = "other-server"
+            method = "initialize"
+            user_scopes = ["read:servers"]
+
+            result = await validate_server_tool_access(server_name, method, None, user_scopes)
+
+        assert result is False
+
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+        info_text = "\n".join(r.getMessage() for r in info_records)
+
+        assert "'methods'" not in info_text
+        assert str(user_scopes) not in info_text
+
+        decision_lines = [line for line in info_text.splitlines() if "Access " in line]
+        assert len(decision_lines) == 1
+        assert "Access denied" in decision_lines[0]
+
+    @pytest.mark.asyncio
+    async def test_scope_config_visible_only_at_debug(
+        self, mock_scope_repository_with_data, caplog
+    ):
+        """The scope_config dump still exists, but only at DEBUG."""
+        from auth_server.server import validate_server_tool_access
+
+        with patch(
+            "auth_server.server.get_scope_repository",
+            return_value=mock_scope_repository_with_data,
+        ):
+            caplog.set_level(logging.DEBUG, logger="auth_server.server")
+            await validate_server_tool_access("test-server", "initialize", None, ["read:servers"])
+
+        debug_text = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
+        # The full authorization policy trace lands at DEBUG.
+        assert "'methods'" in debug_text
+        assert "User scopes" in debug_text
+
+    @pytest.mark.asyncio
+    async def test_exception_path_denies_with_one_info_line_no_scopes(self, caplog):
+        """The fail-closed exception branch denies, emits exactly one
+        INFO decision line, and never leaks user_scopes at INFO."""
+        from auth_server.server import validate_server_tool_access
+
+        # A scope repo whose lookup raises drives the except branch.
+        failing_repo = MagicMock()
+        failing_repo.get_server_scopes = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with patch(
+            "auth_server.server.get_scope_repository",
+            return_value=failing_repo,
+        ):
+            caplog.set_level(logging.INFO, logger="auth_server.server")
+            user_scopes = ["read:servers", "secret-scope-name"]
+
+            result = await validate_server_tool_access(
+                "test-server", "initialize", None, user_scopes
+            )
+
+        # Fail closed.
+        assert result is False
+
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+        info_text = "\n".join(r.getMessage() for r in info_records)
+
+        # No scope list leaked at INFO, and exactly one decision line (deny).
+        assert str(user_scopes) not in info_text
+        assert "secret-scope-name" not in info_text
+        decision_lines = [line for line in info_text.splitlines() if "Access " in line]
+        assert len(decision_lines) == 1
+        assert "Access denied" in decision_lines[0]
 
     def test_validate_scope_subset_valid(self):
         """Test that requested scopes are subset of user scopes."""
@@ -778,6 +981,200 @@ class TestValidateEndpoint:
             data = response.json()
             assert data["valid"] is True
             assert data["username"] == "testuser"
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_agent_request_allowed(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """An A2A agent proxy request with invoke access passes and skips MCP checks.
+
+        The gateway credential is presented in X-Authorization (the A2A egress
+        trust model): Authorization is reserved for the target-agent credential.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_agent_request_denied(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """An A2A agent proxy request without invoke access is rejected with 403."""
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 403
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_no_authorization_fallback(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """On an agent path, Authorization is NOT accepted as the gateway credential.
+
+        Authorization carries the target-agent credential (forwarded end-to-end),
+        so a request with only Authorization and no X-Authorization must fail
+        closed as unauthenticated rather than authenticate on -- and leak -- the
+        target-agent credential.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "Authorization": "Bearer target-agent-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 401
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_rejects_duplicate_gateway_credential(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """Duplicating the gateway token into Authorization is refused (fail closed).
+
+        If Authorization equals the validated X-Authorization, the Authorization
+        copy would be forwarded to the registrant-controlled agent backend and
+        could be replayed against the registry. The request is rejected with 401.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    "Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 401
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_rejects_duplicate_ignoring_scheme_prefix(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """The duplicate-token guard compares token VALUES, not raw headers.
+
+        A caller that sends the same token but with a differing "Bearer " scheme
+        prefix / whitespace in one header must still be refused, or the gateway
+        credential would leak to the backend (PR #1434 finding SF-4).
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    # Same token value, no "Bearer " prefix: must still be caught.
+                    "Authorization": "test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 401
 
     @patch("auth_server.server.get_auth_provider")
     def test_validate_uninspectable_body_fails_closed(
@@ -3178,7 +3575,13 @@ def _patch_scope_repo_allow_all():
             return [{"server": "*", "methods": ["*"], "tools": ["*"]}]
         return []
 
+    async def _get_server_scopes_bulk(scope_names: list[str]):
+        return {s: await _get_server_scopes(s) for s in scope_names if await _get_server_scopes(s)}
+
     repo.get_server_scopes.side_effect = _get_server_scopes
+    # filter_tools_list_response's diagnostic (_scopes_with_server_entry) reads
+    # the bulk method; without a stub it would get a bare AsyncMock return value.
+    repo.get_server_scopes_bulk.side_effect = _get_server_scopes_bulk
     return patch("auth_server.server.get_scope_repository", return_value=repo)
 
 
@@ -3394,6 +3797,7 @@ class TestMcpProxyEndpointHeaderPassthrough:
             patch.object(server_module.settings, "egress_auth_enabled", True),
             patch.object(server_module.settings, "egress_consent_use_elicitation", False),
             patch.object(server_module, "_vend_egress_token", _consent_vend),
+            _patch_scope_repo_allow_all(),
         ):
             client = TestClient(server_module.app)
             response = client.post(
@@ -3434,6 +3838,7 @@ class TestMcpProxyEndpointHeaderPassthrough:
             patch.object(server_module.settings, "egress_auth_enabled", True),
             patch.object(server_module.settings, "egress_consent_use_elicitation", True),
             patch.object(server_module, "_vend_egress_token", _consent_vend),
+            _patch_scope_repo_allow_all(),
         ):
             client = TestClient(server_module.app)
             response = client.post(
@@ -3481,6 +3886,7 @@ class TestMcpProxyEndpointHeaderPassthrough:
         with (
             patch.object(server_module.settings, "egress_auth_enabled", True),
             patch.object(server_module, "_vend_egress_token", _consent_vend),
+            _patch_scope_repo_allow_all(),
         ):
             client = TestClient(server_module.app)
             response = client.post(
@@ -3522,6 +3928,7 @@ class TestMcpProxyEndpointHeaderPassthrough:
         with (
             patch.object(server_module.settings, "egress_auth_enabled", True),
             patch.object(server_module, "_vend_egress_token", _consent_vend),
+            _patch_scope_repo_allow_all(),
         ):
             client = TestClient(server_module.app)
             response = client.post(
@@ -3554,6 +3961,7 @@ class TestMcpProxyEndpointHeaderPassthrough:
         with (
             patch.object(server_module.settings, "egress_auth_enabled", True),
             patch.object(server_module, "_vend_egress_token", _consent_vend),
+            _patch_scope_repo_allow_all(),
         ):
             client = TestClient(server_module.app)
             response = client.post(
@@ -3754,6 +4162,7 @@ class TestMcpProxyOboExchange:
         with (
             patch.object(server_module.settings, "egress_auth_enabled", True),
             patch.object(server_module, "_vend_egress_token", self._obo_directive_vend),
+            _patch_scope_repo_allow_all(),
         ):
             client = TestClient(server_module.app)
             response = client.post(
@@ -3836,6 +4245,7 @@ class TestMcpProxyOboExchange:
             patch.object(server_module, "_vend_egress_token", self._obo_directive_vend),
             patch.object(server_module, "get_auth_provider", lambda *a, **k: _FakeEntraProvider()),
             patch.object(server_module, "obo_exchange", _failing_exchange),
+            _patch_scope_repo_allow_all(),
         ):
             client = TestClient(server_module.app)
             response = client.post(
@@ -3976,6 +4386,151 @@ class TestMcpProxyOboExchange:
         # The exchanged token reached the upstream Authorization header.
         sent = {k.lower(): v for k, v in captured["headers"].items()}
         assert sent["authorization"] == "Bearer real-exchanged-token"
+
+
+class TestMcpProxyPatMode:
+    """pat egress mode in mcp_proxy.
+
+    A vended PAT arrives as {access_token: <PAT>} and flows through the SAME
+    generic inject branch as a vaulted OAuth token (no auth_server change for the
+    hit path). A miss arrives as {mode: "pat"} with no access_token/connect_url
+    and is answered by the terminal _pat_missing_response.
+    """
+
+    def test_pat_missing_response_shape(self):
+        import auth_server.server as server_module
+
+        resp = server_module._pat_missing_response("github", "tools/call", 7)
+        assert resp.status_code == 200
+        import json as _json
+
+        body = _json.loads(resp.body)
+        assert body["id"] == 7
+        # Terminal tool result (isError), NOT a -32042 URL elicitation.
+        assert "error" not in body
+        assert body["result"]["isError"] is True
+        text = body["result"]["content"][0]["text"]
+        assert "No PAT configured" in text
+        assert "Connected Accounts" in text
+        # No connect/authorize URL is offered (pat is not interactive).
+        assert "http" not in text.lower()
+
+    def test_pat_hit_injects_and_strips_ingress_creds(self):
+        import auth_server.server as server_module
+
+        async def _pat_vend(token, server):
+            return {"access_token": "ghp_the_pat"}
+
+        patch_httpx, captured = _capture_upstream_headers()
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", _pat_vend),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+            _patch_scope_repo_allow_all(),
+            patch_httpx,
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/github",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "list_repos"},
+                },
+                headers={
+                    **_mcp_proxy_token_headers(server_name="github"),
+                    "X-Authorization": "Bearer raw-ingress-jwt",
+                    "Cookie": "session=secret",
+                },
+            )
+
+        assert response.status_code == 200
+        sent = {k.lower(): v for k, v in captured["headers"].items()}
+        # The PAT is injected via the generic access_token branch.
+        assert sent["authorization"] == "Bearer ghp_the_pat"
+        # Ingress gateway creds / internal identity are stripped before inject.
+        assert "x-authorization" not in sent
+        assert "cookie" not in sent
+        assert "x-internal-token" not in sent
+
+    def test_pat_hit_injects_custom_header_and_prefix(self):
+        """The vend response carries the inject header derived from the server's
+        Backend Auth scheme (api_key -> PRIVATE-TOKEN with an empty prefix -> a
+        bare token in a custom header). mcp_proxy injects it and strips any
+        client-supplied copy so only the gateway-injected value reaches upstream."""
+        import auth_server.server as server_module
+
+        async def _pat_vend(token, server):
+            return {
+                "access_token": "glpat_the_pat",
+                "pat_header_name": "PRIVATE-TOKEN",
+                "pat_value_prefix": "",
+            }
+
+        patch_httpx, captured = _capture_upstream_headers()
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", _pat_vend),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+            _patch_scope_repo_allow_all(),
+            patch_httpx,
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/gitlab",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "list_projects"},
+                },
+                headers={
+                    **_mcp_proxy_token_headers(server_name="gitlab"),
+                    # A hostile/stale client copy of the custom header must not survive.
+                    "PRIVATE-TOKEN": "attacker-supplied",
+                    "X-Authorization": "Bearer raw-ingress-jwt",
+                },
+            )
+
+        assert response.status_code == 200
+        sent = {k.lower(): v for k, v in captured["headers"].items()}
+        # Bare token in the custom header (no "Bearer " prefix).
+        assert sent["private-token"] == "glpat_the_pat"
+        # The client-supplied copy of the custom header was dropped, not merged.
+        assert "attacker-supplied" not in sent.get("private-token", "")
+        # No stray Authorization was injected for a custom-header pat server.
+        assert "authorization" not in sent
+        assert "x-authorization" not in sent
+
+    def test_pat_miss_is_terminal_no_forward(self):
+        import auth_server.server as server_module
+
+        async def _pat_miss_vend(token, server):
+            return {"consent_required": True, "mode": "pat"}
+
+        patch_httpx, captured = _capture_upstream_headers()
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", _pat_miss_vend),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+            _patch_scope_repo_allow_all(),
+            patch_httpx,
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/github",
+                json={"jsonrpc": "2.0", "id": 9, "method": "tools/call"},
+                headers=_mcp_proxy_token_headers(server_name="github"),
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"] == 9
+        assert body["result"]["isError"] is True
+        assert "No PAT configured" in body["result"]["content"][0]["text"]
+        # Nothing was forwarded upstream (terminal miss).
+        assert "headers" not in captured
 
 
 # =============================================================================
@@ -4362,9 +4917,10 @@ class TestSessionCookieSecureDefault:
 
 class TestForwardHeadersIngressStrip:
     """Egress ingress-auth policy (issue #1266): client auth headers are ingress
-    credentials, stripped on egress. X-Authorization and Cookie are ALWAYS
-    stripped; Authorization is stripped unless relay_authorization=True (set only
-    for the built-in internal registry-tools server). No general relay mode --
+    credentials, stripped on egress. Cookie is ALWAYS stripped; Authorization
+    and X-Authorization are stripped unless relay_authorization=True (set only
+    for the built-in internal registry-tools server, which the gateway addresses
+    via the X-Authorization header). No general relay mode -- third-party
     upstream creds come from the egress vault.
     """
 
@@ -4379,10 +4935,17 @@ class TestForwardHeadersIngressStrip:
         assert "authorization" not in {k.lower() for k in out}
         assert out.get("Accept") == "x"
 
-    def test_strips_x_authorization_always_even_when_relaying(self):
-        """X-Authorization is never forwarded, even for the internal relay server."""
-        out = self._forward({"X-Authorization": "Bearer x"}, relay=True)
+    def test_strips_x_authorization_by_default(self):
+        """Non-relay (default): X-Authorization stripped (never to third-party upstreams)."""
+        out = self._forward({"X-Authorization": "Bearer x"}, relay=False)
         assert "x-authorization" not in {k.lower() for k in out}
+
+    def test_relays_x_authorization_when_flag_set(self):
+        """relay_authorization=True keeps X-Authorization: the gateway carries the
+        caller bearer to the internal registry-tools server in this header, so it
+        must be relayed alongside Authorization."""
+        out = self._forward({"X-Authorization": "Bearer x"}, relay=True)
+        assert out.get("X-Authorization") == "Bearer x"
 
     def test_strips_cookie_always_even_when_relaying(self):
         """Cookie is never forwarded, even for the internal relay server."""
@@ -4394,14 +4957,15 @@ class TestForwardHeadersIngressStrip:
         out = self._forward({"Authorization": "Bearer a"}, relay=True)
         assert out.get("Authorization") == "Bearer a"
 
-    def test_relay_flag_does_not_readmit_x_authorization_or_cookie(self):
-        """With relay on, only Authorization is relayed; X-Authorization/Cookie stay stripped."""
+    def test_relay_flag_relays_auth_and_x_authorization_but_not_cookie(self):
+        """With relay on, Authorization AND X-Authorization are relayed (both to the
+        internal registry-tools server); Cookie stays stripped."""
         out = self._forward(
             {"Authorization": "Bearer a", "X-Authorization": "Bearer x", "Cookie": "s=1"},
             relay=True,
         )
         assert out.get("Authorization") == "Bearer a"
-        assert "x-authorization" not in {k.lower() for k in out}
+        assert out.get("X-Authorization") == "Bearer x"
         assert "cookie" not in {k.lower() for k in out}
 
     def test_case_insensitive(self):
@@ -4467,6 +5031,57 @@ class TestForwardHeadersIngressStrip:
         assert "authorization" not in {k.lower() for k in out}
 
 
+class TestForwardHeadersProxyContextStrip:
+    """Ingress proxy-context headers (issue #1625) describe the client -> Gateway
+    hop and must not leak onto the separate Gateway -> upstream MCP server hop,
+    or an upstream that trusts them can see a stale scheme and redirect-loop.
+    """
+
+    def _forward(self, incoming):
+        from auth_server.server import _forward_headers
+
+        return _forward_headers(incoming)
+
+    def test_strips_each_proxy_context_header(self):
+        for name in (
+            "X-Forwarded-Proto",
+            "X-Forwarded-Host",
+            "X-Forwarded-Port",
+            "X-Forwarded-Prefix",
+            "Forwarded",
+            "X-Original-URI",
+            "X-Original-URL",
+        ):
+            out = self._forward({name: "x", "Accept": "y"})
+            assert name.lower() not in {k.lower() for k in out}, name
+            assert out.get("Accept") == "y"
+
+    def test_case_insensitive(self):
+        out = self._forward({"x-forwarded-proto": "http", "x-original-url": "u"})
+        assert "x-forwarded-proto" not in {k.lower() for k in out}
+        assert "x-original-url" not in {k.lower() for k in out}
+
+    def test_stale_ingress_scheme_does_not_reach_the_egress_hop(self):
+        """The issue's own repro: an HTTPS ingress request that arrives carrying
+        a stale X-Forwarded-Proto: http must not forward it to an HTTPS upstream."""
+        out = self._forward(
+            {
+                "X-Forwarded-Proto": "http",
+                "X-Forwarded-Host": "gateway.example.com",
+                "X-Forwarded-Prefix": "/my-server",
+                "Mcp-Session-Id": "vs-abc",
+                "Accept": "application/json",
+            }
+        )
+        assert set(k.lower() for k in out) == {"mcp-session-id", "accept"}
+
+    def test_x_forwarded_for_is_not_stripped(self):
+        """X-Forwarded-For is a client-IP hint, not routing/scheme context, and
+        the issue explicitly asks that it stay untouched (compatibility)."""
+        out = self._forward({"X-Forwarded-For": "203.0.113.5"})
+        assert out.get("X-Forwarded-For") == "203.0.113.5"
+
+
 class TestInternalRelayDecision:
     """The mcp_proxy relay decision keys on the verified `server` claim (first
     path segment), matches the hardcoded internal set exactly, and normalizes
@@ -4505,3 +5120,1165 @@ class TestInternalRelayDecision:
         """A federated copy (e.g. server claim 'ai-registry' from /ai-registry/...)
         is a different first path segment and must NOT relay."""
         assert self._decides_relay("ai-registry") is False
+
+
+# =============================================================================
+# A2A AGENT PROXY ACCESS TESTS
+# =============================================================================
+
+
+class TestGetA2AAgentPath:
+    """Tests for _get_a2a_agent_path URL parsing."""
+
+    def test_none_url_returns_none(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path(None) is None
+
+    def test_agent_jsonrpc_url(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path("https://mcp.example.com/agent/travel/") == "/travel"
+
+    def test_agent_card_url(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        url = "https://mcp.example.com/agent/flight-booking-agent/.well-known/agent-card.json"
+        assert _get_a2a_agent_path(url) == "/flight-booking-agent"
+
+    def test_non_agent_url_returns_none(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path("https://mcp.example.com/currenttime/mcp") is None
+
+    def test_api_url_returns_none(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path("https://mcp.example.com/api/agents") is None
+
+    def test_bare_agent_prefix_without_segment_returns_none(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path("https://mcp.example.com/agent/") is None
+
+    def test_multi_segment_agent_path(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path("https://mcp.example.com/agent/lob1/travel/") == "/lob1/travel"
+
+    def test_multi_segment_agent_card_url(self):
+        from auth_server.server import _get_a2a_agent_path
+
+        url = "https://mcp.example.com/agent/lob1/travel/.well-known/agent-card.json"
+        assert _get_a2a_agent_path(url) == "/lob1/travel"
+
+    def test_registry_root_path_prefix_is_stripped(self):
+        """When the registry is hosted on a sub-path, the prefix is stripped."""
+        import auth_server.server as server_module
+
+        with patch.object(server_module, "REGISTRY_ROOT_PATH", "/registry"):
+            assert (
+                server_module._get_a2a_agent_path("https://mcp.example.com/registry/agent/travel/")
+                == "/travel"
+            )
+
+    def test_agent_card_at_root_returns_none(self):
+        """A card discovery URL with no agent segment resolves to None."""
+        from auth_server.server import _get_a2a_agent_path
+
+        url = "https://mcp.example.com/agent/.well-known/agent-card.json"
+        assert _get_a2a_agent_path(url) is None
+
+    def test_empty_agent_segment_returns_none(self):
+        """An empty path segment (…/agent/lob1//travel/) is rejected."""
+        from auth_server.server import _get_a2a_agent_path
+
+        assert _get_a2a_agent_path("https://mcp.example.com/agent/lob1//travel/") is None
+
+
+class TestValidateA2AAgentAccess:
+    """Tests for validate_a2a_agent_access structured per-agent gating.
+
+    The function resolves each caller scope via the scope repository and looks
+    for a per-agent rule ``{"agent": "<path or *>", "actions": [...]}`` whose
+    ``agent`` matches and whose ``actions`` include ``invoke_agent`` (or a
+    wildcard). The rule shape mirrors a server rule (``agent`` like ``server``,
+    ``actions`` like ``methods``). The repository is mocked to return scope ->
+    server_access config, mirroring the MCP validate_server_tool_access tests.
+    """
+
+    @staticmethod
+    def _repo(scope_config: dict[str, list]):
+        """Build a mock scope repository returning the given scope -> config map."""
+        repo = AsyncMock()
+
+        async def get_server_scopes(scope_name: str):
+            return scope_config.get(scope_name, [])
+
+        async def get_server_scopes_bulk(scope_names: list[str]):
+            # Mirror the real bulk contract: one round-trip returning
+            # {scope_name: rules} for the requested scopes.
+            return {name: scope_config.get(name, []) for name in scope_names}
+
+        repo.get_server_scopes.side_effect = get_server_scopes
+        repo.get_server_scopes_bulk.side_effect = get_server_scopes_bulk
+        return repo
+
+    @staticmethod
+    def _invoke_scope(agent: str) -> list:
+        """A server_access list granting invoke_agent on the given agent (path or *)."""
+        return [{"agent": agent, "actions": ["invoke_agent"]}]
+
+    async def test_admin_scope_allows_regardless_of_doc_shape(self):
+        """An admin is allowed invoke even when their scope doc has NO agent rule
+        (legacy nested shape backwards compat -- no re-seed required)."""
+        from auth_server.server import validate_a2a_agent_access
+
+        # Legacy nested shape: no {agent, actions} rule, so the flattener yields
+        # nothing invoke-relevant; the admin marker must still grant access.
+        repo = self._repo({"registry-admins": []})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["registry-admins"]) is True
+
+    async def test_admin_group_marker_allows(self):
+        """The admin marker is honored when it arrives as a GROUP, not a scope."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert (
+                await validate_a2a_agent_access("/travel", [], user_groups=["mcp-registry-admin"])
+                is True
+            )
+
+    async def test_non_admin_legacy_shape_still_denied(self):
+        """A non-admin whose doc lacks a {agent, actions} invoke rule is denied
+        (admin bypass must not leak to ordinary users)."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"public-mcp-users": []})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["public-mcp-users"]) is False
+
+    async def test_invoke_wildcard_agent_allows(self):
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-invoker": self._invoke_scope("*")})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-invoker"]) is True
+
+    async def test_invoke_all_agent_keyword_allows(self):
+        """The ``all`` keyword works as a wildcard for the agent identifier too."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-invoker": self._invoke_scope("all")})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-invoker"]) is True
+
+    async def test_invoke_exact_path_allows(self):
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-travel": self._invoke_scope("/travel")})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-travel"]) is True
+
+    async def test_invoke_different_path_denied(self):
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-hr": self._invoke_scope("/hr")})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-hr"]) is False
+
+    async def test_sibling_path_not_matched(self):
+        """An exact-path rule for /travel-extended must NOT grant /travel."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-ext": self._invoke_scope("/travel-extended")})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-ext"]) is False
+
+    async def test_actions_wildcard_allows(self):
+        """A rule whose actions include the ``all`` wildcard grants invoke."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-admin": [{"agent": "/travel", "actions": ["all"]}]})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-admin"]) is True
+
+    async def test_non_invoke_action_denied(self):
+        """A rule granting only agent CRUD (no invoke_agent) is denied."""
+        from auth_server.server import validate_a2a_agent_access
+
+        crud = [{"agent": "*", "actions": ["get_agent", "list_agents"]}]
+        repo = self._repo({"a2a-reader": crud})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-reader"]) is False
+
+    async def test_mcp_only_scope_denied(self):
+        """A pure MCP server scope (no agents block) is denied."""
+        from auth_server.server import validate_a2a_agent_access
+
+        mcp = [{"server": "*", "methods": ["all"], "tools": ["all"]}]
+        repo = self._repo({"mcp-servers-unrestricted/read": mcp})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert (
+                await validate_a2a_agent_access("/travel", ["mcp-servers-unrestricted/read"])
+                is False
+            )
+
+    async def test_empty_scopes_denied(self):
+        from auth_server.server import validate_a2a_agent_access
+
+        assert await validate_a2a_agent_access("/travel", []) is False
+
+    async def test_scope_resolution_error_is_skipped_and_denied(self):
+        """A repository lookup that raises is not fatal; access is denied (fail closed)."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = AsyncMock()
+        repo.get_server_scopes_bulk.side_effect = RuntimeError("scope backend down")
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-invoker"]) is False
+
+    async def test_unknown_scope_with_empty_config_denied(self):
+        """A scope that resolves to an empty config is skipped (denied)."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["missing-scope"]) is False
+
+
+# =============================================================================
+# LEGACY STATIC ADMIN TOKEN STRENGTH VALIDATION AT STARTUP
+# =============================================================================
+
+
+class TestLegacyRegistryTokenStrengthValidation:
+    """Startup strength validation for the legacy REGISTRY_API_TOKEN.
+
+    When set, REGISTRY_API_TOKEN is promoted to an unrestricted admin entry, so
+    it grants the highest privilege in the system. It must therefore clear the
+    same strength bar as the application signing secret: an unset token is fine
+    (the feature simply has no legacy entry), but a token that is present must
+    be strong (non-empty after stripping, at least the minimum length, and not a
+    known-weak placeholder). A present-but-weak value must fail closed at
+    startup rather than silently arm a weak admin credential.
+
+    These tests reload the server module under a patched environment so the
+    real module-level validation runs, then restore a known-good module state
+    for the rest of the suite.
+    """
+
+    _STRONG = "x" * 40
+    _RESTORE_ENV = {
+        "SECRET_KEY": "test-secret-key-that-is-definitely-long-enough-32b",
+        "DOCUMENTDB_HOST": "localhost",
+    }
+
+    def _reload_with_token(self, token_value):
+        """Reload auth_server.server with REGISTRY_API_TOKEN set to token_value.
+
+        A ``None`` token_value means the variable is unset entirely. Returns the
+        freshly reloaded module. Raises whatever the module raises at import.
+        """
+        import importlib
+        import os
+
+        import auth_server.server as server_module
+
+        env = dict(self._RESTORE_ENV)
+        if token_value is not None:
+            env["REGISTRY_API_TOKEN"] = token_value
+
+        # patch.dict(clear=False) plus explicit pop keeps unrelated env intact
+        # while giving us precise control over REGISTRY_API_TOKEN.
+        with patch.dict(os.environ, env, clear=False):
+            if token_value is None:
+                os.environ.pop("REGISTRY_API_TOKEN", None)
+            return importlib.reload(server_module)
+
+    def teardown_method(self):
+        """Restore a valid module state so later tests see a sane module."""
+        import importlib
+        import os
+
+        import auth_server.server as server_module
+
+        with patch.dict(os.environ, self._RESTORE_ENV, clear=False):
+            os.environ.pop("REGISTRY_API_TOKEN", None)
+            importlib.reload(server_module)
+
+    def test_unset_token_is_accepted_and_empty(self):
+        """An unset token is fine: no legacy admin credential, no raise."""
+        reloaded = self._reload_with_token(None)
+        assert reloaded.REGISTRY_API_TOKEN == ""
+
+    def test_strong_token_is_accepted(self):
+        """A sufficiently long, non-placeholder token is accepted verbatim."""
+        reloaded = self._reload_with_token(self._STRONG)
+        assert reloaded.REGISTRY_API_TOKEN == self._STRONG
+
+    def test_short_token_fails_closed(self):
+        """A present but too-short token must raise at startup."""
+        with pytest.raises(RuntimeError):
+            self._reload_with_token("short")
+
+    def test_whitespace_only_token_is_treated_as_unset(self):
+        """A whitespace-only token is equivalent to unset: no admin credential.
+
+        The canonical validator treats a whitespace-only value as unset when the
+        secret is optional, which is the fail-closed outcome here: no legacy
+        admin entry is armed. A whitespace-only value is never accepted as a
+        usable credential (it strips to empty), so no weak admin token results.
+        """
+        reloaded = self._reload_with_token("   " * 20)
+        assert reloaded.REGISTRY_API_TOKEN == ""
+
+    def test_known_weak_literal_token_fails_closed(self):
+        """A present but known-weak placeholder literal must raise at startup."""
+        with pytest.raises(RuntimeError):
+            self._reload_with_token("change-this-immediately-use-a-strong-random-key-in-production")
+
+
+# =============================================================================
+# FEDERATION STATIC TOKEN IS LEAST-PRIVILEGE READ-ONLY
+# =============================================================================
+
+
+class TestFederationStaticTokenReadOnly:
+    """The federation static token grants read-only access.
+
+    The federation static token is a long-lived, non-expiring credential meant
+    for federation data sync. It must be least-privilege: it grants only
+    ``federation/read`` and must NOT carry a peer/federation management scope.
+    Peer management stays behind a real admin credential.
+    """
+
+    _TOKEN = "f" * 40
+
+    def test_validate_grants_only_read_scope(self):
+        """A matching federation token yields scopes == ['federation/read']."""
+        import auth_server.server as server_module
+
+        with (
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", True),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", self._TOKEN),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "Authorization": f"Bearer {self._TOKEN}",
+                    "X-Original-URL": "https://example.com/api/federation/peers",
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["method"] == "federation-static"
+        assert data["scopes"] == ["federation/read"]
+
+    def test_validate_does_not_grant_peer_management_scope(self):
+        """The federation token must not carry the peer-management scope."""
+        import auth_server.server as server_module
+
+        with (
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", True),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", self._TOKEN),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "Authorization": f"Bearer {self._TOKEN}",
+                    "X-Original-URL": "https://example.com/api/federation/peers",
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "federation/peers" not in data["scopes"]
+        assert "federation/peers" not in response.headers.get("X-Scopes", "")
+
+
+# =============================================================================
+# FEDERATION STATIC TOKEN STRENGTH VALIDATION (FAIL CLOSED ON WEAK TOKEN)
+# =============================================================================
+
+
+class TestFederationStaticTokenStrengthValidation:
+    """Startup strength validation for FEDERATION_STATIC_TOKEN.
+
+    The federation static token bypasses IdP JWT validation when armed, so it
+    must clear the same weak-value bar as every other privilege-granting
+    credential. When the operator explicitly enables the feature, the token is
+    required and must be strong: a short OR known-weak placeholder value must
+    NOT be armed. Because this is an optional feature, a weak token degrades
+    gracefully -- the feature is DISABLED (fail closed) rather than crashing the
+    process -- mirroring the missing-token branch. Warn-only is not fail closed.
+
+    These tests reload the server module under a patched environment so the real
+    module-level validation runs, then restore a known-good module state for the
+    rest of the suite.
+    """
+
+    _STRONG = "f" * 40
+    _RESTORE_ENV = {
+        "SECRET_KEY": "test-secret-key-that-is-definitely-long-enough-32b",
+        "DOCUMENTDB_HOST": "localhost",
+    }
+
+    def _reload_with_federation_token(self, token_value):
+        """Reload auth_server.server with the feature enabled and a given token.
+
+        A ``None`` token_value means FEDERATION_STATIC_TOKEN is unset entirely.
+        Returns the freshly reloaded module.
+        """
+        import importlib
+        import os
+
+        import auth_server.server as server_module
+
+        env = dict(self._RESTORE_ENV)
+        env["FEDERATION_STATIC_TOKEN_AUTH_ENABLED"] = "true"
+        if token_value is not None:
+            env["FEDERATION_STATIC_TOKEN"] = token_value
+
+        with patch.dict(os.environ, env, clear=False):
+            if token_value is None:
+                os.environ.pop("FEDERATION_STATIC_TOKEN", None)
+            return importlib.reload(server_module)
+
+    def teardown_method(self):
+        """Restore a valid module state (feature disabled) for later tests."""
+        import importlib
+        import os
+
+        import auth_server.server as server_module
+
+        with patch.dict(os.environ, self._RESTORE_ENV, clear=False):
+            os.environ.pop("FEDERATION_STATIC_TOKEN", None)
+            os.environ.pop("FEDERATION_STATIC_TOKEN_AUTH_ENABLED", None)
+            importlib.reload(server_module)
+
+    def test_strong_token_stays_enabled_and_armed(self):
+        """A strong token keeps the feature enabled and arms the token."""
+        reloaded = self._reload_with_federation_token(self._STRONG)
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is True
+        assert reloaded.FEDERATION_STATIC_TOKEN == self._STRONG
+
+    def test_short_token_disables_feature(self):
+        """A short token disables the feature (fail closed), does not raise."""
+        reloaded = self._reload_with_federation_token("short")
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+
+    def test_known_weak_literal_disables_feature(self):
+        """A known-weak >=32-char placeholder disables the feature."""
+        reloaded = self._reload_with_federation_token(
+            "change-this-immediately-use-a-strong-random-key-in-production"
+        )
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+
+    def test_unset_token_disables_feature(self):
+        """Enabling the feature without a token disables it (fail closed)."""
+        reloaded = self._reload_with_federation_token(None)
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+
+    def test_validate_does_not_authenticate_weak_token(self):
+        """A weak token is not armed: the /validate federation path rejects it."""
+        weak = "short"
+        reloaded = self._reload_with_federation_token(weak)
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+
+        client = TestClient(reloaded.app)
+        response = client.get(
+            "/validate",
+            headers={
+                "Authorization": f"Bearer {weak}",
+                "X-Original-URL": "https://example.com/api/federation/peers",
+            },
+        )
+        # The weak token is not armed, so it never authenticates via the
+        # federation-static path (it falls through to standard JWT validation,
+        # which rejects a non-JWT bearer).
+        assert response.status_code != 200 or response.json().get("method") != ("federation-static")
+
+
+# =============================================================================
+# REGISTRY_API_KEYS ENTRY WEAK-VALUE REJECTION (FAIL CLOSED)
+# =============================================================================
+
+
+class TestRegistryApiKeyEntryStrengthValidation:
+    """Per-key REGISTRY_API_KEYS entries must reject weak key values.
+
+    A keyed entry grants the scopes mapped from its groups (which may include
+    admin), so its key bypasses IdP JWT validation and must clear the same
+    weak-value bar as every other privilege-granting credential. The Pydantic
+    ``min_length=32`` constraint alone accepts a >=32-char known placeholder, so
+    the key is additionally routed through the canonical validator, which
+    rejects short AND known-weak literals. A weak key must fail closed: the
+    entry is rejected and the parse path disables the feature rather than arming
+    a weak keyed credential.
+    """
+
+    _STRONG = "x" * 40
+
+    def test_strong_key_validates(self):
+        """A strong, non-placeholder key builds a valid entry."""
+        import auth_server.server as server_module
+
+        entry = server_module._RegistryApiKeyEntry(
+            name="deploy-pipeline",
+            key=self._STRONG,
+            groups=["mcp-registry-admin"],
+        )
+        assert entry.key == self._STRONG
+
+    def test_short_key_raises(self):
+        """A key shorter than the minimum raises a validation error."""
+        import pydantic
+
+        import auth_server.server as server_module
+
+        with pytest.raises((pydantic.ValidationError, ValueError)):
+            server_module._RegistryApiKeyEntry(
+                name="deploy-pipeline",
+                key="short",
+                groups=["mcp-registry-admin"],
+            )
+
+    def test_known_weak_literal_key_raises(self):
+        """A >=32-char known-weak placeholder key raises a validation error."""
+        import pydantic
+
+        import auth_server.server as server_module
+
+        with pytest.raises((pydantic.ValidationError, ValueError)):
+            server_module._RegistryApiKeyEntry(
+                name="deploy-pipeline",
+                key="change-this-immediately-use-a-strong-random-key-in-production",
+                groups=["mcp-registry-admin"],
+            )
+
+    def test_parse_rejects_weak_key_entry(self):
+        """A >=32-char weak-literal key fails the parser (fail closed)."""
+        import json
+
+        import auth_server.server as server_module
+
+        raw = json.dumps(
+            {
+                "deploy-pipeline": {
+                    "key": "change-this-immediately-use-a-strong-random-key-in-production",
+                    "groups": ["mcp-registry-admin"],
+                }
+            }
+        )
+        with pytest.raises(ValueError, match="Invalid entry"):
+            server_module._parse_registry_api_keys(raw)
+
+    async def test_build_static_token_map_disabled_on_weak_key(self):
+        """A weak keyed entry disables static-token auth (matches malformed-JSON)."""
+        import json
+
+        import auth_server.server as server_module
+
+        raw = json.dumps(
+            {
+                "deploy-pipeline": {
+                    "key": "change-this-immediately-use-a-strong-random-key-in-production",
+                    "groups": ["mcp-registry-admin"],
+                }
+            }
+        )
+        with (
+            patch.object(server_module, "REGISTRY_STATIC_TOKEN_AUTH_ENABLED", True),
+            patch.object(server_module, "_REGISTRY_API_KEYS_RAW", raw),
+            patch.object(server_module, "REGISTRY_API_TOKEN", ""),
+            patch.object(server_module, "_STATIC_TOKEN_MAP", {}),
+        ):
+            await server_module._build_static_token_map()
+            assert server_module.REGISTRY_STATIC_TOKEN_AUTH_ENABLED is False
+            assert server_module._STATIC_TOKEN_MAP == {}
+
+
+# =============================================================================
+# RUNTIME FEDERATION-TOKEN ROTATION MUST ENFORCE THE SAME STRENGTH BAR
+# =============================================================================
+
+
+class TestFederationTokenRotationStrength:
+    """The runtime rotation endpoint must reject weak new tokens.
+
+    Rotating the federation static token arms the same privileged credential as
+    startup, so the rotation endpoint must clear the same weak-value bar: a short
+    OR known-weak placeholder value must be rejected with 400 and must NOT arm
+    the token, otherwise an admin could rotate to a long-but-well-known
+    placeholder and silently undo the startup hardening.
+    """
+
+    _ADMIN = "a" * 40
+    _STRONG = "f" * 40
+
+    def _client_and_module(self):
+        import auth_server.server as server_module
+
+        return TestClient(server_module.app), server_module
+
+    def test_short_new_token_rejected(self):
+        """A short rotation token is rejected (400) and does not arm the token."""
+        client, server_module = self._client_and_module()
+        with (
+            patch.object(server_module, "REGISTRY_API_TOKEN", self._ADMIN),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", ""),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", False),
+        ):
+            response = client.post(
+                "/admin/federation-token",
+                headers={"Authorization": f"Bearer {self._ADMIN}"},
+                json={"new_token": "short"},
+            )
+            assert response.status_code == 400
+            assert server_module.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+            assert server_module.FEDERATION_STATIC_TOKEN == ""
+
+    def test_known_weak_literal_new_token_rejected(self):
+        """A long-but-known-placeholder rotation token is rejected (400)."""
+        client, server_module = self._client_and_module()
+        with (
+            patch.object(server_module, "REGISTRY_API_TOKEN", self._ADMIN),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", ""),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", False),
+        ):
+            response = client.post(
+                "/admin/federation-token",
+                headers={"Authorization": f"Bearer {self._ADMIN}"},
+                json={"new_token": "change-this-immediately-use-a-strong-random-key-in-production"},
+            )
+            assert response.status_code == 400
+            assert server_module.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+            assert server_module.FEDERATION_STATIC_TOKEN == ""
+
+    def test_strong_new_token_rotates(self):
+        """A strong rotation token is accepted and arms the feature."""
+        client, server_module = self._client_and_module()
+        with (
+            patch.object(server_module, "REGISTRY_API_TOKEN", self._ADMIN),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", ""),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", False),
+        ):
+            response = client.post(
+                "/admin/federation-token",
+                headers={"Authorization": f"Bearer {self._ADMIN}"},
+                json={"new_token": self._STRONG},
+            )
+            assert response.status_code == 200
+            assert response.json()["action"] == "rotated"
+            assert server_module.FEDERATION_STATIC_TOKEN == self._STRONG
+            assert server_module.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is True
+
+
+class TestEntraLogoutQueryStringGuard:
+    """Entra logout must not breach the logout-URL length limit (AADSTS90015).
+
+    Large ID tokens (users in many groups) push the full logout URL past Entra's
+    limit. The handler drops the optional id_token_hint when the composed URL
+    would exceed MAX_LOGOUT_URL_LENGTH; Entra still processes the logout without
+    it.
+    """
+
+    _PROVIDER = "entra"
+    _LOGOUT_URL = "https://login.microsoftonline.com/tenant/oauth2/v2.0/logout"
+
+    def _run_logout(self, id_token_hint):
+        import asyncio
+        import urllib.parse
+
+        import auth_server.server as server_module
+
+        config = {
+            "providers": {
+                self._PROVIDER: {
+                    "client_id": "app-client-id",
+                    "logout_url": self._LOGOUT_URL,
+                }
+            }
+        }
+        request = Mock()
+        request.headers = {}
+
+        with (
+            patch.object(server_module, "OAUTH2_CONFIG", config),
+            patch.dict("os.environ", {"REGISTRY_URL": "https://gw.example.com"}),
+        ):
+            response = asyncio.run(
+                server_module.oauth2_logout(
+                    provider=self._PROVIDER,
+                    request=request,
+                    redirect_uri="/login",
+                    id_token_hint=id_token_hint,
+                )
+            )
+
+        parsed = urllib.parse.urlparse(response.headers["location"])
+        return urllib.parse.parse_qs(parsed.query)
+
+    def _hint_for_url_length(self, target_url_len):
+        """Build an id_token_hint that makes the composed logout URL exactly
+        target_url_len chars, so boundary behavior can be tested precisely."""
+        import urllib.parse
+
+        base_params = {"post_logout_redirect_uri": "https://gw.example.com/login"}
+        # Length of the URL with an empty hint value appended.
+        empty_hint_url_len = len(
+            f"{self._LOGOUT_URL}?" + urllib.parse.urlencode({**base_params, "id_token_hint": ""})
+        )
+        # "a" is not percent-encoded, so each char adds exactly one to the URL.
+        return "a" * (target_url_len - empty_hint_url_len)
+
+    def test_small_token_keeps_id_token_hint(self):
+        """A short id_token_hint stays in the logout query string."""
+        query = self._run_logout("short-token")
+        assert query["id_token_hint"] == ["short-token"]
+        assert query["post_logout_redirect_uri"] == ["https://gw.example.com/login"]
+
+    def test_no_hint_provided_omits_id_token_hint(self):
+        """With no id_token_hint the handler must not inject one; logout still
+        redirects with the post_logout_redirect_uri."""
+        query = self._run_logout(None)
+        assert "id_token_hint" not in query
+        assert query["post_logout_redirect_uri"] == ["https://gw.example.com/login"]
+
+    def test_hint_at_limit_is_kept(self):
+        """A hint whose composed URL is exactly at the limit is kept (boundary)."""
+        from auth_server.server import MAX_LOGOUT_URL_LENGTH
+
+        hint = self._hint_for_url_length(MAX_LOGOUT_URL_LENGTH)
+        query = self._run_logout(hint)
+        assert query["id_token_hint"] == [hint]
+
+    def test_hint_one_over_limit_is_dropped(self):
+        """A hint whose composed URL is one char over the limit is dropped."""
+        from auth_server.server import MAX_LOGOUT_URL_LENGTH
+
+        hint = self._hint_for_url_length(MAX_LOGOUT_URL_LENGTH + 1)
+        query = self._run_logout(hint)
+        assert "id_token_hint" not in query
+        assert query["post_logout_redirect_uri"] == ["https://gw.example.com/login"]
+
+    def test_oversized_token_drops_id_token_hint(self):
+        """An id_token_hint that would breach the limit is omitted; logout still
+        redirects with the post_logout_redirect_uri so Entra completes it."""
+        from auth_server.server import MAX_LOGOUT_URL_LENGTH
+
+        oversized = "a" * (MAX_LOGOUT_URL_LENGTH + 100)
+        query = self._run_logout(oversized)
+        assert "id_token_hint" not in query
+        assert query["post_logout_redirect_uri"] == ["https://gw.example.com/login"]
+
+
+def _patch_vend_httpx(*, status_code=None, json_body=None, raise_exc=None):
+    """Patch auth_server.server.httpx.AsyncClient for the vend POST path
+    (``async with httpx.AsyncClient(...) as c: await c.post(...)``)."""
+    mock_client = AsyncMock()
+    if raise_exc is not None:
+        mock_client.post = AsyncMock(side_effect=raise_exc)
+    else:
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.json = MagicMock(return_value=json_body)
+        mock_client.post = AsyncMock(return_value=resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    return patch("auth_server.server.httpx.AsyncClient", return_value=mock_client)
+
+
+class TestVendEgressTokenTransientClassification:
+    """The vend read path must distinguish a *transient* registry/store outage
+    (retryable) from a clean answer or a terminal deny. On a transient failure it
+    raises EgressVendUnavailable so the proxy surfaces a retryable 503 instead of
+    forwarding tokenless (a misleading upstream 401) -- the read-path mirror of
+    the consent-callback 503."""
+
+    def _patches(self, server_module):
+        return (
+            patch.object(server_module.settings, "egress_registry_internal_url", "http://reg"),
+            patch(
+                "registry.auth.internal.generate_internal_token",
+                return_value="svc-token",
+            ),
+        )
+
+    async def test_transport_error_raises_unavailable(self):
+        import httpx
+
+        import auth_server.server as server_module
+
+        p_url, p_tok = self._patches(server_module)
+        with p_url, p_tok, _patch_vend_httpx(raise_exc=httpx.ConnectError("refused")):
+            with pytest.raises(server_module.EgressVendUnavailable):
+                await server_module._vend_egress_token("proxy-tok", "github")
+
+    async def test_read_timeout_raises_unavailable(self):
+        import httpx
+
+        import auth_server.server as server_module
+
+        p_url, p_tok = self._patches(server_module)
+        with p_url, p_tok, _patch_vend_httpx(raise_exc=httpx.ReadTimeout("timed out")):
+            with pytest.raises(server_module.EgressVendUnavailable):
+                await server_module._vend_egress_token("proxy-tok", "github")
+
+    async def test_503_raises_unavailable(self):
+        import auth_server.server as server_module
+
+        p_url, p_tok = self._patches(server_module)
+        with p_url, p_tok, _patch_vend_httpx(status_code=503, json_body={}):
+            with pytest.raises(server_module.EgressVendUnavailable):
+                await server_module._vend_egress_token("proxy-tok", "github")
+
+    async def test_502_and_504_raise_unavailable(self):
+        import auth_server.server as server_module
+
+        p_url, p_tok = self._patches(server_module)
+        for code in (502, 504):
+            with p_url, p_tok, _patch_vend_httpx(status_code=code, json_body={}):
+                with pytest.raises(server_module.EgressVendUnavailable):
+                    await server_module._vend_egress_token("proxy-tok", "github")
+
+    async def test_200_returns_body(self):
+        import auth_server.server as server_module
+
+        body = {"consent_required": True, "connect_url": "https://gw/connect"}
+        p_url, p_tok = self._patches(server_module)
+        with p_url, p_tok, _patch_vend_httpx(status_code=200, json_body=body):
+            got = await server_module._vend_egress_token("proxy-tok", "github")
+        assert got == body
+
+    async def test_terminal_non_2xx_returns_none_not_unavailable(self):
+        # A 401/403/404 is a terminal deny (bad internal token, feature off,
+        # unregistered upstream) -- not a transient blip. It must NOT be retried
+        # as unavailable; the proxy falls through to its existing handling.
+        import auth_server.server as server_module
+
+        p_url, p_tok = self._patches(server_module)
+        for code in (401, 403, 404):
+            with p_url, p_tok, _patch_vend_httpx(status_code=code, json_body={}):
+                got = await server_module._vend_egress_token("proxy-tok", "github")
+                assert got is None
+
+
+class TestEgressVendTimeoutCoupling:
+    """The vend HTTP timeout must outlast the registry's transient Vault-retry
+    budget, derived from the store's single source of truth so the two can't
+    drift apart."""
+
+    def test_timeout_exceeds_registry_retry_budget(self):
+        import auth_server.server as server_module
+        from registry.secrets.openbao.store import transient_retry_budget_seconds
+
+        budget = transient_retry_budget_seconds()
+        timeout = server_module._egress_vend_timeout_seconds()
+        assert timeout > budget
+        assert timeout == pytest.approx(
+            budget + server_module._EGRESS_VEND_TIMEOUT_HEADROOM_SECONDS
+        )
+
+
+class TestMcpProxyEgressUnavailable:
+    """Call-site: a transient vend failure returns a retryable 503 (JSON-RPC
+    error), never a tokenless upstream forward."""
+
+    def test_tools_call_returns_retryable_503(self):
+        import auth_server.server as server_module
+
+        async def _boom(token, server):
+            raise server_module.EgressVendUnavailable("registry returned 503")
+
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", _boom),
+            _patch_scope_repo_allow_all(),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/github",
+                json={"jsonrpc": "2.0", "id": 9, "method": "tools/call"},
+                headers=_mcp_proxy_token_headers(server_name="github"),
+            )
+
+        assert response.status_code == 503
+        assert response.headers.get("Retry-After") == "2"
+        body = response.json()
+        assert body["id"] == 9
+        assert "result" not in body
+        assert body["error"]["code"] == -32001
+        assert body["error"]["message"] == "egress_credential_service_unavailable"
+
+    def test_unscoped_caller_denied_403_before_vend_even_if_vend_would_fail(self):
+        # TM-15 ordering guarantee (reviewer request on #1529): an authorization
+        # denial must never be masked by a transient egress-availability 503. The
+        # scope re-auth runs BEFORE the vend, so a scopeless caller gets 403 and
+        # the vend is never even attempted -- regardless of OpenBao availability.
+        import auth_server.server as server_module
+
+        vend_called = {"n": 0}
+
+        async def _boom(token, server):
+            vend_called["n"] += 1
+            raise server_module.EgressVendUnavailable("registry returned 503")
+
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", _boom),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/github",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {"name": "privileged-tool"},
+                },
+                headers=_mcp_proxy_token_headers(server_name="github", scopes=[]),
+            )
+
+        assert response.status_code == 403
+        assert vend_called["n"] == 0  # denial happened before any vend/outbound work
+
+
+# =============================================================================
+# TOOLS/LIST FILTER SCOPE-KEY NORMALIZATION (issue #1647)
+# =============================================================================
+
+
+def _patch_scope_repo(rules_by_scope: dict[str, list[dict]]):
+    """Patch get_scope_repository with an explicit scope -> server_access map.
+
+    Stubs both the per-scope and the bulk lookup, because
+    validate_server_tool_access uses the former and the filter's diagnostic uses
+    the latter; stubbing only one lets a test pass for the wrong reason.
+    """
+    repo = AsyncMock()
+
+    async def _get_server_scopes(scope_name: str):
+        return rules_by_scope.get(scope_name, [])
+
+    async def _get_server_scopes_bulk(scope_names: list[str]):
+        return {s: rules_by_scope[s] for s in scope_names if rules_by_scope.get(s)}
+
+    repo.get_server_scopes.side_effect = _get_server_scopes
+    repo.get_server_scopes_bulk.side_effect = _get_server_scopes_bulk
+    return patch("auth_server.server.get_scope_repository", return_value=repo)
+
+
+class TestToolsListFilterScopeKey:
+    """The tools/list filter must get the registered name, not the proxy path.
+
+    The access check earlier in the same request strips the transport suffix via
+    _registered_server_from_proxy_path, but the filter call site did not. A scope
+    document keyed on the registered name then matched nothing, so every tool was
+    removed and the client got a valid JSON-RPC response with an empty tools
+    array: no error, connector looks healthy, server listed with no tools.
+    """
+
+    @pytest.mark.parametrize(
+        ("proxy_path", "expected_scope_key"),
+        [
+            ("office-docs/mcp", "office-docs"),
+            ("office-docs/sse", "office-docs"),
+            ("office-docs/messages", "office-docs"),
+            ("office-docs", "office-docs"),
+        ],
+    )
+    def test_filter_receives_normalized_server_name(self, proxy_path, expected_scope_key):
+        """The suffixed proxy path must be stripped before the filter sees it."""
+        import auth_server.server as server_module
+
+        seen: dict[str, str] = {}
+
+        async def _capture(server_name, user_scopes, tools):
+            seen["server_name"] = server_name
+            return tools
+
+        upstream_resp = _build_mock_upstream_response(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=b'{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"t1"}]}}',
+        )
+
+        with (
+            _patch_httpx_async_client(upstream_resp),
+            _patch_scope_repo_allow_all(),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=True),
+            patch.object(server_module, "filter_tools_list_response", side_effect=_capture),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                f"/mcp-proxy/{proxy_path}",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers=_mcp_proxy_token_headers(server_name="office-docs"),
+            )
+
+        assert response.status_code == 200
+        assert seen["server_name"] == expected_scope_key
+
+    def test_federated_peer_server_key_is_preserved(self):
+        """Only the transport tail is stripped; peer/server must survive intact."""
+        import auth_server.server as server_module
+
+        seen: dict[str, str] = {}
+
+        async def _capture(server_name, user_scopes, tools):
+            seen["server_name"] = server_name
+            return tools
+
+        upstream_resp = _build_mock_upstream_response(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=b'{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"t1"}]}}',
+        )
+
+        with (
+            _patch_httpx_async_client(upstream_resp),
+            _patch_scope_repo_allow_all(),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=True),
+            patch.object(server_module, "filter_tools_list_response", side_effect=_capture),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/peer-lob-1/cloudflare-docs/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers=_mcp_proxy_token_headers(server_name="peer-lob-1/cloudflare-docs"),
+            )
+
+        assert response.status_code == 200
+        assert seen["server_name"] == "peer-lob-1/cloudflare-docs"
+
+    def test_suffixed_key_would_have_filtered_everything(self):
+        """Pin the failure mode itself, so the bug cannot come back unnoticed.
+
+        A scope document keyed on the registered name grants nothing when looked
+        up under the suffixed path. This asserts the mechanism the fix avoids,
+        independently of which call site does the stripping.
+        """
+        import asyncio
+
+        from auth_server.server import filter_tools_list_response
+
+        rules = {"grp": [{"server": "office-docs", "methods": ["*"], "tools": ["t1", "t2"]}]}
+        tools = [{"name": "t1"}, {"name": "t2"}]
+
+        with _patch_scope_repo(rules):
+            normalized = asyncio.run(filter_tools_list_response("office-docs", ["grp"], tools))
+            suffixed = asyncio.run(filter_tools_list_response("office-docs/mcp", ["grp"], tools))
+
+        assert len(normalized) == 2
+        assert suffixed == []
+
+
+class TestToolsListFilterDiagnostics:
+    """A silently empty tools array must be distinguishable from a real denial.
+
+    The filter fails closed either way -- that is not negotiable -- but "no
+    server_access entry exists for this server" is a configuration error, while
+    "an entry exists and grants no tools" is a correct empty allowlist. They look
+    identical to the client, so the logs have to separate them.
+    """
+
+    def test_missing_scope_entry_logs_error(self, caplog):
+        """No entry anywhere for the server: log ERROR naming the server."""
+        import asyncio
+
+        from auth_server.server import filter_tools_list_response
+
+        rules = {"grp": [{"server": "some-other-server", "methods": ["*"], "tools": ["*"]}]}
+        tools = [{"name": "t1"}, {"name": "t2"}]
+
+        with _patch_scope_repo(rules), caplog.at_level(logging.ERROR, logger="auth_server.server"):
+            kept = asyncio.run(filter_tools_list_response("office-docs", ["grp"], tools))
+
+        assert kept == []  # still fails closed
+        errors = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("office-docs" in m and "no server_access entry" in m for m in errors), errors
+
+    def test_empty_allowlist_does_not_log_error(self, caplog):
+        """An entry that grants no tools is legitimate, so no ERROR."""
+        import asyncio
+
+        from auth_server.server import filter_tools_list_response
+
+        rules = {"grp": [{"server": "office-docs", "methods": ["tools/list"], "tools": []}]}
+        tools = [{"name": "t1"}]
+
+        with _patch_scope_repo(rules), caplog.at_level(logging.ERROR, logger="auth_server.server"):
+            kept = asyncio.run(filter_tools_list_response("office-docs", ["grp"], tools))
+
+        assert kept == []
+        assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+    def test_no_error_when_tools_survive(self, caplog):
+        """A successful filter must not log an ERROR."""
+        import asyncio
+
+        from auth_server.server import filter_tools_list_response
+
+        rules = {"grp": [{"server": "office-docs", "methods": ["*"], "tools": ["t1"]}]}
+        tools = [{"name": "t1"}, {"name": "t2"}]
+
+        with _patch_scope_repo(rules), caplog.at_level(logging.INFO, logger="auth_server.server"):
+            kept = asyncio.run(filter_tools_list_response("office-docs", ["grp"], tools))
+
+        assert [t["name"] for t in kept] == ["t1"]
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    def test_info_line_names_the_matching_scope(self, caplog):
+        """before/after counts alone cannot diagnose a scope-key mismatch.
+
+        Logging which scope entry matched is what turns this class of bug from a
+        multi-day hunt into a single grep.
+        """
+        import asyncio
+
+        from auth_server.server import filter_tools_list_response
+
+        rules = {
+            "grp-a": [{"server": "office-docs", "methods": ["*"], "tools": ["t1"]}],
+            "grp-b": [{"server": "some-other-server", "methods": ["*"], "tools": ["*"]}],
+        }
+        tools = [{"name": "t1"}]
+
+        with (
+            _patch_scope_repo(rules),
+            caplog.at_level(logging.INFO, logger="auth_server.server"),
+        ):
+            asyncio.run(filter_tools_list_response("office-docs", ["grp-a", "grp-b"], tools))
+
+        lines = [r.message for r in caplog.records if "filter_tools_list_response:" in r.message]
+        assert any("scopes_matched=['grp-a']" in m for m in lines), lines
+
+    def test_diagnostic_never_breaks_the_filter(self):
+        """A broken scope repository must not turn tools/list into a 500.
+
+        The filter documents "never raises"; the diagnostic is only a log line,
+        so a lookup failure or an unexpected shape has to stay swallowed.
+        """
+        import asyncio
+
+        from auth_server.server import filter_tools_list_response
+
+        repo = AsyncMock()
+
+        async def _get_server_scopes(scope_name: str):
+            return [{"server": "office-docs", "methods": ["*"], "tools": ["*"]}]
+
+        repo.get_server_scopes.side_effect = _get_server_scopes
+        repo.get_server_scopes_bulk.side_effect = RuntimeError("scope store unreachable")
+
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            kept = asyncio.run(filter_tools_list_response("office-docs", ["grp"], [{"name": "t1"}]))
+
+        assert [t["name"] for t in kept] == ["t1"]

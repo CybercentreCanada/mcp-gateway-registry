@@ -23,10 +23,21 @@ import {
   UpdateGroupPayload,
 } from '../hooks/useIAM';
 import { useServerList, useServerTools } from '../hooks/useToolCatalog';
+import type { ServerInfo } from '../hooks/useToolCatalog';
+import {
+  buildScopeJson,
+  normalizeServerKey as normalizeScopeServerKey,
+  applyUiPermSync as applyScopeUiPermSync,
+  type ServerAccessEntry,
+} from './iam/scopeJson';
 import { useAgentList } from '../hooks/useAgentList';
+import { useSkills } from '../hooks/useSkills';
+import { useRegistryConfig } from '../hooks/useRegistryConfig';
 import DeleteConfirmation from './DeleteConfirmation';
 import SearchableSelect from './SearchableSelect';
+import GroupAccessPanel from './iam/GroupAccessPanel';
 import ListStateBoundary from './iam/ListStateBoundary';
+import UiPermissionEditor from './iam/UiPermissionEditor';
 
 interface IAMGroupsProps {
   onShowToast: (message: string, type: 'success' | 'error' | 'info') => void;
@@ -34,29 +45,48 @@ interface IAMGroupsProps {
 
 type View = 'list' | 'create' | 'edit';
 
-// ─── Server access entry shape ──────────────────────────────────
-interface ServerAccessEntry {
-  server: string;
-  methods: string[];
-  tools: string[];  // array of selected tool names
-}
+// ServerAccessEntry is imported from ./iam/scopeJson (shared with the build logic).
 
-// ─── Available ui_permissions keys from scopes.yml ──────────────
-const UI_PERMISSION_KEYS = [
-  { key: 'list_service', label: 'List Services' },
-  { key: 'register_service', label: 'Register Service' },
-  { key: 'health_check_service', label: 'Health Check Service' },
-  { key: 'toggle_service', label: 'Toggle Service' },
-  { key: 'modify_service', label: 'Modify Service' },
-  { key: 'delete_service', label: 'Delete Service' },
-  { key: 'list_agents', label: 'List Agents' },
-  { key: 'get_agent', label: 'Get Agent' },
-  { key: 'publish_agent', label: 'Publish Agent' },
-  { key: 'modify_agent', label: 'Modify Agent' },
-  { key: 'delete_agent', label: 'Delete Agent' },
+// ─── Per-type custom-entity ui_permissions ────────
+// Each admin-defined custom type mints list/create/modify/delete_<type>_entity
+// scopes, edited in UiPermissionEditor. Enumerated from the current type set (via
+// /api/config) so an admin can grant them proactively, before any record exists.
+// The keys mirror registry/services/custom_entity_scopes.entity_scope() exactly.
+// Mutation actions render as free-text grants; the read action (`list`) renders
+// as a record picker (CustomTypeListPicker) since its grant supports specific
+// record paths, not just "all".
+const ENTITY_MUTATION_ACTIONS: { action: string; verb: string }[] = [
+  { action: 'create', verb: 'Create' },
+  { action: 'modify', verb: 'Modify' },
+  { action: 'delete', verb: 'Delete' },
 ];
 
-const COMMON_METHODS = [
+interface EntityScopeGroup {
+  typeName: string;
+  displayName: string;
+  listKey: string;
+  mutationKeys: { key: string; label: string }[];
+}
+
+function buildEntityScopeGroups(
+  customTypes: { name: string; display_name: string }[],
+): EntityScopeGroup[] {
+  return customTypes.map((t) => ({
+    typeName: t.name,
+    displayName: t.display_name || t.name,
+    listKey: `list_${t.name}_entity`,
+    mutationKeys: ENTITY_MUTATION_ACTIONS.map(({ action, verb }) => ({
+      key: `${action}_${t.name}_entity`,
+      label: `${verb} ${t.display_name || t.name}`,
+    })),
+  }));
+}
+
+// Method value spaces are SEPARATE by entity kind (mirrors the auth-server's
+// wildcard split): MCP method tokens for mcp/virtual servers, HTTP verbs for
+// proxied non-MCP entities. The legacy MCP "*"/"all" wildcard does NOT authorize
+// an HTTP verb server-side, so proxied entities use explicit verbs or "http:*".
+const MCP_METHODS = [
   'initialize',
   'notifications/initialized',
   'ping',
@@ -64,11 +94,17 @@ const COMMON_METHODS = [
   'tools/call',
   'resources/list',
   'resources/templates/list',
-  'GET',
-  'POST',
-  'PUT',
-  'DELETE',
 ];
+
+const HTTP_VERBS = ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE', 'http:*'];
+
+// State-changing HTTP verbs — selecting these (or http:*) grants destructive
+// access to the proxied backend; the editor warns when any is chosen.
+const DESTRUCTIVE_HTTP_VERBS = new Set(['POST', 'PUT', 'PATCH', 'DELETE', 'http:*']);
+
+// Back-compat alias: the create form's default entry still seeds MCP methods
+// (an MCP server is the default new entry).
+const COMMON_METHODS = MCP_METHODS;
 
 // Example scope JSON matching the format from scripts/registry-admins.json
 const EXAMPLE_SCOPE_JSON = {
@@ -91,6 +127,22 @@ const EXAMPLE_SCOPE_JSON = {
 
 // Default entry has all methods selected
 const EMPTY_SERVER_ENTRY: ServerAccessEntry = { server: '', methods: [...COMMON_METHODS], tools: [] };
+
+// Human label for a server/entity option in the scope-editor picker, tagged by
+// kind so an admin can tell an MCP server from a proxied skill/agent/custom.
+function _serverOptionLabel(s: ServerInfo): string {
+  const tag =
+    s.type === 'virtual'
+      ? '[Virtual] '
+      : s.type === 'skill'
+        ? '[Skill] '
+        : s.type === 'a2a_agent'
+          ? '[Agent] '
+          : s.type === 'custom'
+            ? `[${s.entityType || 'Custom'}] `
+            : '';
+  return `${tag}${s.name} (${s.path})`;
+}
 
 
 /**
@@ -229,108 +281,57 @@ const ServerToolsSelector: React.FC<ServerToolsSelectorProps> = ({
 };
 
 
-/**
- * Build the full scope JSON from form state for preview and API payload.
- */
-function _buildScopeJson(
-  name: string,
-  description: string,
-  serverAccess: ServerAccessEntry[],
-  groupMappings: string,
-  selectedAgents: string[],
-  uiPermissions: Record<string, string>,
-  createInIdp: boolean,
-): Record<string, unknown> {
-  const result: Record<string, unknown> = { scope_name: name };
-  if (description) result.description = description;
-
-  // Convert server access entries
-  const access = serverAccess
-    .filter((e) => e.server.trim())
-    .map((e) => {
-      const entry: Record<string, unknown> = {
-        server: e.server.trim().replace(/^\/+|\/+$/g, ''),
-        methods: e.methods.length > 0 ? e.methods : ['all'],
-      };
-      // Tools is now an array; check for wildcard or list
-      if (e.tools.includes('*')) {
-        entry.tools = '*';
-      } else if (e.tools.length > 0) {
-        entry.tools = e.tools;
-      }
-      return entry;
-    });
-  if (access.length > 0) result.server_access = access;
-
-  // Group mappings (optional)
-  const mappings = groupMappings
-    .split(',')
-    .map((m) => m.trim())
-    .filter(Boolean);
-  if (mappings.length > 0) result.group_mappings = mappings;
-
-  // Agent access (optional)
-  if (selectedAgents.length > 0) result.agent_access = selectedAgents;
-
-  // UI permissions -- only include keys that have a non-empty value
-  const perms: Record<string, string[]> = {};
-  for (const [key, val] of Object.entries(uiPermissions)) {
-    const items = val.split(',').map((v) => v.trim()).filter(Boolean);
-    if (items.length > 0) perms[key] = items;
-  }
-
-  // Auto-sync UI permissions with server_access entries.
-  // Normalize server paths (strip slashes) for consistent matching.
-  const serverPaths = serverAccess
-    .filter((e) => e.server.trim())
-    .map((e) => e.server.trim());
-
-  // Separate virtual servers from regular MCP servers
-  const virtualServerPaths = serverPaths.filter((p) => p.startsWith('/virtual/'));
-  const mcpServerPaths = serverPaths
-    .filter((p) => !p.startsWith('/virtual/'))
-    .map((p) => p.replace(/^\/+|\/+$/g, ''));
-
-  // Always sync MCP server UI permissions with current server_access
-  if (mcpServerPaths.length > 0) {
-    perms['list_service'] = mcpServerPaths;
-    perms['health_check_service'] = mcpServerPaths;
-    perms['get_service'] = mcpServerPaths;
-    perms['list_tools'] = mcpServerPaths;
-    perms['call_tool'] = mcpServerPaths;
-  } else {
-    delete perms['list_service'];
-    delete perms['health_check_service'];
-    delete perms['get_service'];
-    delete perms['list_tools'];
-    delete perms['call_tool'];
-  }
-
-  // Always sync list_virtual_server with selected virtual servers
-  if (virtualServerPaths.length > 0) {
-    perms['list_virtual_server'] = virtualServerPaths;
-  }
-
-  // Always sync list_agents and get_agent with selected agents
-  // This ensures UI permissions match the agent_access selection
-  if (selectedAgents.length > 0) {
-    perms['list_agents'] = selectedAgents;
-    perms['get_agent'] = selectedAgents;
-  }
-
-  if (Object.keys(perms).length > 0) result.ui_permissions = perms;
-
-  result.create_in_idp = createInIdp;
-  return result;
-}
+// Scope-JSON build logic (canonical-key normalization + perm-sync) lives in
+// ./iam/scopeJson so the create and edit paths share one implementation and the
+// authz-sensitive rules are unit-tested. Aliased to the historical local names.
+const _normalizeServerKey = normalizeScopeServerKey;
+const _applyUiPermSync = applyScopeUiPermSync;
+const _buildScopeJson = buildScopeJson;
 
 
 const IAMGroups: React.FC<IAMGroupsProps> = ({ onShowToast }) => {
   const { groups, isLoading, error, refetch } = useIAMGroups();
   const { servers: availableServers, isLoading: serversLoading } = useServerList();
   const { agents: availableAgents, isLoading: agentsLoading } = useAgentList();
+  const { skills: availableSkills, loading: skillsLoading } = useSkills();
+  const { config } = useRegistryConfig();
+
+  // Skill options for the UiPermissionEditor list_skills multi-select. Keyed by
+  // skill name (the resource identifier list_skills is matched against).
+  const skillOptions = useMemo(
+    () =>
+      (availableSkills ?? []).map((s) => ({
+        value: s.name,
+        label: s.name,
+        description: s.description || undefined,
+      })),
+    [availableSkills],
+  );
+
+  // Dynamic per-type entity scope keys, enabled only when the custom-types
+  // feature is on. Enumerated from the current type set so admins can grant
+  // before any record exists. Memoized so the render sites are stable.
+  const customTypesEnabled = config?.features?.custom_types ?? false;
+  const entityScopeGroups = useMemo(
+    () =>
+      customTypesEnabled ? buildEntityScopeGroups(config?.custom_types ?? []) : [],
+    [customTypesEnabled, config?.custom_types],
+  );
   const [searchQuery, setSearchQuery] = useState('');
   const [view, setView] = useState<View>('list');
+
+  // Canonical authz keys the picker offered for PROXIED non-MCP entities. Used to
+  // classify server_access entries so their scope key is written verbatim (not
+  // slash-stripped) and they are NOT synced into MCP UI permissions.
+  const proxiedKeys = useMemo(
+    () =>
+      new Set(
+        availableServers
+          .filter((s) => s.type === 'skill' || s.type === 'a2a_agent' || s.type === 'custom')
+          .map((s) => s.path),
+      ),
+    [availableServers],
+  );
 
   // ─── Create form state ──────────────────────────────────────
   const [formName, setFormName] = useState('');
@@ -356,11 +357,11 @@ const IAMGroups: React.FC<IAMGroupsProps> = ({ onShowToast }) => {
   const jsonPreview = useMemo(() => {
     if (!formName.trim()) return null;
     return JSON.stringify(
-      _buildScopeJson(formName.trim(), formDescription.trim(), serverAccess, groupMappings, selectedAgents, uiPermissions, createInIdp),
+      _buildScopeJson(formName.trim(), formDescription.trim(), serverAccess, groupMappings, selectedAgents, uiPermissions, createInIdp, proxiedKeys),
       null,
       2,
     );
-  }, [formName, formDescription, serverAccess, groupMappings, selectedAgents, uiPermissions, createInIdp]);
+  }, [formName, formDescription, serverAccess, groupMappings, selectedAgents, uiPermissions, createInIdp, proxiedKeys]);
 
   const filteredGroups = useMemo(() => {
     if (!searchQuery) return groups;
@@ -390,11 +391,13 @@ const IAMGroups: React.FC<IAMGroupsProps> = ({ onShowToast }) => {
     setIsCreating(true);
     try {
       // Build scope_config from form state.
-      // The management API currently only processes name/description.
-      // scope_config is included for future backend support.
+      // The management API validates scope_config (422 on malformed input),
+      // fully applies it via scope_service.import_group, and triggers an
+      // auth-server reload so the scope takes effect immediately.
       const scopeJson = _buildScopeJson(
         formName.trim(), formDescription.trim(),
         serverAccess, groupMappings, selectedAgents, uiPermissions, createInIdp,
+        proxiedKeys,
       );
       const { scope_name, description, ...scopeConfig } = scopeJson;
 
@@ -494,14 +497,15 @@ const IAMGroups: React.FC<IAMGroupsProps> = ({ onShowToast }) => {
     if (!editingGroup) return;
     setIsSaving(true);
     try {
-      // Build scope_config from form state
+      // Build scope_config from form state. Proxied non-MCP entities keep their
+      // canonical authz key (entity_type/registered_path); MCP/virtual are
+      // slash-normalized. Uses the SAME shared normalizer + perm-sync as the
+      // create path (_buildScopeJson) so both actions write identical output.
       const serverAccessPayload = serverAccess
         .filter((e) => e.server.trim())
         .map((e) => {
-          // Normalize server path: strip leading/trailing slashes for consistency
-          const normalizedServer = e.server.trim().replace(/^\/+|\/+$/g, '');
           const entry: {server: string; methods: string[]; tools?: string[]} = {
-            server: normalizedServer,
+            server: _normalizeServerKey(e.server, proxiedKeys),
             methods: e.methods.length > 0 ? e.methods : ['all'],
           };
           if (e.tools.length > 0) {
@@ -510,66 +514,20 @@ const IAMGroups: React.FC<IAMGroupsProps> = ({ onShowToast }) => {
           return entry;
         });
 
-      // Build UI permissions
+      // Build UI permissions, then auto-sync (shared helper; proxied excluded).
       const perms: Record<string, string[]> = {};
       for (const [key, val] of Object.entries(uiPermissions)) {
         const items = val.split(',').map((v) => v.trim()).filter(Boolean);
         if (items.length > 0) perms[key] = items;
       }
-
-      // Auto-sync UI permissions with server_access entries.
-      // Normalize server paths (strip slashes) for consistent matching.
-      const serverPaths = serverAccess
-        .filter((e) => e.server.trim())
-        .map((e) => e.server.trim());
-
-      // Separate virtual servers from regular MCP servers
-      const virtualServerPaths = serverPaths.filter((p) => p.startsWith('/virtual/'));
-      const mcpServerPaths = serverPaths
-        .filter((p) => !p.startsWith('/virtual/'))
-        .map((p) => p.replace(/^\/+|\/+$/g, ''));
-
-      // Always sync MCP server UI permissions with current server_access
-      // (matches the virtual server sync pattern below)
-      if (mcpServerPaths.length > 0) {
-        perms['list_service'] = mcpServerPaths;
-        perms['health_check_service'] = mcpServerPaths;
-        perms['get_service'] = mcpServerPaths;
-        perms['list_tools'] = mcpServerPaths;
-        perms['call_tool'] = mcpServerPaths;
-      } else {
-        delete perms['list_service'];
-        delete perms['health_check_service'];
-        delete perms['get_service'];
-        delete perms['list_tools'];
-        delete perms['call_tool'];
-      }
-
-      // Always sync list_virtual_server with selected virtual servers
-      if (virtualServerPaths.length > 0) {
-        perms['list_virtual_server'] = virtualServerPaths;
-      } else {
-        // Remove virtual server permission if none selected
-        delete perms['list_virtual_server'];
-      }
-
-      // Always sync list_agents and get_agent with selected agents
-      // This ensures UI permissions match the agent_access selection
-      if (selectedAgents.length > 0) {
-        perms['list_agents'] = selectedAgents;
-        perms['get_agent'] = selectedAgents;
-      } else {
-        // Remove agent permissions if no agents selected
-        delete perms['list_agents'];
-        delete perms['get_agent'];
-      }
+      _applyUiPermSync(perms, serverAccess, selectedAgents, proxiedKeys);
 
       const payload: UpdateGroupPayload = {
         description: formDescription.trim() || undefined,
         scope_config: {
-          server_access: serverAccessPayload.length > 0 ? serverAccessPayload : undefined,
-          ui_permissions: Object.keys(perms).length > 0 ? perms : undefined,
-          agent_access: selectedAgents.length > 0 ? selectedAgents : undefined,
+          server_access: serverAccessPayload,
+          ui_permissions: perms,
+          agent_access: selectedAgents,
         },
       };
 
@@ -672,6 +630,23 @@ const IAMGroups: React.FC<IAMGroupsProps> = ({ onShowToast }) => {
     setServerAccess((prev) => prev.map((e, i) => (i === idx ? { ...e, [field]: value } : e)));
   };
 
+  // Changing the selected server can flip its value space (MCP methods <-> HTTP
+  // verbs). Reset methods AND tools so stale tokens from the previous kind aren't
+  // silently written into the new scope (e.g. MCP "tools/call" persisting into a
+  // proxied-skill scope, which the auth-server would never match). New proxied
+  // entries start with no methods (admin picks explicit verbs); MCP/virtual keep
+  // the historical all-MCP-methods default.
+  const handleServerChange = (idx: number, val: string) => {
+    const nowProxied = proxiedKeys.has(val.trim());
+    setServerAccess((prev) =>
+      prev.map((e, i) =>
+        i === idx
+          ? { ...e, server: val, tools: [], methods: nowProxied ? [] : [...MCP_METHODS] }
+          : e,
+      ),
+    );
+  };
+
   const toggleMethod = (idx: number, method: string) => {
     setServerAccess((prev) =>
       prev.map((e, i) => {
@@ -772,169 +747,37 @@ const IAMGroups: React.FC<IAMGroupsProps> = ({ onShowToast }) => {
           </div>
         </div>
 
-        {/* ── Server Access ──────────────────────────────────── */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Server Access</p>
-            <button
-              onClick={addServerEntry}
-              className="text-xs text-purple-600 dark:text-purple-400 hover:underline"
-            >
-              + Add Server
-            </button>
-          </div>
-          {serversLoading && (
-            <p className="text-xs text-gray-400">Loading servers...</p>
-          )}
-          {serverAccess.map((entry, idx) => (
-              <div key={idx} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
-                    Server {idx + 1}
-                  </span>
-                  {serverAccess.length > 1 && (
-                    <button
-                      onClick={() => removeServerEntry(idx)}
-                      className="text-xs text-red-500 hover:underline"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Server</label>
-                  <SearchableSelect
-                    options={availableServers.map((s) => ({
-                      value: s.path,
-                      label: `${s.type === 'virtual' ? '[Virtual] ' : ''}${s.name} (${s.path})`,
-                      description: s.description,
-                    }))}
-                    value={entry.server}
-                    onChange={(val) => {
-                      updateServerEntry(idx, 'server', val);
-                      // Reset tools when server changes
-                      updateServerEntry(idx, 'tools', []);
-                    }}
-                    placeholder="Search servers..."
-                    isLoading={serversLoading}
-                    maxDescriptionWords={8}
-                    specialOptions={[
-                      { value: '*', label: '* (All servers)', description: 'Grant access to all servers' },
-                    ]}
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Methods</label>
-                  <div className="flex flex-wrap gap-2">
-                    {COMMON_METHODS.map((method) => (
-                      <label key={method} className="flex items-center space-x-1 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={entry.methods.includes(method)}
-                          onChange={() => toggleMethod(idx, method)}
-                          className="rounded border-gray-300 dark:border-gray-600 text-purple-600 focus:ring-purple-500 h-3 w-3"
-                        />
-                        <span className="text-xs text-gray-600 dark:text-gray-400">{method}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <ServerToolsSelector
-                  serverPath={entry.server}
-                  selectedTools={entry.tools}
-                  onChange={(tools) => updateServerEntry(idx, 'tools', tools)}
-                />
-              </div>
-          ))}
-        </div>
-
-        {/* ── Agent Access ──────────────────────────────────── */}
-        <div className="space-y-3">
-          <p className="text-sm font-medium text-gray-700 dark:text-gray-300">
-            Agent Access
-            <span className="text-xs text-gray-400 ml-1">(optional)</span>
-          </p>
-          {/* Selected agents as removable tags */}
-          {selectedAgents.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {selectedAgents.map((agentName) => (
-                <span
-                  key={agentName}
-                  className="inline-flex items-center px-2 py-1 text-xs bg-purple-100 dark:bg-purple-900/30
-                             text-purple-700 dark:text-purple-300 rounded-full"
-                >
-                  {agentName}
-                  <button
-                    type="button"
-                    onClick={() => setSelectedAgents((prev) => prev.filter((a) => a !== agentName))}
-                    className="ml-1 hover:text-purple-900 dark:hover:text-purple-100"
-                  >
-                    <XMarkIcon className="h-3 w-3" />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-          {/* Searchable agent selector */}
-          <SearchableSelect
-            options={availableAgents
-              .filter((a) => !selectedAgents.includes(a.path))
-              .map((a) => ({
-                value: a.path,
-                label: `${a.name} (${a.path})`,
-                description: a.description,
-              }))}
-            value=""
-            onChange={(val) => {
-              if (val && !selectedAgents.includes(val)) {
-                setSelectedAgents((prev) => [...prev, val]);
-              }
-            }}
-            placeholder="Search and add agents..."
-            isLoading={agentsLoading}
-            maxDescriptionWords={8}
-            specialOptions={[
-              { value: 'all', label: '* (All agents)', description: 'Grant access to all agents' },
-            ]}
-          />
-        </div>
-
-        {/* ── UI Permissions (collapsible) ───────────────────── */}
-        <div className="space-y-3">
-          <button
-            type="button"
-            onClick={() => setShowUiPermissions(!showUiPermissions)}
-            className="flex items-center space-x-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100"
-          >
-            {showUiPermissions ? (
-              <ChevronDownIcon className="h-4 w-4" />
-            ) : (
-              <ChevronRightIcon className="h-4 w-4" />
-            )}
-            <span>
-              UI Permissions
-              <span className="text-xs text-gray-400 ml-1">(enter "all" or a comma-separated list of service/agent names)</span>
-            </span>
-          </button>
-          {showUiPermissions && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pl-6">
-              {UI_PERMISSION_KEYS.map(({ key, label }) => (
-                <div key={key}>
-                  <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">{label}</label>
-                  <input
-                    type="text"
-                    value={uiPermissions[key] || ''}
-                    onChange={(e) => setPermValue(key, e.target.value)}
-                    placeholder="e.g. all or currenttime, mcpgw"
-                    className="w-full px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg
-                               bg-white dark:bg-gray-900 text-gray-900 dark:text-white
-                               focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                  />
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+  <GroupAccessPanel
+    serverAccess={serverAccess}
+    availableServers={availableServers}
+    serversLoading={serversLoading}
+    commonMethods={COMMON_METHODS}
+    isProxiedServer={(s) => proxiedKeys.has(s.trim())}
+    httpVerbs={HTTP_VERBS}
+    destructiveHttpVerbs={DESTRUCTIVE_HTTP_VERBS}
+    onAddServerEntry={addServerEntry}
+    onRemoveServerEntry={removeServerEntry}
+    onUpdateServerEntry={updateServerEntry}
+    onServerChange={handleServerChange}
+    onToggleMethod={toggleMethod}
+    renderToolsSelector={(entry, idx) => (
+    <ServerToolsSelector
+      serverPath={entry.server}
+      selectedTools={entry.tools}
+      onChange={(tools) => updateServerEntry(idx, 'tools', tools)}
+    />
+    )}
+    selectedAgents={selectedAgents}
+    availableAgents={availableAgents}
+    agentsLoading={agentsLoading}
+    onAddAgent={(p) => setSelectedAgents((prev) => [...prev, p])}
+    onRemoveAgent={(p) => setSelectedAgents((prev) => prev.filter((a) => a !== p))}
+    uiPermissions={uiPermissions}
+    setPermValue={setPermValue}
+    entityScopeGroups={entityScopeGroups}
+    skillOptions={skillOptions}
+    skillsLoading={skillsLoading}
+/>
 
         {/* ── JSON Upload / Preview ──────────────────────────── */}
         <div className="space-y-4">
@@ -1090,169 +933,37 @@ const IAMGroups: React.FC<IAMGroupsProps> = ({ onShowToast }) => {
               </div>
             </div>
 
-            {/* ── Server Access ──────────────────────────────────── */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Server Access</p>
-                <button
-                  onClick={addServerEntry}
-                  className="text-xs text-purple-600 dark:text-purple-400 hover:underline"
-                >
-                  + Add Server
-                </button>
-              </div>
-              {serversLoading && (
-                <p className="text-xs text-gray-400">Loading servers...</p>
-              )}
-              {serverAccess.map((entry, idx) => (
-                  <div key={idx} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
-                        Server {idx + 1}
-                      </span>
-                      {serverAccess.length > 1 && (
-                        <button
-                          onClick={() => removeServerEntry(idx)}
-                          className="text-xs text-red-500 hover:underline"
-                        >
-                          Remove
-                        </button>
-                      )}
-                    </div>
-                    <div>
-                      <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Server</label>
-                      <SearchableSelect
-                        options={availableServers.map((s) => ({
-                          value: s.path,
-                          label: `${s.type === 'virtual' ? '[Virtual] ' : ''}${s.name} (${s.path})`,
-                          description: s.description,
-                        }))}
-                        value={entry.server}
-                        onChange={(val) => {
-                          updateServerEntry(idx, 'server', val);
-                          // Reset tools when server changes
-                          updateServerEntry(idx, 'tools', []);
-                        }}
-                        placeholder="Search servers..."
-                        isLoading={serversLoading}
-                        maxDescriptionWords={8}
-                        specialOptions={[
-                          { value: '*', label: '* (All servers)', description: 'Grant access to all servers' },
-                        ]}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Methods</label>
-                      <div className="flex flex-wrap gap-2">
-                        {COMMON_METHODS.map((method) => (
-                          <label key={method} className="flex items-center space-x-1 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={entry.methods.includes(method)}
-                              onChange={() => toggleMethod(idx, method)}
-                              className="rounded border-gray-300 dark:border-gray-600 text-purple-600 focus:ring-purple-500 h-3 w-3"
-                            />
-                            <span className="text-xs text-gray-600 dark:text-gray-400">{method}</span>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-                    <ServerToolsSelector
-                      serverPath={entry.server}
-                      selectedTools={entry.tools}
-                      onChange={(tools) => updateServerEntry(idx, 'tools', tools)}
-                    />
-                  </div>
-              ))}
-            </div>
-
-            {/* ── Agent Access ──────────────────────────────────── */}
-            <div className="space-y-3">
-              <p className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                Agent Access
-                <span className="text-xs text-gray-400 ml-1">(optional)</span>
-              </p>
-              {/* Selected agents as removable tags */}
-              {selectedAgents.length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {selectedAgents.map((agentName) => (
-                    <span
-                      key={agentName}
-                      className="inline-flex items-center px-2 py-1 text-xs bg-purple-100 dark:bg-purple-900/30
-                                 text-purple-700 dark:text-purple-300 rounded-full"
-                    >
-                      {agentName}
-                      <button
-                        type="button"
-                        onClick={() => setSelectedAgents((prev) => prev.filter((a) => a !== agentName))}
-                        className="ml-1 hover:text-purple-900 dark:hover:text-purple-100"
-                      >
-                        <XMarkIcon className="h-3 w-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-              {/* Searchable agent selector */}
-              <SearchableSelect
-                options={availableAgents
-                  .filter((a) => !selectedAgents.includes(a.path))
-                  .map((a) => ({
-                    value: a.path,
-                    label: `${a.name} (${a.path})`,
-                    description: a.description,
-                  }))}
-                value=""
-                onChange={(val) => {
-                  if (val && !selectedAgents.includes(val)) {
-                    setSelectedAgents((prev) => [...prev, val]);
-                  }
-                }}
-                placeholder="Search and add agents..."
-                isLoading={agentsLoading}
-                maxDescriptionWords={8}
-                specialOptions={[
-                  { value: 'all', label: '* (All agents)', description: 'Grant access to all agents' },
-                ]}
-              />
-            </div>
-
-            {/* ── UI Permissions (collapsible) ───────────────────── */}
-            <div className="space-y-3">
-              <button
-                type="button"
-                onClick={() => setShowUiPermissions(!showUiPermissions)}
-                className="flex items-center space-x-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100"
-              >
-                {showUiPermissions ? (
-                  <ChevronDownIcon className="h-4 w-4" />
-                ) : (
-                  <ChevronRightIcon className="h-4 w-4" />
-                )}
-                <span>
-                  UI Permissions
-                  <span className="text-xs text-gray-400 ml-1">(enter "all" or a comma-separated list of service/agent names)</span>
-                </span>
-              </button>
-              {showUiPermissions && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pl-6">
-                  {UI_PERMISSION_KEYS.map(({ key, label }) => (
-                    <div key={key}>
-                      <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">{label}</label>
-                      <input
-                        type="text"
-                        value={uiPermissions[key] || ''}
-                        onChange={(e) => setPermValue(key, e.target.value)}
-                        placeholder="e.g. all or currenttime, mcpgw"
-                        className="w-full px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg
-                                   bg-white dark:bg-gray-900 text-gray-900 dark:text-white
-                                   focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                      />
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+  <GroupAccessPanel
+    serverAccess={serverAccess}
+    availableServers={availableServers}
+    serversLoading={serversLoading}
+    commonMethods={COMMON_METHODS}
+    isProxiedServer={(s) => proxiedKeys.has(s.trim())}
+    httpVerbs={HTTP_VERBS}
+    destructiveHttpVerbs={DESTRUCTIVE_HTTP_VERBS}
+    onAddServerEntry={addServerEntry}
+    onRemoveServerEntry={removeServerEntry}
+    onUpdateServerEntry={updateServerEntry}
+    onServerChange={handleServerChange}
+    onToggleMethod={toggleMethod}
+    renderToolsSelector={(entry, idx) => (
+      <ServerToolsSelector
+        serverPath={entry.server}
+        selectedTools={entry.tools}
+        onChange={(tools) => updateServerEntry(idx, 'tools', tools)}
+      />
+    )}
+    selectedAgents={selectedAgents}
+    availableAgents={availableAgents}
+    agentsLoading={agentsLoading}
+    onAddAgent={(p) => setSelectedAgents((prev) => [...prev, p])}
+    onRemoveAgent={(p) => setSelectedAgents((prev) => prev.filter((a) => a !== p))}
+    uiPermissions={uiPermissions}
+    setPermValue={setPermValue}
+    entityScopeGroups={entityScopeGroups}
+    skillOptions={skillOptions}
+    skillsLoading={skillsLoading}
+/>
 
             {/* ── JSON Preview ──────────────────────────────────────── */}
             {jsonPreview && (

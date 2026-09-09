@@ -7,8 +7,10 @@ from registry.services import ard_trust as t
 
 def _entry(identifier):
     return ArdCatalogEntry(
-        identifier=identifier, display_name="X",
-        type="application/mcp-server-card+json", url="https://acme.com/x",
+        identifier=identifier,
+        display_name="X",
+        type="application/mcp-server-card+json",
+        url="https://acme.com/x",
     )
 
 
@@ -61,7 +63,9 @@ class TestVerifyEntryTrust:
         assert reason == "unparseable-urn"
 
     def test_expected_identity_pin_overrides_host(self):
-        src = AiCatalogSourceConfig(source_id="acme", domain="acme.com", expected_identity="https://pinned.com")
+        src = AiCatalogSourceConfig(
+            source_id="acme", domain="acme.com", expected_identity="https://pinned.com"
+        )
         # URN publisher matches the pin, not the served host -> accepted.
         ok, _ = t.verify_entry_trust(
             _entry("urn:air:pinned.com:server:x"), "acme.com", src, "reject"

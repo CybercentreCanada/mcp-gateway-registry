@@ -47,12 +47,8 @@ class TestParseGitlabUrl:
 
     def test_parts_properties(self):
         """file_dir and encoded_project should expose API-ready components."""
-        nested = parse_gitlab_url(
-            "https://gitlab.example.com/g/sub/r/-/raw/main/a/b/c/SKILL.md"
-        )
-        root = parse_gitlab_url(
-            "https://gitlab.example.com/g/r/-/raw/main/SKILL.md"
-        )
+        nested = parse_gitlab_url("https://gitlab.example.com/g/sub/r/-/raw/main/a/b/c/SKILL.md")
+        root = parse_gitlab_url("https://gitlab.example.com/g/r/-/raw/main/SKILL.md")
 
         assert nested is not None and root is not None
         assert nested.file_dir == "a/b/c"
@@ -86,6 +82,42 @@ class TestParseGitlabUrl:
         assert parts.ref == "main"
         assert parts.filepath == "skills/demo/SKILL.md"
 
+    def test_parses_http_scheme(self):
+        """Should parse a plain http:// (non-TLS) /-/raw/ URL."""
+        parts = parse_gitlab_url("http://gitlab.local/g/r/-/raw/main/SKILL.md")
+
+        assert parts is not None
+        assert parts.base == "http://gitlab.local"
+        assert parts.project == "g/r"
+        assert parts.ref == "main"
+        assert parts.filepath == "SKILL.md"
+
+    def test_raw_marker_in_filepath_uses_first_occurrence(self):
+        """A /-/raw/ inside the filepath must not re-split; first marker wins.
+
+        GitLab reserves /-/ at the project level, so the leftmost /-/raw/
+        delimits project|ref, and any later occurrence stays in the filepath.
+        """
+        url = "https://gitlab.example.com/g/r/-/raw/main/docs/-/raw/notes.md"
+
+        parts = parse_gitlab_url(url)
+
+        assert parts is not None
+        assert parts.project == "g/r"
+        assert parts.ref == "main"
+        assert parts.filepath == "docs/-/raw/notes.md"
+
+    def test_url_matching_both_forms_parses_as_raw_web(self):
+        """When a URL contains both markers, the raw-web branch takes priority."""
+        url = "https://gitlab.example.com/api/v4/projects/x/-/raw/main/file.md"
+
+        parts = parse_gitlab_url(url)
+
+        assert parts is not None
+        assert parts.project == "api/v4/projects/x"
+        assert parts.ref == "main"
+        assert parts.filepath == "file.md"
+
     @pytest.mark.parametrize(
         "url",
         [
@@ -94,11 +126,41 @@ class TestParseGitlabUrl:
             "https://raw.githubusercontent.com/owner/repo/main/SKILL.md",
             "https://gitlab.example.com/group/repo/blob/main/SKILL.md",
             "not a url at all",
+            # No host between scheme and first slash.
+            "https:///group/repo/-/raw/main/SKILL.md",
+            "http:///api/v4/projects/g%2Fr/repository/files/f/raw?ref=main",
+            # Scheme + host but no path at all.
+            "https://gitlab.example.com",
+            # /-/raw/ present but empty project, ref, or filepath.
+            "https://gitlab.example.com/-/raw/main/SKILL.md",
+            "https://gitlab.example.com/g/r/-/raw//SKILL.md",
+            "https://gitlab.example.com/g/r/-/raw/main/",
+            # API form missing the /repository/files/ marker or the raw?ref= suffix.
+            "https://gitlab.example.com/api/v4/projects/g%2Fr/repository/files/f",
+            "https://gitlab.example.com/api/v4/projects//repository/files/f/raw?ref=main",
         ],
     )
     def test_returns_none_for_unrecognised_urls(self, url):
         """Should return None for any URL that matches neither pattern."""
         assert parse_gitlab_url(url) is None
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://x/" + "http://x/a" * 50000,
+            "http://x/a/-/raw/x/" + "a/-/raw/x/a" * 50000,
+            "http://x/api/v4/projects/x/repository/files/"
+            + "http://x/api/v4/projects/x/repository/files/a" * 20000,
+            "http://x/api/v4/projects/x/repository/files/a/raw?ref=" + "a/raw?ref=a" * 50000,
+        ],
+    )
+    def test_redos_payloads_parse_in_linear_time(self, url):
+        """These strings previously drove the regexes to polynomial time. Linear
+        substring parsing returns promptly; the test would hang under the old
+        implementation.
+        """
+        # We only assert it returns (quickly); the value itself is irrelevant.
+        parse_gitlab_url(url)
 
 
 class TestTranslateGitlabToApiUrl:
@@ -149,9 +211,7 @@ class TestDeriveGitlabResourceUrl:
 
     def test_derives_sibling_resource_in_same_directory(self):
         """Should resolve a sibling resource relative to the SKILL.md dir."""
-        skill_md_url = (
-            "https://gitlab.example.com/g/r/-/raw/main/skills/demo/SKILL.md"
-        )
+        skill_md_url = "https://gitlab.example.com/g/r/-/raw/main/skills/demo/SKILL.md"
 
         result = derive_gitlab_resource_url(skill_md_url, "reference/notes.md")
 
@@ -184,9 +244,7 @@ class TestDeriveGitlabResourceUrl:
     def test_returns_none_for_non_gitlab_url(self):
         """Should return None when the skill URL is not a GitLab URL."""
         assert (
-            derive_gitlab_resource_url(
-                "https://github.com/o/r/blob/main/SKILL.md", "ref.md"
-            )
+            derive_gitlab_resource_url("https://github.com/o/r/blob/main/SKILL.md", "ref.md")
             is None
         )
 
@@ -196,9 +254,7 @@ class TestTranslateGitlabTreeApiUrl:
 
     def test_builds_tree_api_url_for_skill_directory(self):
         """Should return tree URL plus encoded project, ref, and skill_dir."""
-        skill_md_url = (
-            "https://gitlab.example.com/g/r/-/raw/main/skills/demo/SKILL.md"
-        )
+        skill_md_url = "https://gitlab.example.com/g/r/-/raw/main/skills/demo/SKILL.md"
 
         result = translate_gitlab_tree_api_url(skill_md_url)
 
@@ -214,9 +270,7 @@ class TestTranslateGitlabTreeApiUrl:
 
     def test_encodes_nested_skill_directories(self):
         """Should percent-encode every slash in deeply nested skill paths."""
-        skill_md_url = (
-            "https://gitlab.example.com/g/r/-/raw/main/a/b/c/SKILL.md"
-        )
+        skill_md_url = "https://gitlab.example.com/g/r/-/raw/main/a/b/c/SKILL.md"
 
         result = translate_gitlab_tree_api_url(skill_md_url)
 
@@ -234,8 +288,6 @@ class TestTranslateGitlabTreeApiUrl:
     def test_returns_none_for_non_gitlab_url(self):
         """Should return None for non-GitLab URLs."""
         assert (
-            translate_gitlab_tree_api_url(
-                "https://github.com/o/r/blob/main/skills/demo/SKILL.md"
-            )
+            translate_gitlab_tree_api_url("https://github.com/o/r/blob/main/skills/demo/SKILL.md")
             is None
         )

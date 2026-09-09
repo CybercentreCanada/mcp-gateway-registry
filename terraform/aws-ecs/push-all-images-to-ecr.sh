@@ -20,24 +20,24 @@ aws ecr get-login-password --region ${REGION} | docker login --username AWS --pa
 for IMAGE in "${IMAGES[@]}"; do
   REPO_NAME=$(echo $IMAGE | cut -d'/' -f2 | cut -d':' -f1)
   TAG=$(echo $IMAGE | cut -d':' -f2)
-  
+
   echo ""
   echo "========================================="
   echo "Processing: $IMAGE"
   echo "========================================="
-  
+
   echo "Creating ECR repository: ${REPO_NAME}..."
   aws ecr create-repository --repository-name ${REPO_NAME} --region ${REGION} 2>/dev/null || echo "Repository already exists"
-  
+
   echo "Pulling image (AMD64)..."
   docker pull --platform linux/amd64 ${IMAGE}
-  
+
   echo "Tagging for ECR..."
   docker tag ${IMAGE} ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO_NAME}:${TAG}
-  
+
   echo "Pushing to ECR..."
   docker push ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO_NAME}:${TAG}
-  
+
   echo "✅ Done: ${REPO_NAME}:${TAG}"
 done
 

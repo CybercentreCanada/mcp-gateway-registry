@@ -125,6 +125,26 @@ class TestGenerateVirtualServerBlocks:
         assert "error_page 403 = @forbidden_error" in result
 
     @pytest.mark.asyncio
+    async def test_location_normalised_to_trailing_slash(self, mock_virtual_server_repository):
+        """Issue #1501: the virtual-server location must render with a trailing
+        slash so nginx does a subtree prefix match (`/virtual/dev/`) instead of
+        hijacking any URL that merely starts with the path (`/virtual/dev` would
+        otherwise prefix-match `/virtual/devtools`)."""
+        vs = _make_vs_config(path="/virtual/dev", server_name="Dev")
+        mock_virtual_server_repository.list_enabled.return_value = [vs]
+
+        from registry.core.nginx_service import NginxConfigService
+
+        service = NginxConfigService()
+        result = await service._generate_virtual_server_blocks()
+
+        # The location directive is normalised to end with a slash ...
+        assert "location {{ROOT_PATH}}/virtual/dev/ {" in result
+        # ... and must NOT emit the bare-path form that prefix-matches
+        # /virtual/devtools, /virtual/development, etc.
+        assert "location {{ROOT_PATH}}/virtual/dev {" not in result
+
+    @pytest.mark.asyncio
     async def test_multiple_virtual_servers(self, mock_virtual_server_repository):
         """Test that multiple virtual servers produce multiple location blocks."""
         vs1 = _make_vs_config(path="/virtual/dev", server_name="Dev")
@@ -180,6 +200,39 @@ class TestGenerateVirtualBackendLocations:
         assert "resolver " not in result
 
     @pytest.mark.asyncio
+    async def test_preserves_nested_mcp_transport_path(self, mock_server_repository):
+        """A configured /mcp/... endpoint must not receive a second /mcp suffix."""
+        vs = _make_vs_config()
+        mock_server_repository.get.return_value = {
+            "proxy_pass_url": "https://insights.example.com/mcp/http",
+        }
+
+        from registry.core.nginx_service import NginxConfigService
+
+        service = NginxConfigService()
+        result = await service._generate_virtual_backend_locations([vs])
+
+        assert "proxy_pass https://insights.example.com/mcp/http;" in result
+        assert "/mcp/http/mcp" not in result
+
+    @pytest.mark.asyncio
+    async def test_explicit_mcp_endpoint_keeps_proxy_host(self, mock_server_repository):
+        """Explicit endpoint paths use the private proxy host for internal routing."""
+        vs = _make_vs_config()
+        mock_server_repository.get.return_value = {
+            "proxy_pass_url": "http://insights-service:8000",
+            "mcp_endpoint": "https://public.example.com/custom/mcp/http",
+        }
+
+        from registry.core.nginx_service import NginxConfigService
+
+        service = NginxConfigService()
+        result = await service._generate_virtual_backend_locations([vs])
+
+        assert 'set $vs_backend_github "http://insights-service:8000/custom/mcp/http"' in result
+        assert "public.example.com" not in result
+
+    @pytest.mark.asyncio
     async def test_credentials_not_forwarded_to_untrusted_backend(self, mock_server_repository):
         """The caller's credential must not be relayed to a registrant-controlled backend.
 
@@ -207,9 +260,37 @@ class TestGenerateVirtualBackendLocations:
         assert 'proxy_set_header Cookie "";' in result
 
     @pytest.mark.asyncio
-    async def test_bare_hostname_backend_uses_deferred_resolution(
-        self, mock_server_repository
-    ):
+    async def test_identity_headers_forwarded_via_http_vars(self, mock_server_repository):
+        """Caller identity is forwarded using $http_x_user/$http_x_username variables.
+
+        The Lua virtual_router sets X-User and X-Username as request headers
+        (ngx.req.set_header) before ngx.location.capture subrequests.  The
+        _vs_backend location block then forwards them to the upstream via
+        proxy_set_header using the $http_x_user/$http_x_username variables
+        (which read from incoming request headers, not auth_request_set vars).
+
+        This two-part approach is required because auth_request_set variables
+        ($auth_user) do not propagate into subrequest contexts.
+        """
+        vs = _make_vs_config()
+        mock_server_repository.get.return_value = {
+            "proxy_pass_url": "https://api.github.com",
+        }
+
+        from registry.core.nginx_service import NginxConfigService
+
+        service = NginxConfigService()
+        result = await service._generate_virtual_backend_locations([vs])
+
+        # Identity headers forwarded via $http_x_* (request header vars, set by Lua)
+        assert "proxy_set_header X-User $http_x_user;" in result
+        assert "proxy_set_header X-Username $http_x_username;" in result
+        # Must NOT use $auth_user (doesn't propagate to subrequests)
+        assert "proxy_set_header X-User $auth_user" not in result
+        assert "proxy_set_header X-Username $auth_username" not in result
+
+    @pytest.mark.asyncio
+    async def test_bare_hostname_backend_uses_deferred_resolution(self, mock_server_repository):
         """Bare hostnames defer DNS resolution so they cannot crash nginx at startup."""
         vs = _make_vs_config()
         # A docker-compose-style service name (no dot) is not resolvable in every
@@ -501,10 +582,7 @@ class TestIsHostResolvableAtStartup:
         """A bare service name with no dot is not safe to resolve at startup."""
         from registry.core.nginx_service import NginxConfigService
 
-        assert (
-            NginxConfigService._is_host_resolvable_at_startup("currenttime-server")
-            is False
-        )
+        assert NginxConfigService._is_host_resolvable_at_startup("currenttime-server") is False
 
     def test_empty_hostname_is_not_resolvable(self):
         """An empty hostname is treated as not safe."""

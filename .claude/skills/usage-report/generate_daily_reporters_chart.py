@@ -43,9 +43,10 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys
+
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
-import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -178,12 +179,8 @@ def _compute_daily_counts(
         by_day[d].add(rid)
         instance_days[rid].add(d)
 
-    persisted_events = {
-        rid for rid, n in instance_event_count.items() if n >= PERSIST_MIN_EVENTS
-    }
-    persisted_days = {
-        rid for rid, ds in instance_days.items() if len(ds) >= PERSIST_MIN_DAYS
-    }
+    persisted_events = {rid for rid, n in instance_event_count.items() if n >= PERSIST_MIN_EVENTS}
+    persisted_days = {rid for rid, ds in instance_days.items() if len(ds) >= PERSIST_MIN_DAYS}
 
     logger.info(
         f"Unique AWS customer instances: {len(instance_event_count)} "
@@ -234,15 +231,30 @@ def _generate_chart(
     p_days = [r["persisted_2days"] for r in daily]
 
     ax.plot(
-        dates, all_reporters, lw=2.2, marker="o", ms=3, color=ALL_COLOR,
+        dates,
+        all_reporters,
+        lw=2.2,
+        marker="o",
+        ms=3,
+        color=ALL_COLOR,
         label="All AWS reporters (incl. single-event installs)",
     )
     ax.plot(
-        dates, p_events, lw=2.5, marker="s", ms=3, color=EVT_COLOR,
+        dates,
+        p_events,
+        lw=2.5,
+        marker="s",
+        ms=3,
+        color=EVT_COLOR,
         label="Persisted: >= 2 events ever",
     )
     ax.plot(
-        dates, p_days, lw=2.0, marker="^", ms=3, color=DAY_COLOR,
+        dates,
+        p_days,
+        lw=2.0,
+        marker="^",
+        ms=3,
+        color=DAY_COLOR,
         label="Persisted: >= 2 distinct days (headline LTV rule)",
     )
     ax.set_title(CHART_TITLE, fontsize=12, fontweight="bold")

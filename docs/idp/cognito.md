@@ -24,6 +24,7 @@ The same set of variables is set across all three deployment modes; only the fil
 | App Client (web login) ID | `COGNITO_CLIENT_ID` | `cognito_client_id` | `cognito.clientId` |
 | App Client secret (web login, **secret**) | `COGNITO_CLIENT_SECRET` | `cognito_client_secret` | `cognito.clientSecret` |
 | Hosted UI domain (optional) | `COGNITO_DOMAIN` | `cognito_domain` | `cognito.domain` |
+| M2M client allowlist (optional) | `COGNITO_M2M_CLIENT_IDS` | `cognito_m2m_client_ids` | `cognito.m2mClientIds` |
 | AWS region of the User Pool | `AWS_REGION` | `AWS_REGION` (provider/region, injected automatically) | `cognito.region` |
 
 Note on the provider switch: Docker (`AUTH_PROVIDER`) and Helm (`authProvider.type`) take a provider-name string. The Terraform module has no `auth_provider` variable; you enable exactly one provider by setting its boolean `*_enabled` flag to true (leave the others false), and the module derives the `AUTH_PROVIDER` value for the containers. If you enable none, Keycloak is the default. So for Terraform, `cognito_enabled = true` is the only switch needed.
@@ -35,6 +36,27 @@ Note on the region: Cognito needs the AWS region to build the issuer and JWKS UR
 The "secret" row must be sourced from a secrets store in production (AWS Secrets Manager for Terraform, a Kubernetes Secret for Helm). Don't paste the client secret into `terraform.tfvars` or `values.yaml` checked into git.
 
 For full cross-surface parameter reference, see [docs/unified-parameter-reference.md](../unified-parameter-reference.md).
+
+### Machine-to-machine (M2M / agent) clients
+
+By default the auth-server only trusts access tokens from the **web login** client and the optional **IDE** client. To let an agent call the gateway with its own machine identity (a Cognito `client_credentials` token), you must allowlist its app-client id via `COGNITO_M2M_CLIENT_IDS` — otherwise the token is rejected at `/validate`. This is what enables Cognito **agent** callers, including per-agent rate limiting.
+
+Setup (per agent, i.e. "Pattern B — one M2M client per agent"):
+
+1. **Create a Cognito app client** for the agent with a secret, `client_credentials` enabled, and a resource-server scope (Cognito requires `client_credentials` clients to request at least one custom scope). The scope value itself does not drive authorization here (see step 3).
+2. **Allowlist the client id.** Add it to `COGNITO_M2M_CLIENT_IDS` (comma/space-separated). For many agents, set `COGNITO_M2M_CLIENT_IDS="*"` to accept **any** M2M (`client_credentials`, no-`username`) token in the pool without enumerating each — user/login tokens stay restricted to the web + IDE clients, so `*` cannot widen who may log in. Only use `*` when the pool is dedicated to the gateway.
+3. **Grant authorization via a group.** A Cognito M2M token carries no `cognito:groups`, so map the client id to registry groups by registering it in the M2M-clients store — the auth-server enriches the token's groups from there at validation time:
+
+   ```bash
+   uv run python api/registry_management.py --token-file .token --registry-url "$REG" \
+     m2m-client-create --client-id <AGENT_CLIENT_ID> --client-name my-agent \
+     --groups "public-mcp-users"
+   ```
+
+   The group's scope then grants server/tool access exactly as it does for a human user. (Do not use an admin group like `registry-admins` if you want rate limits to apply — admins bypass caller rate limits.)
+4. **Get a token** with `grant_type=client_credentials` from the pool's token endpoint (`https://<domain>.auth.<region>.amazoncognito.com/oauth2/token`) and call the gateway with it in the `X-Authorization: Bearer <token>` header.
+
+For an end-to-end walkthrough including per-agent rate limiting (create the group, add the client as a member, and watch it throttle with `caller_type=agent`), see [Rate Limiting Design](../design/rate-limiting.md).
 
 ## Mode 1: Docker Compose (BYO Cognito)
 
@@ -117,7 +139,7 @@ One Secrets Manager entry is created (`cognito_client_secret`) and the registry/
 Two separate URL lists on the App Client must be configured, and Cognito rejects any value not present in the matching list:
 
 - **Allowed callback URLs** — the auth-server sends `redirect_uri = <registry-external-url>/oauth2/callback/cognito` during login.
-- **Allowed sign-out URLs** — the auth-server sends `logout_uri = <registry-external-url>/login` during logout. This is easy to miss; if only the callback is registered, login works but logout fails with a Cognito error page (`Required String parameter 'redirect_uri' is not present` or a sign-out URL mismatch).
+- **Allowed sign-out URLs** — the auth-server sends `logout_uri = <registry-external-url>/logout` during logout (`/logout` renders the "Successfully Logged Out" confirmation screen, then auto-redirects to `/login`). This is easy to miss; if only the callback is registered, login works but logout fails with a Cognito error page (`error=Required+parameters+missing` / a sign-out URL mismatch). Cognito requires an EXACT match (no wildcards), so the exact `/logout` URL must be registered.
 
 The registry does NOT configure Cognito for you (it is bring-your-own), so this is a manual step.
 
@@ -134,13 +156,13 @@ When you use a custom domain (`enable_route53_dns = true`), you know the registr
 
 2. On the App Client, set:
    - **Allowed callback URLs:** `<that URL>/oauth2/callback/cognito`
-   - **Allowed sign-out URLs:** `<that URL>/login`
+   - **Allowed sign-out URLs:** `<that URL>/logout`
 
    **From the AWS console:**
    - Open the Cognito console, select your User Pool.
    - Go to **App integration** -> **App clients** -> select your app client.
    - Under **Hosted UI** (or **Login pages**), click **Edit**.
-   - Add the callback URL to **Allowed callback URLs** and the `/login` URL to **Allowed sign-out URLs** (keep any existing entries, e.g. the localhost ones for local testing), then **Save changes**.
+   - Add the callback URL to **Allowed callback URLs** and the `/logout` URL to **Allowed sign-out URLs** (keep any existing entries, e.g. the localhost ones for local testing), then **Save changes**.
 
    **From the CLI** (note: `update-user-pool-client` replaces the full lists, so include every URL you want to keep):
 
@@ -153,8 +175,8 @@ When you use a custom domain (`enable_route53_dns = true`), you know the registr
        "https://<your-registry-domain>/oauth2/callback/cognito" \
        "http://localhost:8888/oauth2/callback/cognito" \
      --logout-urls \
-       "https://<your-registry-domain>/login" \
-       "http://localhost:8888/login" \
+       "https://<your-registry-domain>/logout" \
+       "http://localhost:8888/logout" \
      --allowed-o-auth-flows code \
      --allowed-o-auth-scopes openid email profile aws.cognito.signin.user.admin \
      --allowed-o-auth-flows-user-pool-client \
@@ -342,9 +364,9 @@ A common cause on Terraform/ECS CloudFront-only deployments: a `terraform apply`
 
 ### Logout fails with a Cognito error page
 
-**Symptom:** Login works, but clicking logout lands on a Cognito error page (e.g. `Required String parameter 'redirect_uri' is not present`), with a URL like `.../error?...&logout_uri=https%3A%2F%2F<domain>%2Flogin`.
+**Symptom:** Login works, but clicking logout lands on a Cognito error page (e.g. `error=Required+parameters+missing`), with a URL like `.../error?...&client_id=<id>` (note the missing/rejected `logout_uri`).
 
-**Fix:** The App Client's **Allowed sign-out URLs** must include `<registry-external-url>/login` — this is a separate list from the callback URLs, and is easy to miss. The auth-server sends `logout_uri = <registry-external-url>/login` on logout; Cognito rejects it if it is not registered. Add it (see [Mode 2, Step 4](#step-4-register-the-callback-and-sign-out-urls-on-the-app-client-post-deployment)). The `logout_uri` echoed in the error page URL is the value Cognito rejected, not a separate problem.
+**Fix:** The App Client's **Allowed sign-out URLs** must include `<registry-external-url>/logout` — this is a separate list from the callback URLs, and is easy to miss. The auth-server sends `logout_uri = <registry-external-url>/logout` on logout (the `/logout` page shows the "Successfully Logged Out" confirmation, then redirects to `/login`); Cognito requires an exact match and rejects it if not registered. Add it (see [Mode 2, Step 4](#step-4-register-the-callback-and-sign-out-urls-on-the-app-client-post-deployment)). Unlike Keycloak (whose `post.logout.redirect.uris="+"` accepts any registered redirect URI, so `/logout` works with no extra config), Cognito has no wildcard — register the exact `/logout` URL.
 
 ### Empty groups after login
 

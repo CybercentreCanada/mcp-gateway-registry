@@ -51,7 +51,7 @@ def _mint_token(private_pem, issuer=ISSUER, expired=False, audience=None):
     return jwt.encode(claims, private_pem, algorithm="RS256")
 
 
-def _build_app(rsa_keypair, monkeypatch, audience=None, auth_disabled=False):
+def _build_app(rsa_keypair, monkeypatch, audience=None, auth_disabled=False, presence_only=False):
     """Build a minimal FastAPI app guarded by the middleware.
 
     The JWKS client is monkeypatched to return the test public key so no network
@@ -74,9 +74,10 @@ def _build_app(rsa_keypair, monkeypatch, audience=None, auth_disabled=False):
         realm=REALM,
         audience=audience,
         auth_disabled=auth_disabled,
+        presence_only=presence_only,
     )
 
-    if not auth_disabled:
+    if not auth_disabled and not presence_only:
 
         class _FakeSigningKey:
             key = public_key
@@ -200,5 +201,58 @@ def test_refuses_to_start_when_auth_disabled_and_bound_to_all_interfaces(monkeyp
 def test_auth_disabled_on_loopback_is_permitted(monkeypatch):
     """Disabling auth on loopback is allowed (trusted local sandbox)."""
     monkeypatch.setenv("AGENT_AUTH_DISABLED", "true")
+    app = FastAPI()
+    install_agent_auth(app, keycloak_url=KEYCLOAK_URL, realm=REALM, bind_host="127.0.0.1")
+
+
+def test_presence_only_accepts_any_nonempty_bearer(rsa_keypair, monkeypatch):
+    """Presence-only mode accepts an unverified bearer (test/demo passthrough)."""
+    app = _build_app(rsa_keypair, monkeypatch, presence_only=True)
+    client = TestClient(app)
+    response = client.post("/api/book", headers={"Authorization": "Bearer a2a-demo-anything"})
+    assert response.status_code == 200
+
+
+def test_presence_only_still_rejects_missing_bearer(rsa_keypair, monkeypatch):
+    """Presence-only still requires a bearer to be present (not fully open)."""
+    app = _build_app(rsa_keypair, monkeypatch, presence_only=True)
+    client = TestClient(app)
+    assert client.post("/api/book").status_code == 401
+    assert client.post("/api/book", headers={"Authorization": "Bearer "}).status_code == 401
+
+
+def test_presence_only_on_all_interfaces_refused_without_optin(monkeypatch):
+    """Presence-only is effectively unauthenticated, so binding to 0.0.0.0 is
+    refused unless the operator explicitly opts in."""
+    monkeypatch.setenv("AGENT_AUTH_PRESENCE_ONLY", "true")
+    monkeypatch.delenv("AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY", raising=False)
+    app = FastAPI()
+    with pytest.raises(AuthConfigurationError):
+        install_agent_auth(
+            app,
+            keycloak_url=KEYCLOAK_URL,
+            realm=REALM,
+            bind_host="0.0.0.0",  # nosec B104 - test asserts this is rejected
+        )
+
+
+def test_presence_only_on_all_interfaces_permitted_with_optin(monkeypatch):
+    """Explicit opt-in allows presence-only on 0.0.0.0 (throwaway gateway test)."""
+    monkeypatch.setenv("AGENT_AUTH_PRESENCE_ONLY", "true")
+    monkeypatch.setenv("AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY", "true")
+    app = FastAPI()
+    # Must not raise: operator has explicitly acknowledged the exposed test mode.
+    install_agent_auth(
+        app,
+        keycloak_url=KEYCLOAK_URL,
+        realm=REALM,
+        bind_host="0.0.0.0",  # nosec B104 - test asserts opt-in permits this
+    )
+
+
+def test_presence_only_on_loopback_is_permitted(monkeypatch):
+    """Presence-only on loopback needs no opt-in (not network-exposed)."""
+    monkeypatch.setenv("AGENT_AUTH_PRESENCE_ONLY", "true")
+    monkeypatch.delenv("AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY", raising=False)
     app = FastAPI()
     install_agent_auth(app, keycloak_url=KEYCLOAK_URL, realm=REALM, bind_host="127.0.0.1")

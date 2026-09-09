@@ -19,6 +19,7 @@ from motor.motor_asyncio import AsyncIOMotorCollection
 from pymongo.errors import DuplicateKeyError
 
 from ...exceptions import (
+    AssetIdConflictError,
     SkillAlreadyExistsError,
     SkillServiceError,
 )
@@ -31,7 +32,13 @@ from ...utils.url_normalize import (
 from ..interfaces import SkillRepositoryBase
 from ._identity_url_sidecar import (
     backfill_normalized_identity_url,
+    ensure_is_proxied_index,
     find_by_normalized_identity_url,
+)
+from ._unique_id_index import (
+    backfill_missing_id,
+    ensure_unique_id_index,
+    find_doc_by_id,
 )
 from .client import get_collection_name, get_documentdb_client
 
@@ -137,6 +144,10 @@ class DocumentDBSkillRepository(SkillRepositoryBase):
                 self._collection_name,
                 ENTITY_TYPE_SKILL,
             )
+            # Unique id index (#1276): backfill BEFORE building the unique
+            # partial index so the build never fails on legacy rows.
+            await backfill_missing_id(collection, self._collection_name)
+            await ensure_unique_id_index(collection, self._collection_name)
             return self._collection
 
     async def ensure_indexes(self) -> None:
@@ -177,6 +188,13 @@ class DocumentDBSkillRepository(SkillRepositoryBase):
         except Exception as e:
             logger.warning(f"Could not create indexes: {e}")
 
+        # Optional is_proxied index for the list_proxied() hot path. Runs AFTER
+        # _indexes_created is set and never raises (see ensure_is_proxied_index):
+        # DocumentDB may reject partialFilterExpression, and an exception here
+        # must NOT leave _indexes_created False (that would re-run every index on
+        # every skill op). Falls back to a plain index so the hot path stays fast.
+        await ensure_is_proxied_index(collection, self._collection_name)
+
     async def get(
         self,
         path: str,
@@ -188,6 +206,39 @@ class DocumentDBSkillRepository(SkillRepositoryBase):
         if doc:
             return _document_to_skill(doc)
         return None
+
+    async def list_proxied(self) -> list[dict[str, Any]]:
+        """Projected list of proxied skills for the nginx render hot path.
+
+        Skills have no native backend URL, so proxy_target_url is required (no
+        fallback field). Returns raw dicts (not SkillCard) so a bypass-written
+        invalid row can't crash the reload via model reconstruction.
+        """
+        projection = {
+            "is_proxied": 1,
+            "is_enabled": 1,
+            "proxy_target_url": 1,
+            "proxy_streaming": 1,
+            "custom_header_names": 1,
+            "custom_header_overridable_names": 1,
+            "custom_headers_encrypted": 1,
+            "proxy_resolved_ips": 1,
+            "proxy_target_host": 1,
+            "proxy_disabled_reason": 1,
+            "sync_metadata": 1,
+        }
+        try:
+            await self.ensure_indexes()
+            collection = await self._get_collection()
+            cursor = collection.find({"is_proxied": True}, projection)
+            rows = []
+            async for doc in cursor:
+                doc["path"] = doc.pop("_id")
+                rows.append(doc)
+            return rows
+        except Exception as e:
+            logger.error(f"Error listing proxied skills from DocumentDB: {e}", exc_info=True)
+            return []
 
     async def list_all(
         self,
@@ -239,12 +290,50 @@ class DocumentDBSkillRepository(SkillRepositoryBase):
                 logger.error(f"Failed to parse skill document: {e}")
         return skills
 
+    async def list_by_paths(
+        self,
+        paths: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """List skills whose _id is in the given set of paths.
+
+        Returns raw documents (not SkillCard objects) for metadata projection
+        use cases where the full Pydantic parse is not needed.
+
+        Args:
+            paths: Exact skill paths to fetch.
+
+        Returns:
+            Dictionary mapping skill path to raw skill document for found paths.
+        """
+        if not paths:
+            return {}
+
+        await self.ensure_indexes()
+        collection = await self._get_collection()
+        try:
+            cursor = collection.find({"_id": {"$in": paths}})
+            skills: dict[str, dict[str, Any]] = {}
+            async for doc in cursor:
+                path = doc.pop("_id")
+                doc["path"] = path
+                skills[path] = doc
+            logger.debug(
+                "DocumentDB READ: Retrieved %d of %d requested skills by path",
+                len(skills),
+                len(paths),
+            )
+            return skills
+        except Exception as e:
+            logger.error(f"Error listing skills by paths: {e}", exc_info=True)
+            return {}
+
     async def list_filtered(
         self,
         include_disabled: bool = False,
         tag: str | None = None,
         visibility: str | None = None,
         registry_name: str | None = None,
+        limit: int | None = None,
     ) -> list[SkillCard]:
         """List skills with database-level filtering."""
         await self.ensure_indexes()
@@ -266,6 +355,8 @@ class DocumentDBSkillRepository(SkillRepositoryBase):
 
         skills = []
         cursor = collection.find(query)
+        if limit is not None:
+            cursor = cursor.limit(limit)
         async for doc in cursor:
             try:
                 skills.append(_document_to_skill(doc))
@@ -286,12 +377,29 @@ class DocumentDBSkillRepository(SkillRepositoryBase):
             await collection.insert_one(doc)
             logger.info(f"Created skill: {skill.path}")
             return skill
-        except DuplicateKeyError:
+        except DuplicateKeyError as exc:
+            # Disambiguate id-collision from path/name-collision (#1276). An id
+            # collision here means two registrations raced past the pre-check.
+            key_pattern = (exc.details or {}).get("keyPattern", {})
+            if "id" in key_pattern:
+                raise AssetIdConflictError(
+                    asset_type="skill", asset_id=getattr(skill, "id", "")
+                ) from exc
             logger.error(f"Skill already exists: {skill.path}")
             raise SkillAlreadyExistsError(skill.name)
         except Exception as e:
             logger.error(f"Failed to create skill {skill.path}: {e}")
             raise SkillServiceError(f"Failed to create skill: {e}") from e
+
+    async def find_by_id(
+        self,
+        asset_id: str,
+    ) -> dict[str, Any] | None:
+        """Indexed lookup by ``id`` (#1276). Overrides the scanning default."""
+        if not asset_id:
+            return None
+        collection = await self._get_collection()
+        return await find_doc_by_id(collection, asset_id)
 
     async def update(
         self,

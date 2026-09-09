@@ -14,7 +14,10 @@ Sections (in order below):
   1. env: block — feature flags and IdP secrets via valueFrom. Includes
      PingFederate plain env vars (BASE_URL, EXTERNAL_URL, CLIENT_ID,
      M2M_CLIENT_ID, APPLICATION_ID_URI, GROUPS_CLAIM, ENABLED) and
-     valueFrom-sourced secrets (CLIENT_SECRET, M2M_CLIENT_SECRET).
+     valueFrom-sourced secrets (CLIENT_SECRET, M2M_CLIENT_SECRET). Also
+     RUM_SNIPPET_B64 and RUM_ALLOWED_HOSTS (feature #1471), rendered from
+     .Values.rumSnippetB64 / .Values.rumAllowedHosts only when non-empty;
+     token-bearing snippets come via extraEnvFrom.
   2. registry-app-log-config configmap
   3. registry-otel-config configmap
   4. registry-batch-config configmap
@@ -44,6 +47,23 @@ roles (RBAC, IRSA, etc.) can be attached to the same SA over time.
 {{- .Values.serviceAccount.name -}}
 {{- else -}}
 {{- .Values.app.name -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether the dedicated internal vend listener (nginx :8091, egressAuth.internalPort)
+must be exposed. Two INDEPENDENT features share this listener:
+  - the per-user egress-token vault (egressAuth.enabled), and
+  - the generic-proxy static upstream-header vend
+    (app.gatewayGenericProxyEnabled, /_egress_internal/generic-upstream-headers).
+Either one requires the Service port and its NetworkPolicy, so both the
+service.yaml port block and networkpolicy-egress-internal.yaml gate on this to
+stay in sync. Emits the string "true" when enabled, empty otherwise (use with
+`if`).
+*/}}
+{{- define "registry.internalVendListenerEnabled" -}}
+{{- if or .Values.egressAuth.enabled .Values.app.gatewayGenericProxyEnabled -}}
+true
 {{- end -}}
 {{- end -}}
 

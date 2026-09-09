@@ -94,6 +94,84 @@ def redact_server_backend_fields(
     return server_dict
 
 
+# Agent card backend-URL fields to strip for non-admins in with-gateway mode.
+# In A2A reverse-proxy mode the registrant's real backend is stored in
+# proxy_pass_url (the advertised ``url`` is the gateway address), so proxy_pass_url
+# is the internal field to hide -- mirroring the MCP-server redaction. Both the
+# snake_case and camelCase (by_alias dump) spellings are covered.
+_AGENT_BACKEND_URL_FIELDS: tuple[str, ...] = (
+    "proxy_pass_url",
+    "proxyPassUrl",
+)
+
+
+def redact_agent_backend_fields(
+    agent_dict: dict,
+) -> dict:
+    """Strip internal backend URL fields from an agent card dict in place.
+
+    Removes ``proxy_pass_url`` (both snake_case and camelCase spellings) so a
+    non-admin caller sees only the gateway-facing ``url``. Callers MUST gate this
+    behind :func:`should_redact_backend_urls`; this function performs no
+    authorization decision of its own. Mirrors
+    :func:`redact_server_backend_fields`.
+
+    Args:
+        agent_dict: An agent card dict to redact in place.
+
+    Returns:
+        The same dict, with backend URL fields removed.
+    """
+    for field in _AGENT_BACKEND_URL_FIELDS:
+        agent_dict.pop(field, None)
+    return agent_dict
+
+
+# Generic gateway-proxy backend origin, present on any ProxyableMixin entity
+# (skill / agent / custom entity). This is the internal URL the gateway forwards
+# to, distinct from the client-facing ``proxy_client_url``. Only admins (or
+# registry-only mode) may see it; the client path and ``is_proxied`` stay visible.
+_PROXY_BACKEND_URL_FIELDS: tuple[str, ...] = ("proxy_target_url",)
+
+
+def redact_proxy_backend_url(
+    item: Any,
+    user_context: dict | None,
+) -> Any:
+    """Strip the internal gateway proxy target for callers who must not see it.
+
+    Accepts either a Pydantic model (the attribute is set to None) or a dict
+    (the key is removed), so the same helper covers both the list-info models and
+    the dumped-dict read paths across skills, agents, and custom entities. The
+    derived ``proxy_client_url`` and ``is_proxied`` are left visible.
+
+    Self-gating: runs the :func:`should_redact_backend_urls` check itself and is a
+    no-op for admins and registry-only mode, so callers can apply it
+    unconditionally at the response boundary.
+
+    Args:
+        item: A Pydantic model instance or a dict, redacted in place.
+        user_context: Authenticated user context, or None if auth is absent.
+
+    Returns:
+        The same object, with ``proxy_target_url`` cleared/removed when redaction
+        applies.
+    """
+    if not should_redact_backend_urls(user_context):
+        return item
+    if isinstance(item, dict):
+        for field in _PROXY_BACKEND_URL_FIELDS:
+            item.pop(field, None)
+        return item
+    for field in _PROXY_BACKEND_URL_FIELDS:
+        if hasattr(item, field):
+            try:
+                setattr(item, field, None)
+            except (AttributeError, ValueError):
+                pass
+    return item
+
+
 async def user_can_access_server(
     path: str,
     server_name: str,

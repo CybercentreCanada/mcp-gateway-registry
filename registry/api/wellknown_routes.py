@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
@@ -9,6 +10,7 @@ from ..auth.oauth_metadata import (
     build_resource_documentation_url,
     derive_supported_scopes,
     enforce_https,
+    entra_forces_per_server_prm,
 )
 from ..core.config import settings
 from ..repositories.factory import get_registry_card_repository
@@ -19,6 +21,9 @@ from ..services.server_service import server_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Lock to prevent TOCTOU race in registry-card auto-initialization.
+_registry_card_init_lock = asyncio.Lock()
 
 
 # OAuth discovery metadata (RFC 8414 authorization-server and RFC 9728
@@ -60,12 +65,27 @@ async def _auto_initialize_registry_card():
     """
     Auto-initialize registry card from config defaults if it doesn't exist.
 
-    Returns the existing or newly created card.
+    Returns the existing or newly created card.  Uses double-checked locking
+    to prevent the TOCTOU race where concurrent coroutines within
+    the same worker both read None and both write.
+
+    Note: the lock is per-worker (asyncio.Lock is not cross-process). With
+    multiple uvicorn workers starting simultaneously, each may attempt one
+    write. The underlying ``replace_one(..., upsert=True)`` is idempotent,
+    so no data corruption occurs; the lock eliminates redundant writes
+    within a single worker's event loop (the common case under load).
     """
     repo = get_registry_card_repository()
     card = await repo.get()
+    if card is not None:
+        return card
 
-    if card is None:
+    # Slow path: card missing — serialize initialization under the lock.
+    async with _registry_card_init_lock:
+        # Re-read under lock; another coroutine may have initialized.
+        card = await repo.get()
+        if card is not None:
+            return card
         # Auto-initialize from config defaults
         import random
 
@@ -79,7 +99,7 @@ async def _auto_initialize_registry_card():
         else:
             adjectives = ["brave", "clever", "swift", "bright", "noble", "wise", "bold", "keen"]
             nouns = ["falcon", "dolphin", "tiger", "phoenix", "dragon", "wolf", "eagle", "lion"]
-            registry_name = f"{random.choice(adjectives)}-{random.choice(nouns)}-registry"
+            registry_name = f"{random.choice(adjectives)}-{random.choice(nouns)}-registry"  # nosec B311 - cosmetic display name, not security-sensitive
             logger.info(f"Generated random registry name: {registry_name}")
 
         # Use organization name from config (defaults to "ACME Inc.")
@@ -200,19 +220,39 @@ def server_needs_per_server_prm(egress_auth_mode: str | None) -> bool:
     origin). It applies to:
 
     - ``obo_exchange`` on any provider (the same-IdP exchange always logs the user
-      in at the gateway against a per-server resource), and
+      in at the gateway against a per-server resource),
     - ``oauth_user`` ONLY on Entra. The 3LO vault's ingress leg is a gateway login
       too, but lenient IdPs (Keycloak/Cognito) accept the gateway-wide root PRM's
       bare origin + OIDC scopes, which is how Keycloak 3LO works today. We must NOT
       route those through the per-server PRM, or we'd change that working path (and
       force an exact connection-URL match they don't need). Only Entra requires it.
+    - **every other server (including plain ``none``) ONLY on Entra** (issue #990).
+      A plain server has no egress mode, but a spec-compliant coding assistant
+      (Claude Code) still does RFC 8707 ingress OAuth against it, and Entra rejects
+      the bare-origin resource the gateway-wide PRM advertises (see below). So on
+      Entra, plain servers also need the per-server, connection-URL resource.
 
-    Everything else uses the gateway-wide PRM (unchanged behavior).
+    On non-Entra IdPs, everything except the two egress modes above uses the
+    gateway-wide PRM (unchanged behavior) -- lenient IdPs match the bare origin
+    fine. Entra is the only provider that forces a per-server resource for plain
+    servers, and the only one that incurs the per-connection-URL App ID URI
+    registration cost.
     """
     if egress_auth_mode == "obo_exchange":
         return True
     if egress_auth_mode == "oauth_user":
-        return (settings.auth_provider or "").lower() == "entra"
+        return entra_forces_per_server_prm(settings.auth_provider)
+    # issue #990: on Entra, EVERY server -- including plain
+    # (egress_auth_mode none) servers like airegistry-tools -- needs a per-server
+    # PRM, because the bare-origin global PRM's resource is unmatchable to an
+    # Entra App ID URI (trailing slash) at token exchange (AADSTS9010010). Only
+    # the exact per-server connection URL satisfies both Claude (RFC 9728 §3.3)
+    # and Entra. Requires each connection URL registered as an identifierUri.
+    # Non-Entra IdPs keep the lenient origin-based global PRM (unchanged).
+    # `entra_forces_per_server_prm` is the shared source of truth mirrored by the
+    # auth-server's `_server_advertises_per_server_prm` (keep the two in sync).
+    if entra_forces_per_server_prm(settings.auth_provider):
+        return True
     return False
 
 
@@ -288,15 +328,16 @@ def _normalize_prm_server_path(server_path: str) -> str:
 async def get_oauth_protected_resource_for_server(
     server_path: str,
 ) -> JSONResponse:
-    """Per-server RFC 9728 PRM for egress servers (path-aware discovery).
+    """Per-server RFC 9728 PRM (path-aware discovery).
 
     Spec-compliant MCP clients (Claude Code, etc.) try the path-suffixed
     well-known URL first, derived from the per-server connection URL. We serve a
     document only for servers that need it (see ``server_needs_per_server_prm``):
-    ``obo_exchange`` on any provider, and ``oauth_user`` on Entra only. Everything
-    else -- including Keycloak/Cognito 3LO, which works with the gateway-wide root
-    PRM -- 404s here so the client falls back to the global PRM (unchanged
-    behavior).
+    ``obo_exchange`` on any provider, ``oauth_user`` on Entra, and -- on Entra --
+    **every server including plain ones** (issue #990). Everything else --
+    including Keycloak/Cognito/Okta/Auth0 plain and 3LO servers, which work with
+    the gateway-wide root PRM -- 404s here so the client falls back to the global
+    PRM (unchanged behavior).
 
     The advertised ``resource`` is the **per-server connection URL** (e.g.
     ``https://gw/github/mcp``). This is the ONLY value that satisfies all three
@@ -308,15 +349,26 @@ async def get_oauth_protected_resource_for_server(
         wire, which Entra App ID URIs cannot match -- a path-qualified per-server
         URL is sent verbatim.
       - Entra: the sent ``resource`` must equal a registered App ID URI exactly.
-    The trade-off: each such server's per-server URL must be an App ID URI on the
-    gateway app (operator maintains the ``identifierUris`` list; see
-    GET /api/egress/obo-identifier-uris for the exact list to register). The
-    registry side is fully dynamic -- this is derived from the server entry, no
-    per-server env config. Lenient IdPs (Keycloak/Cognito) do not hit these
-    constraints; this per-server PRM is what makes Entra ingress login work.
+    The trade-off (Entra only): each such server's per-server URL must be an App
+    ID URI on the gateway app (operator maintains the ``identifierUris`` list;
+    see GET /api/egress/obo-identifier-uris for the exact list to register).
+    On Entra this applies to EVERY server (issue #990), not just the egress
+    modes. The registry side is fully dynamic -- derived from the server entry,
+    no per-server env config. Lenient IdPs (Keycloak/Cognito/Okta/Auth0) do not
+    hit these constraints; their plain servers keep using the gateway-wide PRM
+    and this per-server PRM is what makes Entra ingress login work.
     """
     normalized = _normalize_prm_server_path(server_path)
-    info = await server_service.get_server_info(normalized)
+    # Server lookup is inside a guard: a repository/backend error on this
+    # UNAUTHENTICATED endpoint must not surface as an unhandled 500 with a
+    # traceback. Fail closed to a generic 502 (logged for operators).
+    try:
+        info = await server_service.get_server_info(normalized)
+    except Exception:
+        logger.exception("Per-server PRM: server lookup failed for %s", normalized)
+        raise HTTPException(
+            status_code=502, detail="Could not build Protected Resource Metadata"
+        ) from None
     if not info or not server_needs_per_server_prm(info.get("egress_auth_mode")):
         # No per-server PRM for this server -> client falls back to the global PRM.
         raise HTTPException(status_code=404, detail="no per-server resource metadata")
@@ -349,7 +401,9 @@ async def get_oauth_protected_resource_for_server(
         logger.exception("Failed to build per-server PRM document")
         raise HTTPException(
             status_code=502,
-            detail=f"Could not build Protected Resource Metadata: {exc}",
+            # Do not reflect internal exception detail on unauthenticated
+            # endpoint; logged above for operators.
+            detail="Could not build Protected Resource Metadata",
         ) from exc
 
     return JSONResponse(content=document, headers=OAUTH_DISCOVERY_CACHE_HEADERS)

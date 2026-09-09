@@ -123,9 +123,7 @@ class TestMintResourceBoundToken:
         }
         if resource is not None:
             body["resource"] = resource
-        response = client.post(
-            "/internal/tokens", json=body, headers=_internal_auth_headers()
-        )
+        response = client.post("/internal/tokens", json=body, headers=_internal_auth_headers())
         return response, server_module.SECRET_KEY
 
     def test_user_token_has_token_kind_user(self, auth_env_vars):
@@ -136,6 +134,55 @@ class TestMintResourceBoundToken:
         assert claims["token_kind"] == "user"
         assert "resource_type" not in claims
         assert "resource_id" not in claims
+
+    def test_user_token_stamps_egress_user_from_session_subject(self, auth_env_vars):
+        # A session-backed mint stamps the session's OIDC sub as egress_user so
+        # the vend keys the vault on the SAME id the browser-consent path wrote.
+        # The token's `sub` stays the login username (unchanged).
+        from unittest.mock import AsyncMock
+        from unittest.mock import patch as _patch
+
+        from fastapi.testclient import TestClient
+
+        import auth_server.server as server_module
+
+        server_module.user_token_generation_counts.clear()
+        client = TestClient(server_module.app)
+        body = {
+            "user_context": {
+                "username": "alice",
+                "scopes": ["mcp-servers/read"],
+                "groups": ["mcp-registry-user"],
+                "auth_method": "oauth2",
+                "provider": "keycloak",
+                "session_id": "s1",
+            },
+            "requested_scopes": ["mcp-servers/read"],
+            "expires_in_hours": 1,
+            "description": "test",
+        }
+        session = {
+            "username": "alice",
+            "groups": ["mcp-registry-user"],
+            "subject": "oidc-sub-uuid",
+        }
+        with (
+            _patch("session_store.resolve_session", AsyncMock(return_value=session)),
+            _patch(
+                "auth_server.server.map_groups_to_scopes",
+                AsyncMock(return_value=["mcp-servers/read"]),
+            ),
+        ):
+            response = client.post("/internal/tokens", json=body, headers=_internal_auth_headers())
+        assert response.status_code == 200, response.text
+        claims = jwt.decode(
+            response.json()["access_token"],
+            server_module.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="mcp-registry",
+        )
+        assert claims["egress_user"] == "oidc-sub-uuid"
+        assert claims["sub"] == "alice"
 
     def test_resource_token_has_claims(self, auth_env_vars):
         response, secret = self._mint(
@@ -187,9 +234,7 @@ class TestLegacyTokenWarningScoping:
     triggers noise on every /validate call.
     """
 
-    def test_external_idp_token_does_not_log_legacy_warning(
-        self, auth_env_vars, caplog
-    ):
+    def test_external_idp_token_does_not_log_legacy_warning(self, auth_env_vars, caplog):
         from fastapi.testclient import TestClient
 
         import auth_server.server as server_module
@@ -286,12 +331,15 @@ class TestValidateEdgeEnforcement:
             resource_type="agent",
             resource_id="code-reviewer",
         )
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=self._make_provider(module),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=self._make_provider(module),
+            ),
         ):
             response = client.get(
                 "/validate",
@@ -312,12 +360,15 @@ class TestValidateEdgeEnforcement:
             resource_type="agent",
             resource_id="code-reviewer",
         )
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=self._make_provider(module),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=self._make_provider(module),
+            ),
         ):
             response = client.get(
                 "/validate",
@@ -344,12 +395,15 @@ class TestValidateEdgeEnforcement:
             resource_type="server",
             resource_id="test-server",
         )
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=self._make_provider(module),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=self._make_provider(module),
+            ),
         ):
             response = client.get(
                 "/validate",
@@ -370,12 +424,15 @@ class TestValidateEdgeEnforcement:
             resource_type="agent",
             resource_id="code-reviewer",
         )
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=self._make_provider(module),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=self._make_provider(module),
+            ),
         ):
             response = client.get(
                 "/validate",
@@ -385,8 +442,10 @@ class TestValidateEdgeEnforcement:
                 },
             )
         assert response.status_code == 403, response.text
-        assert "cannot access this endpoint" in response.json()["detail"].lower() or \
-            "bound" in response.json()["detail"].lower()
+        assert (
+            "cannot access this endpoint" in response.json()["detail"].lower()
+            or "bound" in response.json()["detail"].lower()
+        )
 
     def test_resource_token_on_auth_me_allowed(
         self, auth_env_vars, mock_scope_repository_with_data
@@ -400,12 +459,15 @@ class TestValidateEdgeEnforcement:
             resource_type="agent",
             resource_id="code-reviewer",
         )
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=self._make_provider(module),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=self._make_provider(module),
+            ),
         ):
             response = client.get(
                 "/validate",
@@ -429,12 +491,15 @@ class TestValidateEdgeEnforcement:
         # block and now user tokens are blocked too."
         client, secret, module = self._client_and_secret(auth_env_vars)
         token = _mint_self_signed(secret, token_kind="user")
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=self._make_provider(module),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=self._make_provider(module),
+            ),
         ):
             response = client.get(
                 "/validate",
@@ -454,12 +519,15 @@ class TestValidateEdgeEnforcement:
         # hard rather than silently accepting as a user token.
         client, secret, module = self._client_and_secret(auth_env_vars)
         token = _mint_self_signed(secret, token_kind=None)
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=self._make_provider(module),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=self._make_provider(module),
+            ),
         ):
             response = client.get(
                 "/validate",
@@ -503,12 +571,15 @@ class TestValidateEdgeEnforcement:
                 return {"provider_type": "cognito", "region": "us-east-1"}
 
         client = TestClient(server_module.app)
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=_ExternalProvider(),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=_ExternalProvider(),
+            ),
         ):
             response = client.get(
                 "/validate",
@@ -530,12 +601,15 @@ class TestValidateEdgeEnforcement:
         # but we don't want to rely on that as the only boundary).
         client, secret, module = self._client_and_secret(auth_env_vars)
         token = _mint_self_signed(secret, token_kind=bad_kind)
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=self._make_provider(module),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=self._make_provider(module),
+            ),
         ):
             response = client.get(
                 "/validate",
@@ -559,12 +633,15 @@ class TestValidateEdgeEnforcement:
             resource_type="agent",
             resource_id="   ",
         )
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=self._make_provider(module),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=self._make_provider(module),
+            ),
         ):
             response = client.get(
                 "/validate",
@@ -593,20 +670,21 @@ class TestValidateEdgeEnforcement:
             resource_type="agent",
             resource_id="code-reviewer",
         )
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=self._make_provider(module),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=self._make_provider(module),
+            ),
         ):
             response = client.get(
                 "/validate",
                 headers={
                     "Authorization": f"Bearer {token}",
-                    "X-Original-URL": (
-                        "https://example.com/api/auth/me/../tokens/generate"
-                    ),
+                    "X-Original-URL": ("https://example.com/api/auth/me/../tokens/generate"),
                 },
             )
         assert response.status_code == 403, response.text
@@ -624,12 +702,15 @@ class TestValidateEdgeEnforcement:
             resource_type="agent",
             resource_id="code-reviewer",
         )
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=self._make_provider(module),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=self._make_provider(module),
+            ),
         ):
             response = client.get(
                 "/validate",
@@ -650,12 +731,15 @@ class TestValidateEdgeEnforcement:
             resource_type="agent",
             resource_id="secret-agent",
         )
-        with patch(
-            "auth_server.server.get_scope_repository",
-            return_value=mock_scope_repository_with_data,
-        ), patch(
-            "auth_server.server.get_auth_provider",
-            return_value=self._make_provider(module),
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.get_auth_provider",
+                return_value=self._make_provider(module),
+            ),
         ):
             response = client.get(
                 "/validate",
@@ -669,9 +753,7 @@ class TestValidateEdgeEnforcement:
         assert "secret-agent" not in body
         assert "other-agent" not in body
 
-    def test_resource_token_with_traversal_rejected_at_mint(
-        self, auth_env_vars
-    ):
+    def test_resource_token_with_traversal_rejected_at_mint(self, auth_env_vars):
         # The Pydantic validator should refuse to mint
         # a token whose resource.id contains '..' or '%'.
         from fastapi.testclient import TestClient
@@ -692,9 +774,7 @@ class TestValidateEdgeEnforcement:
             "expires_in_hours": 1,
             "resource": {"type": "server", "id": "../admin"},
         }
-        response = client.post(
-            "/internal/tokens", json=body, headers=_internal_auth_headers()
-        )
+        response = client.post("/internal/tokens", json=body, headers=_internal_auth_headers())
         assert response.status_code == 422, response.text
 
     def test_non_string_resource_id_rejected_at_mint(self, auth_env_vars):
@@ -721,9 +801,7 @@ class TestValidateEdgeEnforcement:
         }
         for bad in (123, True, ["foo"], {"nested": "foo"}):
             body = {**base_body, "resource": {"type": "server", "id": bad}}
-            response = client.post(
-                "/internal/tokens", json=body, headers=_internal_auth_headers()
-            )
+            response = client.post("/internal/tokens", json=body, headers=_internal_auth_headers())
             assert response.status_code == 422, (bad, response.text)
 
     @pytest.mark.parametrize(
@@ -736,9 +814,7 @@ class TestValidateEdgeEnforcement:
             "foo\x7fbar",  # DEL
         ],
     )
-    def test_resource_id_with_control_characters_rejected_at_mint(
-        self, auth_env_vars, bad_id
-    ):
+    def test_resource_id_with_control_characters_rejected_at_mint(self, auth_env_vars, bad_id):
         # Control characters in resource ids could cause truncation in
         # C-backed URL parsers downstream. Reject at the Pydantic model.
         from fastapi.testclient import TestClient
@@ -759,7 +835,5 @@ class TestValidateEdgeEnforcement:
             "expires_in_hours": 1,
             "resource": {"type": "server", "id": bad_id},
         }
-        response = client.post(
-            "/internal/tokens", json=body, headers=_internal_auth_headers()
-        )
+        response = client.post("/internal/tokens", json=body, headers=_internal_auth_headers())
         assert response.status_code == 422, response.text

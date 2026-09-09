@@ -24,8 +24,10 @@ from registry.egress_auth import oauth_engine
 from registry.egress_auth.providers import resolve_provider
 from registry.egress_auth.schemas import (
     EgressConnection,
+    OAuthProviderConfig,
     OAuthState,
     StoredToken,
+    TokenEndpointAuthStyle,
 )
 from registry.egress_auth.state_codec import InvalidState, decode_state, encode_state
 from registry.secrets.interfaces import SecretStoreBase
@@ -203,7 +205,20 @@ class EgressAuthService:
     # -- helpers -------------------------------------------------------------- #
 
     @staticmethod
-    def _client_secret(egress_oauth: dict) -> str:
+    def _client_secret(
+        cfg: OAuthProviderConfig,
+        egress_oauth: dict,
+    ) -> str | None:
+        """Decrypt the operator client_secret, or None for a public client.
+
+        A provider with ``token_endpoint_auth_style == NONE`` (RFC 7591
+        ``token_endpoint_auth_method=none``, e.g. a DCR-minted public client)
+        has no secret by design; the engine sends only ``client_id`` + PKCE.
+        Confidential styles still fail closed on a missing/undecryptable secret.
+        """
+        if cfg.token_endpoint_auth_style == TokenEndpointAuthStyle.NONE:
+            return None
+
         from registry.utils.credential_encryption import decrypt_credential
 
         enc = egress_oauth.get("client_secret_encrypted")
@@ -223,6 +238,19 @@ class EgressAuthService:
             return True
         remaining = (exp - datetime.now(UTC)).total_seconds()
         return remaining <= self._skew
+
+    @staticmethod
+    def _is_expired(expires_at_iso: str) -> bool:
+        """True if the ISO8601 timestamp is in the past (fail-closed on malformed).
+
+        Used by the ``pat`` sink check: an unparsable or past ``expires_at`` is
+        treated as expired so a stale/garbled credential is never vended.
+        """
+        try:
+            exp = datetime.fromisoformat(expires_at_iso)
+        except ValueError:
+            return True
+        return (exp - datetime.now(UTC)).total_seconds() <= 0
 
     # -- consent -------------------------------------------------------------- #
 
@@ -268,6 +296,8 @@ class EgressAuthService:
         egress_oauth: dict,
         current_user_id: str | None = None,
         current_auth_method: str | None = None,
+        *,
+        bound_upstreams: list[str],
     ) -> EgressConnection:
         """Verify state, exchange the code, and store the token.
 
@@ -306,10 +336,16 @@ class EgressAuthService:
         token = await oauth_engine.exchange_code(
             cfg=cfg,
             client_id=egress_oauth["client_id"],
-            client_secret=self._client_secret(egress_oauth),
+            client_secret=self._client_secret(cfg, egress_oauth),
             code=code,
             redirect_uri=self._callback_url,
             pkce_verifier=state.pkce_verifier,
+        )
+        # Bind the credential to the destinations + token endpoint registered at
+        # consent time; the vend refuses any other upstream / token URL (see
+        # egress_auth.upstream_binding and get_valid_token).
+        token = token.model_copy(
+            update={"bound_upstreams": list(bound_upstreams), "bound_token_url": cfg.token_url}
         )
         await self._store.put_token(
             state.auth_method, state.user_id, state.provider, state.server_path, token
@@ -331,6 +367,8 @@ class EgressAuthService:
         user_id: str,
         server_path: str,
         egress_oauth: dict,
+        *,
+        requested_upstream: str,
     ) -> str | None:
         """Vend a valid access token, refreshing if near expiry. None on miss.
 
@@ -355,6 +393,37 @@ class EgressAuthService:
                 server_path,
             )
             return None
+
+        # destination binding: the credential may only travel to an upstream that
+        # was registered when it was stored. A repointed proxy_pass_url (or a
+        # newly added version) is a MISS -> re-consent, never a vend to the new
+        # host. Legacy entries carry an empty set and re-consent once.
+        if requested_upstream not in set(token.bound_upstreams):
+            logger.warning(
+                "egress vend: upstream binding mismatch for %s/%s (requested %r not in "
+                "bound set); refusing to vend -- forcing re-consent",
+                provider,
+                server_path,
+                requested_upstream,
+            )
+            return None
+
+        # token-endpoint binding: a repointed custom_token_url would send the
+        # refresh_token + client_secret to a new endpoint on the next refresh.
+        # Reject before that refresh can fire. None (pat/legacy) skips the check.
+        if token.bound_token_url is not None:
+            try:
+                live_token_url = resolve_provider(egress_oauth).token_url
+            except Exception:  # nosec B110 - provider misconfig -> fail closed below
+                live_token_url = None
+            if live_token_url != token.bound_token_url:
+                logger.warning(
+                    "egress vend: token-endpoint binding mismatch for %s/%s; refusing "
+                    "to vend -- forcing re-consent",
+                    provider,
+                    server_path,
+                )
+                return None
 
         if self._is_near_expiry(token):
             token = await self._refresh_single_flight(
@@ -399,7 +468,7 @@ class EgressAuthService:
                 new = await oauth_engine.refresh_token(
                     cfg=cfg,
                     client_id=egress_oauth["client_id"],
-                    client_secret=self._client_secret(egress_oauth),
+                    client_secret=self._client_secret(cfg, egress_oauth),
                     refresh_token_value=current.refresh_token,
                 )
             except oauth_engine.DeadRefreshTokenError:
@@ -413,6 +482,12 @@ class EgressAuthService:
                     server_path,
                 )
                 return None
+            new = new.model_copy(
+                update={
+                    "bound_upstreams": current.bound_upstreams,
+                    "bound_token_url": current.bound_token_url,
+                }
+            )
             await self._store.put_token(auth_method, user_id, provider, server_path, new)
             return new
         finally:
@@ -450,4 +525,86 @@ class EgressAuthService:
         server_path: str,
     ) -> None:
         """Delete the vault entry (idempotent). Provider-side revoke is a future follow-on."""
+        await self._store.delete_token(auth_method, user_id, provider, server_path)
+
+    # -- pat (static per-user PAT / API-key) ---------------------------------- #
+
+    async def get_pat(
+        self,
+        auth_method: str,
+        user_id: str,
+        provider: str,
+        server_path: str,
+        *,
+        requested_upstream: str,
+    ) -> str | None:
+        """Vend a stored per-user PAT, enforcing the bounded lifetime. None on miss.
+
+        Deliberately does NOT touch the OAuth refresh/lease machinery: a PAT is
+        static (no refresh token) and stores ``client_id=None`` (which the OAuth
+        vend path would reject). A PAT with no ``expires_at`` or one in the past is
+        treated as a MISS so a stale credential can never linger.
+
+        Args:
+            auth_method: The caller's canonical per-user auth method.
+            user_id: The vault principal (verified egress user).
+            provider: The provider namespace key for this server.
+            server_path: The slash-prefixed server path.
+
+        Returns:
+            The stored PAT string, or None on a miss (never submitted, expired,
+            or a non-per-user caller).
+        """
+        if not is_per_user_auth_method(auth_method):
+            return None
+        token = await self._store.get_token(auth_method, user_id, provider, server_path)
+        if token is None:
+            return None
+        # Enforce the bounded lifetime at the sink: an expired PAT is a MISS.
+        if not token.expires_at or self._is_expired(token.expires_at):
+            return None
+        if requested_upstream not in set(token.bound_upstreams):
+            logger.warning(
+                "egress vend: pat upstream binding mismatch for %s/%s; treating as a miss",
+                provider,
+                server_path,
+            )
+            return None
+        return token.access_token
+
+    async def set_pat(
+        self,
+        auth_method: str,
+        user_id: str,
+        provider: str,
+        server_path: str,
+        token: StoredToken,
+    ) -> None:
+        """Store a per-user PAT (thin wrapper over the SecretStore)."""
+        await self._store.put_token(auth_method, user_id, provider, server_path, token)
+
+    async def get_pat_status(
+        self,
+        auth_method: str,
+        user_id: str,
+        provider: str,
+        server_path: str,
+    ) -> StoredToken | None:
+        """Read the stored PAT entry for status (presence + expiry only).
+
+        The caller MUST NOT return ``access_token`` from this to any API
+        consumer; the PAT is write-only. Returns None on a miss.
+        """
+        if not is_per_user_auth_method(auth_method):
+            return None
+        return await self._store.get_token(auth_method, user_id, provider, server_path)
+
+    async def delete_pat(
+        self,
+        auth_method: str,
+        user_id: str,
+        provider: str,
+        server_path: str,
+    ) -> None:
+        """Delete the caller's stored PAT (idempotent)."""
         await self._store.delete_token(auth_method, user_id, provider, server_path)

@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Literal
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from pydantic import (
     BaseModel,
@@ -20,6 +20,12 @@ from pydantic import (
     Field,
     field_validator,
     model_validator,
+)
+
+from registry.schemas.proxy_mixin import (
+    ProxyableMixin,
+    assert_proxy_target_resolvable,
+    egress_guard_validator,
 )
 
 # Configure logging with basicConfig
@@ -347,7 +353,7 @@ class Skill(BaseModel):
         return v.strip()
 
 
-class AgentCard(BaseModel):
+class AgentCard(ProxyableMixin):
     """
     A2A Agent Card - machine-readable agent profile.
 
@@ -363,9 +369,14 @@ class AgentCard(BaseModel):
     """
 
     # Unique identifier
-    id: UUID = Field(
-        default_factory=uuid4,
-        description="Unique identifier (UUID) for this agent",
+    id: str = Field(
+        default_factory=lambda: str(uuid4()),
+        min_length=1,
+        max_length=512,
+        description=(
+            "Unique identifier for this agent. Any non-empty string "
+            "(UUID, ARN, URN, ...). Auto-generated UUID if not supplied."
+        ),
     )
 
     # Required A2A fields
@@ -569,6 +580,18 @@ class AgentCard(BaseModel):
         alias="supportedProtocol",
         description="Agent protocol: 'a2a' for A2A protocol agents, 'other' for non-A2A agents",
     )
+    proxy_pass_url: str | None = Field(
+        default=None,
+        alias="proxyPassUrl",
+        description=(
+            "Internal backend URL the gateway proxies to when A2A reverse-proxy "
+            "mode is enabled. Set at registration time from the registrant's URL; "
+            "``url`` is then rewritten to the gateway-facing address so discovery "
+            "routes callers through the gateway. Mirrors the MCP-server "
+            "proxy_pass_url split and is redacted from non-admin read responses "
+            "(see registry/services/visibility.py)."
+        ),
+    )
     registry_name: str = Field(
         default="local",
         description="Registry this agent belongs to (federation origin).",
@@ -686,6 +709,32 @@ class AgentCard(BaseModel):
         """Validate group-restricted visibility has allowed groups."""
         if self.visibility == "group-restricted" and not self.allowed_groups:
             raise ValueError("Group-restricted visibility requires at least one allowed group")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_proxy_target(
+        self,
+    ) -> "AgentCard":
+        """If proxied, require a resolvable backend (proxy_target_url or the agent url).
+
+        The mixin's is_proxied/proxy_target_url are registry extensions and
+        serialize as snake_case (not A2A-spec fields; populate_by_name accepts
+        both on input). Passes only the scalars the check reads (this runs on
+        every construction, including reads that rebuild the model from a doc).
+        """
+        assert_proxy_target_resolvable(
+            "a2a_agent",
+            {
+                "is_proxied": self.is_proxied,
+                "proxy_target_url": self.proxy_target_url,
+                "proxy_disabled_reason": self.proxy_disabled_reason,
+                "url": self.url,
+            },
+            read_safe=True,  # storage model: reconstructed on read, log-not-raise
+        )
+        # Derive the read-only client-facing path from type + path (self-healing).
+        # Agent path may be None pre-generation; populate handles that (clears).
+        self.populate_proxy_client_url("a2a_agent")
         return self
 
 
@@ -852,19 +901,35 @@ class AgentInfo(BaseModel):
         default_factory=dict,
         description="Additional metadata key-value pairs",
     )
+    # Gateway-proxy opt-in (mirrored from the AgentCard so listings show the badge
+    # and the edit modal populates the toggle). proxy_client_url is the read-only,
+    # server-derived client path; proxy_target_url is the backend/origin.
+    is_proxied: bool = Field(
+        default=False,
+        description="When true, the agent is served through the gateway generic proxy.",
+    )
+    proxy_target_url: str | None = Field(
+        default=None,
+        description="Backend/origin HTTP(S) URL the gateway forwards to (falls back to the agent url).",
+    )
+    proxy_client_url: str | None = Field(
+        default=None,
+        description="Read-only, auto-derived client-facing gateway path (/{prefix}/a2a_agent/{name}).",
+    )
 
     model_config = ConfigDict(
         populate_by_name=True  # Allow both snake_case and camelCase on input
     )
 
 
-class AgentRegistrationRequest(BaseModel):
+class AgentRegistrationRequest(ProxyableMixin):
     """
     API request model for agent registration.
 
     This model is used for the agent registration API endpoint and converts
     form-style inputs (e.g., comma-separated tags) into the proper types.
     Accepts both snake_case (Python) and camelCase (A2A spec JSON) field names.
+    Inherits the ``is_proxied`` / ``proxy_target_url`` opt-in from ProxyableMixin.
     """
 
     name: str = Field(
@@ -885,6 +950,14 @@ class AgentRegistrationRequest(BaseModel):
         None,
         description="Registry path (optional - auto-generated if not provided)",
     )
+
+    id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=512,
+        description="Optional caller-supplied id (UUID, ARN, ...). Auto-generated if omitted.",
+    )
+
     protocol_version: str = Field(
         default="1.0",
         alias="protocolVersion",
@@ -1018,6 +1091,17 @@ class AgentRegistrationRequest(BaseModel):
             return None
         return _validate_path_format(v)
 
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, v: str | None) -> str | None:
+        # Delegate to the shared validator so the id rules (non-empty, length,
+        # safe charset) never drift from the server route's resolve_asset_id.
+        from ..services._asset_id import validate_asset_id
+
+        if v is None:
+            return v
+        return validate_asset_id(v)
+
     @field_validator("protocol_version")
     @classmethod
     def _validate_protocol_version_request(
@@ -1066,6 +1150,12 @@ class AgentRegistrationRequest(BaseModel):
         if v not in valid_values:
             raise ValueError(f"trust_level must be one of: {', '.join(valid_values)}")
         return v
+
+    @field_validator("proxy_target_url")
+    @classmethod
+    def _guard_proxy_target_url_request(cls, v: str | None) -> str | None:
+        """API-edge SSRF fast-fail (the mixin no longer raises; storage is read-safe)."""
+        return egress_guard_validator(v)
 
     @field_validator("allowed_groups", mode="before")
     @classmethod
@@ -1160,6 +1250,23 @@ class AgentCardPatch(BaseModel):
     license: str | None = None
     status: str | None = None
     external_tags: list[str] | str | None = None
+    # Gateway-proxy opt-in (patchable subset of ProxyableMixin; the bookkeeping
+    # fields proxy_resolved_ips/proxy_target_host/proxy_disabled_reason are
+    # server-managed and intentionally NOT patchable). extra="forbid" would 422
+    # these without an explicit declaration.
+    is_proxied: bool | None = Field(default=None, alias="isProxied")
+    proxy_target_url: str | None = Field(default=None, alias="proxyTargetUrl")
+
+    @field_validator("proxy_target_url")
+    @classmethod
+    def _validate_proxy_target_url_patch(cls, v: str | None) -> str | None:
+        """Run the SSRF egress guard on a patched target (same as the mixin)."""
+        if v is None:
+            return v
+        from registry.schemas.proxy_mixin import _assert_egress_allowed
+
+        _assert_egress_allowed(v)
+        return v
 
     @model_validator(mode="after")
     def _reject_registrant_only(self) -> "AgentCardPatch":
@@ -1176,7 +1283,7 @@ class BatchItemOp(str, Enum):
 
     register = "register"
     patch = "patch"
-    replace = "replace"
+    replace = "replace"  # type: ignore[assignment]  # enum member shadows str.replace
     delete = "delete"
 
 

@@ -4,7 +4,6 @@ import pytest
 
 from registry.schemas.agent_models import AgentRegistrationRequest
 
-
 MINIMAL_AGENT_KWARGS = {
     "name": "test-agent",
     "url": "https://example.com",

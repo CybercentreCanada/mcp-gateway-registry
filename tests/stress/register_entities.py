@@ -250,7 +250,10 @@ async def _register_one(
                 if ops.entity_type == "servers":
                     await client.post(
                         f"{base_url.rstrip('/')}/api/servers/toggle",
-                        headers={**auth_header, "Content-Type": "application/x-www-form-urlencoded"},
+                        headers={
+                            **auth_header,
+                            "Content-Type": "application/x-www-form-urlencoded",
+                        },
                         content=f"path={path}&new_state=true",
                     )
                 elif ops.entity_type == "agents":
@@ -263,7 +266,7 @@ async def _register_one(
                 elif ops.entity_type == "skills":
                     skill_path = path.lstrip("/")
                     if skill_path.startswith("skills/"):
-                        skill_path = skill_path[len("skills/"):]
+                        skill_path = skill_path[len("skills/") :]
                     await client.post(
                         f"{base_url.rstrip('/')}/api/skills/{skill_path}/toggle",
                         headers={**auth_header, "Content-Type": "application/json"},

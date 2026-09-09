@@ -64,6 +64,22 @@ class TestFlattenServerAccess:
         access = [{"server": "a", "methods": ["all"]}]
         assert _flatten_server_access(access) == [{"server": "a", "methods": ["all"]}]
 
+    def test_direct_agent_rule_kept(self):
+        """A per-agent rule ``{"agent": ..., "actions": [...]}`` survives flatten
+        (mirrors the direct server rule) so validate_a2a_agent_access can read it."""
+        access = [{"agent": "/travel", "actions": ["invoke_agent"]}]
+        assert _flatten_server_access(access) == [{"agent": "/travel", "actions": ["invoke_agent"]}]
+
+    def test_mixed_server_and_agent_rules_kept(self):
+        access = [
+            {"server": "a", "methods": ["all"]},
+            {"agent": "*", "actions": ["invoke_agent"]},
+        ]
+        assert _flatten_server_access(access) == [
+            {"server": "a", "methods": ["all"]},
+            {"agent": "*", "actions": ["invoke_agent"]},
+        ]
+
     def test_skips_non_server_entries(self):
         access = [{"agent_permissions": ["x"]}, {"server": "a"}]
         assert _flatten_server_access(access) == [{"server": "a"}]
@@ -189,6 +205,3 @@ class TestGetGroupMappingsBulk:
     async def test_error_returns_empty(self, repo, mock_collection):
         mock_collection.find.side_effect = Exception("db error")
         assert await repo.get_group_mappings_bulk(["g-a"]) == []
-
-
-

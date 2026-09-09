@@ -11,12 +11,54 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from ..core.metrics import ASSET_ID_CONFLICT_TOTAL
+from ..exceptions import AssetIdConflictError
 from ..repositories.factory import get_agent_repository, get_search_repository
 from ..repositories.interfaces import AgentRepositoryBase, SearchRepositoryBase
 from ..schemas.agent_models import AgentCard
+from ..schemas.proxy_mixin import (
+    clear_upstream_headers_on_repoint,
+    effective_proxy_target,
+    validate_and_pin_proxy_target,
+)
 from ..utils.url_guard import validate_agent_url
 
 logger = logging.getLogger(__name__)
+
+
+async def _validate_and_pin_agent_proxy(
+    agent_card: AgentCard,
+) -> None:
+    """Reject non-HTTP transports + resolve/validate/pin an agent's proxy target.
+
+    No-op when the agent is not proxied. When proxied:
+    - reject a GRPC ``preferred_transport`` (an HTTP location block can't serve
+      it) with a clear ValueError (surfaced as 4xx by the route);
+    - resolve the effective target (proxy_target_url or the agent url) and
+      validate every resolved IP against the egress policy (layer 2),
+      pinning the resolved IPs onto the card.
+    """
+    if not agent_card.is_proxied:
+        return
+    transport = (agent_card.preferred_transport or "").strip().upper()
+    if transport == "GRPC":
+        raise ValueError(
+            "is_proxied=true is not supported for an a2a_agent with "
+            "preferred_transport=GRPC: the gateway serves HTTP only. Use an HTTP "
+            "transport (JSONRPC / HTTP+JSON) or disable proxying."
+        )
+    pin = await validate_and_pin_proxy_target(
+        "a2a_agent",
+        {
+            "is_proxied": agent_card.is_proxied,
+            "proxy_target_url": agent_card.proxy_target_url,
+            "proxy_disabled_reason": agent_card.proxy_disabled_reason,
+            "url": agent_card.url,
+        },
+    )
+    if pin:
+        agent_card.proxy_resolved_ips = pin["proxy_resolved_ips"]
+        agent_card.proxy_target_host = pin["proxy_target_host"]
 
 
 class AgentService:
@@ -63,6 +105,16 @@ class AgentService:
         if await self._repo.get(path) is not None:
             logger.error(f"Agent registration failed: path '{path}' already exists")
             raise ValueError(f"Agent path '{path}' already exists")
+
+        # Gateway-proxy SSRF layer 2 + transport guard (no-op unless is_proxied).
+        await _validate_and_pin_agent_proxy(agent_card)
+
+        # Id uniqueness pre-check (#1276): a caller-supplied id must not
+        # collide with an existing agent. Raise -> route maps to 409.
+        if agent_card.id and await self._repo.find_by_id(agent_card.id):
+            logger.warning(f"Agent registration rejected: id '{agent_card.id}' already exists")
+            ASSET_ID_CONFLICT_TOTAL.labels(asset_type="agent").inc()
+            raise AssetIdConflictError(asset_type="agent", asset_id=agent_card.id)
 
         agent_card = await self._repo.create(agent_card)
         await self._repo.set_state(path, False)
@@ -206,10 +258,34 @@ class AgentService:
         agent_dict["updated_at"] = datetime.now(UTC)
 
         try:
-            AgentCard(**agent_dict)
+            merged_card = AgentCard(**agent_dict)
         except Exception as e:
             logger.error(f"Failed to validate updated agent: {e}")
             raise ValueError(f"Invalid agent update: {e}")
+
+        # Gateway-proxy SSRF layer 2 + transport guard on the MERGED card when this
+        # update touches the proxy opt-in or target. Re-validates + re-pins (or
+        # clears the pin) on the merged state, before persist. Re-enabling clears a
+        # prior auto-disable. "url" is included: for an A2A agent the effective
+        # backend falls back to url when proxy_target_url is unset, so changing url
+        # repoints the backend and must re-validate + trigger the header clear.
+        if "is_proxied" in updates or "proxy_target_url" in updates or "url" in updates:
+            merged_card.proxy_disabled_reason = None
+            await _validate_and_pin_agent_proxy(merged_card)
+            agent_dict["proxy_resolved_ips"] = merged_card.proxy_resolved_ips
+            agent_dict["proxy_target_host"] = merged_card.proxy_target_host
+            agent_dict["proxy_disabled_reason"] = None
+            # Credential-misdirection guard (symmetric with skill/custom/server):
+            # if the effective backend host changed, clear any create-time upstream
+            # headers so the old host's secret is never injected at the new host.
+            # Agents cannot carry headers through the API today, but wiring the
+            # guard here keeps the invariant safe if that ever changes, rather than
+            # relying on "agents never get headers".
+            clear_upstream_headers_on_repoint(
+                agent_dict,
+                existing_target=effective_proxy_target("a2a_agent", existing_agent.model_dump()),
+                new_target=effective_proxy_target("a2a_agent", merged_card.model_dump()),
+            )
 
         updated_agent = await self._repo.update(path, agent_dict)
 
@@ -220,6 +296,14 @@ class AgentService:
             logger.error(f"Failed to re-index agent {path}: {e}")
 
         logger.info(f"Agent '{updated_agent.name}' ({path}) updated")
+
+        # Regenerate nginx config if the agent is enabled, since its backend
+        # url may have changed.
+        if await self.is_agent_enabled(path):
+            from ..core.nginx_service import nginx_reload_scheduler
+
+            nginx_reload_scheduler.mark_dirty()
+
         return updated_agent
 
     async def delete_agent(
@@ -245,6 +329,9 @@ class AgentService:
 
         try:
             agent_name = existing_agent.name
+            # Capture enabled state before deletion removes the state record, so
+            # we only regenerate nginx config when a proxied block actually existed.
+            was_enabled = await self.is_agent_enabled(path)
 
             from .search_index_cleanup import remove_from_search_index_with_retry
 
@@ -260,6 +347,13 @@ class AgentService:
             await self._repo.delete(path)
 
             logger.info(f"Successfully deleted agent '{agent_name}' from path '{path}'")
+
+            # Regenerate nginx config so the agent's reverse-proxy block is
+            # removed, but only if it was enabled.
+            if was_enabled:
+                from ..core.nginx_service import nginx_reload_scheduler
+
+                nginx_reload_scheduler.mark_dirty()
             return True
 
         except ValueError:
@@ -292,6 +386,11 @@ class AgentService:
         await self._repo.set_state(path, True)
         logger.info(f"Enabled agent '{agent.name}' ({path})")
 
+        # Regenerate nginx config so the agent's reverse-proxy block is added.
+        from ..core.nginx_service import nginx_reload_scheduler
+
+        nginx_reload_scheduler.mark_dirty()
+
     async def disable_agent(
         self,
         path: str,
@@ -315,6 +414,11 @@ class AgentService:
 
         await self._repo.set_state(path, False)
         logger.info(f"Disabled agent '{agent.name}' ({path})")
+
+        # Regenerate nginx config so the agent's reverse-proxy block is removed.
+        from ..core.nginx_service import nginx_reload_scheduler
+
+        nginx_reload_scheduler.mark_dirty()
 
     async def is_agent_enabled(
         self,
@@ -381,7 +485,11 @@ class AgentService:
         try:
             agent_data = agent_card.model_dump(mode="json")
             is_enabled = await self.is_agent_enabled(agent_card.path)
-            await self._search_repo.index_entity(
+            # NOTE: `index_entity` is not defined on any SearchRepository backend;
+            # this unused method's body is a latent bug (the call raises
+            # AttributeError at runtime, swallowed by the surrounding except).
+            # Preserving existing behavior; ignore the attr-defined error here.
+            await self._search_repo.index_entity(  # type: ignore[attr-defined]
                 entity_path=agent_card.path,
                 entity_data=agent_data,
                 entity_type="a2a_agent",

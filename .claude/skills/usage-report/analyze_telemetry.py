@@ -153,9 +153,7 @@ def _compute_stickiness(
     one_day_wonders = [inst for inst in non_internal if inst["age_days"] == 0]
     total_non_internal = len(non_internal)
     one_day_wonder_pct = (
-        round(100.0 * len(one_day_wonders) / total_non_internal, 1)
-        if total_non_internal
-        else 0.0
+        round(100.0 * len(one_day_wonders) / total_non_internal, 1) if total_non_internal else 0.0
     )
     # Lifetime buckets (cumulative thresholds): for each threshold, what
     # share of customer instances have an age_days >= that threshold? These
@@ -167,9 +165,7 @@ def _compute_stickiness(
         for threshold in lifetime_thresholds
     }
     lifetime_bucket_pct = {
-        threshold: (
-            round(100.0 * count / total_non_internal, 1) if total_non_internal else 0.0
-        )
+        threshold: (round(100.0 * count / total_non_internal, 1) if total_non_internal else 0.0)
         for threshold, count in lifetime_bucket_counts.items()
     }
     longest = max(non_internal, key=lambda x: x["age_days"]) if non_internal else None
@@ -383,9 +379,7 @@ def _build_cloud_detection_method_breakdown_table(
     lines = []
     lines.append("## Cloud Detection Method")
     lines.append("")
-    lines.append(
-        f"Unique instances grouped by `cloud_detection_method`. Total instances: {total}."
-    )
+    lines.append(f"Unique instances grouped by `cloud_detection_method`. Total instances: {total}.")
     lines.append("")
     lines.append("| Detection Method | Unique Instances | % of Fleet |")
     lines.append("|------------------|------------------|------------|")
@@ -938,7 +932,7 @@ def _compute_internal_installs(
     """
     internal = [inst for inst in instances if inst.get("internal_only_deployment")]
 
-    by_type: dict[str, int] = {t: 0 for t in INTERNAL_DEPLOYMENT_TYPES}
+    by_type: dict[str, int] = dict.fromkeys(INTERNAL_DEPLOYMENT_TYPES, 0)
     for inst in internal:
         dtype = (inst.get("internal_deployment_type") or "").strip().lower()
         if dtype not in by_type:
@@ -959,7 +953,7 @@ def _compute_internal_installs(
         dtype = (inst.get("internal_deployment_type") or "other").strip().lower()
         if dtype not in INTERNAL_DEPLOYMENT_TYPES:
             dtype = "other"
-        bucket = timeseries.setdefault(month, {t: 0 for t in INTERNAL_DEPLOYMENT_TYPES})
+        bucket = timeseries.setdefault(month, dict.fromkeys(INTERNAL_DEPLOYMENT_TYPES, 0))
         bucket[dtype] += 1
 
     return {
@@ -996,12 +990,8 @@ def _build_internal_installs_md(
     lines.append("")
 
     # Summary sentence + per-type breakdown
-    type_summary = ", ".join(
-        f"{by_type.get(t, 0)} {t}" for t in INTERNAL_DEPLOYMENT_TYPES
-    )
-    lines.append(
-        f"We had **{total}** internal install(s) in this window ({type_summary})."
-    )
+    type_summary = ", ".join(f"{by_type.get(t, 0)} {t}" for t in INTERNAL_DEPLOYMENT_TYPES)
+    lines.append(f"We had **{total}** internal install(s) in this window ({type_summary}).")
     lines.append("")
     lines.append("| Internal Deployment Type | Installs |")
     lines.append("|--------------------------|----------|")
@@ -1014,9 +1004,7 @@ def _build_internal_installs_md(
     lines.append("### Internal Installs Over Time")
     lines.append("")
     if not timeseries:
-        lines.append(
-            f"_No internal installs recorded yet. Data begins with release {since}._"
-        )
+        lines.append(f"_No internal installs recorded yet. Data begins with release {since}._")
     else:
         header_types = " | ".join(t.capitalize() for t in INTERNAL_DEPLOYMENT_TYPES)
         divider = " | ".join("---" for _ in INTERNAL_DEPLOYMENT_TYPES)

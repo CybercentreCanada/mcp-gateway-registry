@@ -178,6 +178,79 @@ health_check_total = _meter.create_counter(
 
 
 # =============================================================================
+# Rate limiting (issue #295)
+#
+# Bounded labels only: axis (caller/target), entity_type (small allowlist),
+# window_seconds (distinct configured windows), backend/op. NEVER the subject
+# name (user/client/server/tool) -- that is unbounded. Per-entity-name
+# attribution lives in the WARNING log and the /api/rate-limits/status endpoint.
+# =============================================================================
+
+rate_limit_throttled_total = _meter.create_counter(
+    name="mcpgw_rate_limit_throttled_total",
+    description="Times an axis entity was throttled (a gate denied a request)",
+    unit="1",
+)
+
+rate_limit_checks_total = _meter.create_counter(
+    name="mcpgw_rate_limit_checks_total",
+    description="Total rate-limit gate checks (denominator for a throttle rate)",
+    unit="1",
+)
+
+rate_limit_errors_total = _meter.create_counter(
+    name="mcpgw_rate_limit_errors_total",
+    description="Rate-limit backend errors (fail-open events)",
+    unit="1",
+)
+
+rate_limit_backend_duration_ms = _meter.create_histogram(
+    name="mcpgw_rate_limit_backend_duration",
+    description="Per-op latency of the rate-limit counter-store round trip",
+    unit="ms",
+)
+
+rate_limit_quarantine_denied_total = _meter.create_counter(
+    name="mcpgw_rate_limit_quarantine_denied_total",
+    description="Requests dropped because a caller or target is quarantined (kill-switch)",
+    unit="1",
+)
+
+
+def _quarantine_members_callback(options: Any) -> Any:
+    """ObservableGauge: current member count of each reserved quarantine group.
+
+    Runs on the metrics-export cycle (NOT the request path). Each replica reports
+    the same DB-backed ``count_documents`` per reserved group, so the gauge is
+    correct across replicas. Bounded labels (only the fixed group name).
+    """
+    try:
+        from registry.rate_limiting.memberships_repository import (
+            get_shared_memberships_repo,
+        )
+        from registry.rate_limiting.models import (
+            QUARANTINE_CALLER_GROUP,
+            QUARANTINE_TARGET_GROUP,
+        )
+
+        repo = get_shared_memberships_repo()
+        for group in (QUARANTINE_CALLER_GROUP, QUARANTINE_TARGET_GROUP):
+            count = repo.count_group_members_cached(group)
+            yield metrics.Observation(count, {"group": group})
+    except Exception as exc:  # pragma: no cover - defensive; never break export
+        logger.debug(f"quarantine_members callback failed: {exc}")
+        return
+
+
+_meter.create_observable_gauge(
+    name="mcpgw_rate_limit_quarantine_members",
+    callbacks=[_quarantine_members_callback],
+    description="Current members in each rate-limit quarantine (kill-switch) group",
+    unit="1",
+)
+
+
+# =============================================================================
 # Path-3 in-process metrics
 #
 # Migrated from ``prometheus_client.Counter`` / ``Gauge`` declarations across
@@ -223,6 +296,40 @@ _registration_status_rejected_counter = _meter.create_counter(
     unit="1",
 )
 registration_status_rejected_total = _CounterAdapter(_registration_status_rejected_counter)
+
+
+# Caller-supplied asset id metrics (#1276). Labels: asset_type (server|agent|skill).
+_asset_id_supplied_counter = _meter.create_counter(
+    name="registry_asset_id_supplied_total",
+    description="Registrations where a caller-supplied asset id was honored",
+    unit="1",
+)
+registry_asset_id_supplied_total = _CounterAdapter(_asset_id_supplied_counter)
+
+_asset_id_conflict_counter = _meter.create_counter(
+    name="registry_asset_id_conflict_total",
+    description="Asset registrations rejected due to an id collision (409)",
+    unit="1",
+)
+registry_asset_id_conflict_total = _CounterAdapter(_asset_id_conflict_counter)
+
+_asset_id_federation_conflict_counter = _meter.create_counter(
+    name="registry_asset_id_federation_conflict_total",
+    description="Federated assets skipped due to a local id collision",
+    unit="1",
+)
+registry_asset_id_federation_conflict_total = _CounterAdapter(_asset_id_federation_conflict_counter)
+
+_asset_id_index_build_failed_counter = _meter.create_counter(
+    name="registry_asset_id_index_build_failed_total",
+    description=(
+        "Unique id index build failures. When this is non-zero the registry is "
+        "running WITHOUT the DB-level uniqueness guarantee and relies on the racy "
+        "service-layer pre-check; alert on it."
+    ),
+    unit="1",
+)
+registry_asset_id_index_build_failed_total = _CounterAdapter(_asset_id_index_build_failed_counter)
 
 
 # Deployment mode info (registry/core/metrics.py:19)
@@ -274,6 +381,91 @@ _nginx_config_writes_counter = _meter.create_counter(
     unit="1",
 )
 nginx_config_writes_total = _CounterAdapter(_nginx_config_writes_counter)
+
+# Generic-proxy blocks dropped at render (invalid target / SSRF-denied / location
+# collision). A non-zero value means one or more proxied entities did NOT get a
+# route this render — surfaced as a metric because the drop is a WARNING log
+# otherwise easy to miss on a busy replica. Label `reason`: invalid | collision.
+_gateway_generic_blocks_dropped_counter = _meter.create_counter(
+    name="mcpgw_registry_gateway_generic_blocks_dropped_total",
+    description="Generic-proxy nginx blocks dropped at render (invalid target or location collision)",
+    unit="1",
+)
+gateway_generic_blocks_dropped_total = _CounterAdapter(_gateway_generic_blocks_dropped_counter)
+
+
+# Egress-policy verification gauge. 1 = the startup egress self-check found a
+# cloud metadata IP reachable (network egress policy NOT enforced; the generic
+# proxy feature has been disabled for this process). 0 = verified/clean or the
+# check was opted out. A permanent 1 is the operator's signal that an enabled
+# generic-proxy feature is running without its required DNS-rebind defense.
+# Backed by an ObservableGauge over a module-local value that the auth-server
+# self-check sets via the _EgressUnverifiedGauge adapter's .set().
+
+
+class _EgressUnverifiedGauge:
+    """Minimal settable-gauge shim: .set(v) stores; an ObservableGauge emits it."""
+
+    def __init__(self) -> None:
+        self._value: int = 0
+
+    def set(self, value: int) -> None:  # noqa: A003 - mirroring prometheus_client API
+        self._value = int(value)
+
+    def _observe(self, _options: Any) -> Any:
+        yield metrics.Observation(self._value, {})
+
+
+gateway_egress_policy_unverified = _EgressUnverifiedGauge()
+
+_meter.create_observable_gauge(
+    name="mcpgw_registry_gateway_egress_policy_unverified",
+    callbacks=[gateway_egress_policy_unverified._observe],
+    description=(
+        "1 if the generic-proxy egress self-check found a metadata IP reachable "
+        "(policy unverified; feature disabled for this process), else 0"
+    ),
+    unit="1",
+)
+
+
+def _recommended_config_callback(options: Any) -> Any:
+    """ObservableGauge: 1 when a recommended-but-optional setting is NOT set, else 0.
+
+    Runs on the metrics-export cycle (NOT the request path). Reads the current
+    settings each cycle so the gauge self-corrects once an operator configures the
+    setting -- no manual reset. Only recommendations that APPLY to this deployment
+    are emitted (an unused feature is never nagged). Labels are bounded (a fixed,
+    code-defined recommendation list), so cardinality is safe. Lazy imports avoid
+    a startup circular import (settings -> meters).
+    """
+    try:
+        from registry.core.config import settings
+        from registry.core.recommended_config import evaluate_recommendations
+
+        for rec in evaluate_recommendations(settings):
+            yield metrics.Observation(
+                0 if rec["configured"] else 1,
+                {
+                    "setting": rec["id"],
+                    "component": rec["component"],
+                    "severity": rec["severity"],
+                },
+            )
+    except Exception as exc:  # pragma: no cover - defensive; never break export
+        logger.debug("recommended_config callback failed: %s", exc)
+        return
+
+
+_meter.create_observable_gauge(
+    name="mcpgw_registry_recommended_config_not_set",
+    callbacks=[_recommended_config_callback],
+    description=(
+        "1 when a recommended-but-optional setting that applies to this deployment "
+        "is not configured (an active operator nudge), else 0. Labeled by setting."
+    ),
+    unit="1",
+)
 
 
 # Mode-blocked requests (registry/core/metrics.py:43)
@@ -343,6 +535,14 @@ _embedding_removal_failures_counter = _meter.create_counter(
     unit="1",
 )
 embedding_removal_failures_total = _CounterAdapter(_embedding_removal_failures_counter)
+
+# Embeddings IdP token refresh metrics (issue #1415)
+_embeddings_idp_token_refresh_counter = _meter.create_counter(
+    name="mcpgw_registry_embeddings_idp_token_refresh_total",
+    description="Embeddings IdP token refresh attempts labeled by result",
+    unit="1",
+)
+embeddings_idp_token_refresh_total = _CounterAdapter(_embeddings_idp_token_refresh_counter)
 
 
 # Cloud detection (registry/core/metrics.py:87)

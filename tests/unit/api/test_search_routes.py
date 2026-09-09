@@ -1830,6 +1830,13 @@ class TestSemanticSearchCustomEntities:
         self, mock_http_request, mock_search_repo, regular_user_context
     ):
         # regular_user_context: username="regular_user", groups=["registry-users-lob1"]
+        # the type gate runs before per-record visibility, so grant the list
+        # scope here to exercise the per-record filter (the type-gate denial is
+        # covered separately below).
+        regular_user_context = {
+            **regular_user_context,
+            "ui_permissions": {"list_prompt_template_entity": ["all"]},
+        }
         mock_search_repo.search = AsyncMock(
             return_value={
                 "servers": [],
@@ -1893,4 +1900,76 @@ class TestSemanticSearchCustomEntities:
         )
 
         assert {c.name for c in response.custom} == {"Tagged"}
+        assert response.total_custom == 1
+
+    @pytest.mark.asyncio
+    async def test_type_gate_hides_disallowed_type_even_public(
+        self, mock_http_request, mock_search_repo, regular_user_context
+    ):
+        """a non-admin without list_<type>_entity sees NO records of that type,
+        not even public ones — the type-level gate runs before per-record
+        visibility. Only the type the caller can list survives.
+        """
+
+        def _rec(entity_type: str, name: str) -> dict[str, Any]:
+            r = _custom_record(f"/{entity_type}/{name}", name, "public")
+            r["entity_type"] = entity_type
+            return r
+
+        mock_search_repo.search = AsyncMock(
+            return_value={
+                "servers": [],
+                "tools": [],
+                "agents": [],
+                "custom": [
+                    _rec("prompt_template", "AllowedPublic"),
+                    _rec("secret_type", "HiddenPublic"),
+                ],
+            }
+        )
+        ctx = {
+            **regular_user_context,
+            "ui_permissions": {"list_prompt_template_entity": ["all"]},
+        }
+        request = SemanticSearchRequest(query="x")
+
+        response = await semantic_search(mock_http_request, request, ctx, mock_search_repo)
+
+        # secret_type is dropped by the type gate despite being public.
+        assert {c.name for c in response.custom} == {"AllowedPublic"}
+        assert response.total_custom == 1
+
+    @pytest.mark.asyncio
+    async def test_record_scoped_grant_surfaces_only_granted_record(
+        self, mock_http_request, mock_search_repo, regular_user_context
+    ):
+        """A grant for ONE record path must not surface sibling PUBLIC records.
+
+        Regression guard for the whole_type_cache short-circuit: a record-scoped
+        list_<type>_entity grant is not whole-type, so each hit must be checked
+        against its own path. Granting /prompt_template/a must return only "A",
+        never the public "B"/"C" of the same type.
+        """
+        ctx = {
+            **regular_user_context,
+            "ui_permissions": {"list_prompt_template_entity": ["/prompt_template/a"]},
+        }
+        mock_search_repo.search = AsyncMock(
+            return_value={
+                "servers": [],
+                "tools": [],
+                "agents": [],
+                "custom": [
+                    _custom_record("/prompt_template/a", "A", "public"),
+                    _custom_record("/prompt_template/b", "B", "public"),
+                    _custom_record("/prompt_template/c", "C", "public"),
+                ],
+            }
+        )
+        request = SemanticSearchRequest(query="prompt")
+
+        response = await semantic_search(mock_http_request, request, ctx, mock_search_repo)
+
+        # Only the granted record surfaces; public siblings stay hidden.
+        assert {c.name for c in response.custom} == {"A"}
         assert response.total_custom == 1

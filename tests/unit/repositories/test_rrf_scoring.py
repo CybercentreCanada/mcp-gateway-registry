@@ -224,49 +224,59 @@ class TestNormalizeScores:
 
     def test_two_results(self):
         """Two results kept when fewer than max_results even if below floor."""
-        result = _normalize_scores([
-            (_make_doc("top"), 0.033),
-            (_make_doc("bot"), 0.016),
-        ], max_results=10)
+        result = _normalize_scores(
+            [
+                (_make_doc("top"), 0.033),
+                (_make_doc("bot"), 0.016),
+            ],
+            max_results=10,
+        )
         assert result[0][1] == 1.0
         assert len(result) == 2
 
     def test_preserves_order(self):
         """Normalization preserves descending order."""
-        result = _normalize_scores([
-            (_make_doc("a"), 0.033),
-            (_make_doc("b"), 0.025),
-            (_make_doc("c"), 0.020),
-            (_make_doc("d"), 0.016),
-        ])
+        result = _normalize_scores(
+            [
+                (_make_doc("a"), 0.033),
+                (_make_doc("b"), 0.025),
+                (_make_doc("c"), 0.020),
+                (_make_doc("d"), 0.016),
+            ]
+        )
         scores = [s for _, s in result]
         assert scores == sorted(scores, reverse=True)
 
     def test_filters_below_floor_when_enough_results(self):
         """Results below floor are excluded when enough remain above it."""
-        result = _normalize_scores([
-            (_make_doc(f"d{i}"), 0.03 - i * 0.001) for i in range(20)
-        ], max_results=5)
+        result = _normalize_scores(
+            [(_make_doc(f"d{i}"), 0.03 - i * 0.001) for i in range(20)], max_results=5
+        )
         for _, score in result:
             assert SCORE_DISPLAY_FLOOR <= score <= 1.0
         assert len(result) < 20
 
     def test_keeps_below_floor_when_too_few(self):
         """Results below floor are kept when dropping would leave fewer than max_results."""
-        result = _normalize_scores([
-            (_make_doc("top"), 0.033),
-            (_make_doc("mid"), 0.020),
-            (_make_doc("bot"), 0.016),
-        ], max_results=10)
+        result = _normalize_scores(
+            [
+                (_make_doc("top"), 0.033),
+                (_make_doc("mid"), 0.020),
+                (_make_doc("bot"), 0.016),
+            ],
+            max_results=10,
+        )
         assert len(result) == 3
 
     def test_equal_scores_all_get_one(self):
         """If all scores are equal, all get 1.0."""
-        result = _normalize_scores([
-            (_make_doc("a"), 0.02),
-            (_make_doc("b"), 0.02),
-            (_make_doc("c"), 0.02),
-        ])
+        result = _normalize_scores(
+            [
+                (_make_doc("a"), 0.02),
+                (_make_doc("b"), 0.02),
+                (_make_doc("c"), 0.02),
+            ]
+        )
         for _, score in result:
             assert score == 1.0
 
@@ -295,9 +305,7 @@ class TestScoreToolRelevance:
 
     def test_multiple_token_match(self):
         """Multiple tokens matching gives higher score."""
-        score_one = _score_tool_relevance(
-            "search_docs", "Search documentation", ["search"]
-        )
+        score_one = _score_tool_relevance("search_docs", "Search documentation", ["search"])
         score_both = _score_tool_relevance(
             "search_docs", "Search documentation", ["search", "docs"]
         )

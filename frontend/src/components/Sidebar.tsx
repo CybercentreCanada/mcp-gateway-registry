@@ -106,17 +106,19 @@ const fetchAdminTokens = async () => {
   setLoading(true);
   setError('');
   try {
+    // Omit expires_in_hours so the server applies the configured default
+    // lifetime (MCP_TOKEN_DEFAULT_TTL_HOURS). Hardcoding a value here breaks
+    // when an operator lowers the max below it. Issue #1477.
     const requestData = {
       description: 'Generated via sidebar',
-      expires_in_hours: 8,
     };
-    
+
     const response = await axios.post('/api/tokens/generate', requestData, {
       headers: {
         'Content-Type': 'application/json',
       },
     });
-    
+
     if (response.data.success) {
       setTokenData(response.data);
       setShowTokenModal(true);
@@ -174,7 +176,7 @@ const fetchAdminTokens = async () => {
               <ArrowLeftIcon className="h-4 w-4" />
               <span>Back to Dashboard</span>
             </Link>
-            
+
             <Link
               to="/generate-token"
               className="flex items-center space-x-3 px-3 py-2 rounded-lg text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-purple-500 bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300"
@@ -216,7 +218,7 @@ const fetchAdminTokens = async () => {
                     <span className="ml-1">({user.provider})</span>
                   )}
                 </div>
-                
+
                 {/* Scopes toggle */}
                 {!user.is_admin && user.scopes && user.scopes.length > 0 && (
                   <div>
@@ -231,7 +233,7 @@ const fetchAdminTokens = async () => {
                         <ChevronDownIcon className="h-3 w-3" />
                       )}
                     </button>
-                    
+
                     {showScopes && (
                       <div className="mt-2 space-y-2 max-h-32 overflow-y-auto">
                         {user.scopes.map((scope) => (
@@ -357,7 +359,7 @@ const fetchAdminTokens = async () => {
               <FunnelIcon className="h-4 w-4 text-gray-600 dark:text-gray-400" />
               <h3 className="text-sm font-medium text-gray-900 dark:text-white">Filter Services</h3>
             </div>
-            
+
             <div className="space-y-2">
               {filters.map((filter) => (
                 <button
@@ -518,7 +520,7 @@ const fetchAdminTokens = async () => {
               <ChartBarIcon className="h-5 w-5 text-gray-500" />
               <h3 className="text-sm font-medium text-gray-900 dark:text-white">Statistics</h3>
             </div>
-            
+
             <div className="grid grid-cols-2 gap-3">
               <div className="text-center p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
                 <div className="text-xl font-semibold text-gray-900 dark:text-white">{stats.total}</div>
@@ -592,7 +594,7 @@ const fetchAdminTokens = async () => {
                       </button>
                     </div>
                   </Transition.Child>
-                  
+
                   <div className="flex grow flex-col gap-y-5 overflow-y-auto bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700">
                     {sidebarContent}
                   </div>
@@ -685,6 +687,25 @@ const fetchAdminTokens = async () => {
                         </button>
                       </div>
 
+                      {/* Human-readable lifetime, derived from the response's
+                          expires_in (seconds). The lifetime is operator-
+                          configurable (MCP_TOKEN_DEFAULT_TTL_HOURS), so read it
+                          from the response rather than hardcoding a value. */}
+                      {typeof tokenData?.tokens?.expires_in === 'number' && (
+                        <p className="text-sm text-gray-600 dark:text-gray-300">
+                          This token expires in{' '}
+                          <span className="font-medium">
+                            {(() => {
+                              const secs = tokenData.tokens.expires_in;
+                              const hrs = secs / 3600;
+                              const rounded = Math.round(hrs * 100) / 100;
+                              return `${rounded} hour${rounded === 1 ? '' : 's'}`;
+                            })()}
+                          </span>{' '}
+                          ({tokenData.tokens.expires_in} seconds).
+                        </p>
+                      )}
+
                       {/* Token Data Display */}
                       <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-4 max-h-96 overflow-y-auto">
                         <pre className="text-xs text-gray-800 dark:text-gray-200 whitespace-pre-wrap break-all">
@@ -713,4 +734,4 @@ const fetchAdminTokens = async () => {
   );
 };
 
-export default Sidebar; 
+export default Sidebar;

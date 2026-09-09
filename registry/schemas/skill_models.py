@@ -19,7 +19,7 @@ from typing import (
     Any,
     Literal,
 )
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from pydantic import (
     BaseModel,
@@ -27,6 +27,13 @@ from pydantic import (
     Field,
     HttpUrl,
     field_validator,
+    model_validator,
+)
+
+from registry.schemas.proxy_mixin import (
+    ProxyableMixin,
+    assert_proxy_target_resolvable,
+    egress_guard_validator,
 )
 
 # Configure logging
@@ -132,15 +139,25 @@ class ContentIntegrity(BaseModel):
     )
 
 
-class SkillCard(BaseModel):
-    """Full skill profile following Agent Skills specification."""
+class SkillCard(ProxyableMixin):
+    """Full skill profile following Agent Skills specification.
+
+    Inherits the ``is_proxied`` / ``proxy_target_url`` opt-in from ProxyableMixin.
+    A skill has no native backend URL, so proxying one requires an explicit
+    ``proxy_target_url`` (enforced by _validate_proxy_target below).
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     # Unique identifier
-    id: UUID = Field(
-        default_factory=uuid4,
-        description="Unique identifier (UUID) for this skill",
+    id: str = Field(
+        default_factory=lambda: str(uuid4()),
+        min_length=1,
+        max_length=512,
+        description=(
+            "Unique identifier for this skill. Any non-empty string "
+            "(UUID, ARN, URN, ...). Auto-generated UUID if not supplied."
+        ),
     )
 
     # Explicit path - immutable after creation
@@ -303,13 +320,33 @@ class SkillCard(BaseModel):
             raise ValueError("Path must start with /skills/")
         return v
 
+    @model_validator(mode="after")
+    def _validate_proxy_target(self) -> "SkillCard":
+        """If proxied, require an explicit proxy_target_url (skills have no native backend).
+
+        Passes only the scalars the check reads (runs on every construction,
+        including reads that rebuild the model from a stored doc).
+        """
+        assert_proxy_target_resolvable(
+            "skill",
+            {
+                "is_proxied": self.is_proxied,
+                "proxy_target_url": self.proxy_target_url,
+                "proxy_disabled_reason": self.proxy_disabled_reason,
+            },
+            read_safe=True,  # storage model: reconstructed on read, log-not-raise
+        )
+        # Derive the read-only client-facing path from type + path (self-healing).
+        self.populate_proxy_client_url("skill")
+        return self
+
 
 class SkillInfo(BaseModel):
     """Lightweight skill summary for listings."""
 
     model_config = ConfigDict(populate_by_name=True)
 
-    id: UUID = Field(..., description="Unique identifier (UUID) for this skill")
+    id: str = Field(..., min_length=1, description="Unique identifier for this skill")
     path: str = Field(..., description="Unique skill path")
     name: str
     description: str
@@ -369,10 +406,28 @@ class SkillInfo(BaseModel):
     external_tags: list[str] = Field(
         default_factory=list, description="Tags from external/federated registries"
     )
+    # Gateway-proxy opt-in (mirrored from the SkillCard so listings show the badge
+    # and the edit modal populates the toggle). proxy_client_url is the read-only,
+    # server-derived client path; proxy_target_url is the backend/origin.
+    is_proxied: bool = Field(
+        default=False,
+        description="When true, the skill is served through the gateway generic proxy.",
+    )
+    proxy_target_url: str | None = Field(
+        default=None,
+        description="Backend/origin HTTP(S) URL the gateway forwards to (skills require it explicitly).",
+    )
+    proxy_client_url: str | None = Field(
+        default=None,
+        description="Read-only, auto-derived client-facing gateway path (/{prefix}/skill/{name}).",
+    )
 
 
-class SkillRegistrationRequest(BaseModel):
-    """Request model for skill registration."""
+class SkillRegistrationRequest(ProxyableMixin):
+    """Request model for skill registration.
+
+    Inherits the ``is_proxied`` / ``proxy_target_url`` opt-in from ProxyableMixin.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -381,6 +436,12 @@ class SkillRegistrationRequest(BaseModel):
     skill_md_url: HttpUrl = Field(..., description="URL to SKILL.md file")
     repository_url: HttpUrl | None = None
     version: str | None = Field(None, max_length=32, description="Skill version (e.g., 1.0.0)")
+    id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=512,
+        description="Optional caller-supplied id (UUID, ARN, ...). Auto-generated if omitted.",
+    )
     license: str | None = None
     compatibility: str | None = Field(None, max_length=500)
     requirements: list[CompatibilityRequirement] = Field(default_factory=list)
@@ -406,6 +467,30 @@ class SkillRegistrationRequest(BaseModel):
         None,
         description="Custom header name (default: Authorization for bearer, PRIVATE-TOKEN for api_key)",
     )
+    custom_headers: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Plaintext upstream auth headers ([{name, value?, overridable?}, ...]) "
+            "presented to the proxied backend when is_proxied is true (e.g. an API "
+            "key for an LLM proxied as a skill). Each entry: a value makes it an "
+            "operator-injected header; overridable=true lets the CALLER supply or "
+            "override it on the request (a value-less overridable entry is a "
+            "caller-only passthrough slot). Encrypted into custom_headers_encrypted "
+            "at registration; never persisted or echoed in plaintext. Distinct from "
+            "auth_credential, which authenticates the SKILL.md FETCH, not the proxy hop."
+        ),
+    )
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, v: str | None) -> str | None:
+        # Delegate to the shared validator so the id rules (non-empty, length,
+        # safe charset) never drift from the server route's resolve_asset_id.
+        from ..services._asset_id import validate_asset_id
+
+        if v is None:
+            return v
+        return validate_asset_id(v)
 
     @field_validator("name")
     @classmethod
@@ -422,6 +507,25 @@ class SkillRegistrationRequest(BaseModel):
                 "not starting or ending with hyphen"
             )
         return v
+
+    @field_validator("proxy_target_url")
+    @classmethod
+    def _guard_proxy_target_url(cls, v: str | None) -> str | None:
+        """API-edge SSRF fast-fail (the mixin no longer raises; storage is read-safe)."""
+        return egress_guard_validator(v)
+
+    @model_validator(mode="after")
+    def _require_proxy_target(self) -> "SkillRegistrationRequest":
+        """API edge: reject is_proxied=true without a target (skills have no fallback)."""
+        assert_proxy_target_resolvable(
+            "skill",
+            {
+                "is_proxied": self.is_proxied,
+                "proxy_target_url": self.proxy_target_url,
+                "proxy_disabled_reason": self.proxy_disabled_reason,
+            },
+        )  # read_safe defaults False -> raises at the edge
+        return self
 
 
 class SkillSearchResult(BaseModel):

@@ -274,7 +274,7 @@ class _ToolDiscoveryTracker:
         self.start_time = start_time
         self.success = False
         self.tools_count = 0
-        self.error_code = None
+        self.error_code: str | None = None
 
     def set_result(self, tools: list[dict] | None):
         """Set the result of the tool discovery operation."""
@@ -321,7 +321,7 @@ class _HealthCheckTracker:
         self.server_name = server_name
         self.start_time = start_time
         self.success = False
-        self.error_code = None
+        self.error_code: str | None = None
 
     def set_success(self):
         """Mark the health check as successful."""

@@ -32,6 +32,7 @@ from registry.auth.dependencies import (
     map_cognito_groups_to_scopes,
     nginx_proxied_auth,
     user_can_access_server,
+    user_can_list_custom_entity_type,
     user_can_modify_servers,
     user_has_ui_permission_for_service,
     user_has_wildcard_access,
@@ -1638,6 +1639,60 @@ class TestAuthPathsAgreeOnIsAdmin:
 
 @pytest.mark.unit
 @pytest.mark.auth
+class TestUserCanListCustomEntityType:
+    """Discovery gate for custom entities (search parity)."""
+
+    def test_admin_sees_all_types(self):
+        ctx = {"is_admin": True, "ui_permissions": {}}
+        assert user_can_list_custom_entity_type("dataset", ctx) is True
+
+    def test_holder_sees_their_type(self):
+        ctx = {"is_admin": False, "ui_permissions": {"list_dataset_entity": ["all"]}}
+        assert user_can_list_custom_entity_type("dataset", ctx) is True
+
+    def test_non_holder_denied(self):
+        ctx = {"is_admin": False, "ui_permissions": {"list_other_entity": ["all"]}}
+        assert user_can_list_custom_entity_type("dataset", ctx) is False
+
+    def test_missing_ui_permissions_fails_closed(self):
+        assert user_can_list_custom_entity_type("dataset", {"is_admin": False}) is False
+
+    def test_scoped_to_specific_type_name(self):
+        ctx = {"is_admin": False, "ui_permissions": {"list_dataset_entity": ["dataset"]}}
+        assert user_can_list_custom_entity_type("dataset", ctx) is True
+
+    # --- per-record grant tier ---
+
+    def test_record_grant_reachable_as_discovery_precheck(self):
+        # record_path=None: a specific-record grant makes the TYPE reachable
+        # (so the collection/search isn't 404'd) even without whole-type access.
+        ctx = {
+            "is_admin": False,
+            "ui_permissions": {"list_dataset_entity": ["/dataset/abc"]},
+        }
+        assert user_can_list_custom_entity_type("dataset", ctx) is True
+
+    def test_record_grant_allows_only_that_record(self):
+        ctx = {
+            "is_admin": False,
+            "ui_permissions": {"list_dataset_entity": ["/dataset/abc"]},
+        }
+        assert user_can_list_custom_entity_type("dataset", ctx, "/dataset/abc") is True
+        # A DIFFERENT record of the same type is not granted — this is the
+        # "one grant must not open every record" guarantee.
+        assert user_can_list_custom_entity_type("dataset", ctx, "/dataset/xyz") is False
+
+    def test_whole_type_grant_allows_any_record(self):
+        ctx = {"is_admin": False, "ui_permissions": {"list_dataset_entity": ["all"]}}
+        assert user_can_list_custom_entity_type("dataset", ctx, "/dataset/anything") is True
+
+    def test_no_grant_denies_specific_record(self):
+        assert (
+            user_can_list_custom_entity_type("dataset", {"is_admin": False}, "/dataset/abc")
+            is False
+        )
+
+
 class TestUserIsAdmin:
     """Tests for _user_is_admin function.
 
@@ -1778,3 +1833,37 @@ class TestUserIsAdmin:
 
         # Assert
         assert result is False
+
+    # ── Per-type custom-entity scopes are EXCLUDED from admin derivation ──
+    # These match a mutating prefix (create_/modify_/delete_) but must NOT confer
+    # admin, or granting a non-admin group create_dataset_entity: ["all"] would
+    # silently promote them. This MODIFIES the PR #717/#663 contract.
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "create_dataset_entity",
+            "modify_dataset_entity",
+            "delete_dataset_entity",
+            "create_n8n_workflow_entity",
+            "delete_a-b_entity",
+        ],
+    )
+    def test_per_type_entity_scope_does_not_grant_admin(self, action: str):
+        """A non-admin holding a per-type entity mutation scope is NOT admin."""
+        assert _user_is_admin({action: ["all"]}) is False
+
+    def test_per_type_list_entity_does_not_grant_admin(self):
+        """list_<type>_entity is read-only-prefixed and never admin."""
+        assert _user_is_admin({"list_dataset_entity": ["all"]}) is False
+
+    def test_real_admin_action_alongside_entity_scope_still_admin(self):
+        """A genuine admin action still confers admin even next to entity scopes."""
+        ui_permissions = {
+            "create_dataset_entity": ["all"],  # excluded
+            "register_service": ["all"],  # real admin
+        }
+        assert _user_is_admin(ui_permissions) is True
+
+    def test_non_entity_create_still_grants_admin(self):
+        """create_virtual_server (not an *_entity scope) still confers admin."""
+        assert _user_is_admin({"create_virtual_server": ["all"]}) is True

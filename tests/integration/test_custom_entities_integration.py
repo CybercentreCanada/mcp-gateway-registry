@@ -199,3 +199,93 @@ class TestCustomEntityLifecycle:
         count = await svc.delete_type(type_name, force=True)
         assert count == 1
         assert await svc.get_type(type_name) is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+class TestListRecordsRestrictPaths:
+    """Per-record discovery restriction against real MongoDB.
+
+    Exercises list_records(restrict_paths=...), i.e. the $and of the record-path
+    $in clause with the visibility filter, which unit tests (mocked repo) cannot
+    verify actually behaves against the database.
+    """
+
+    async def _seed_three_public(self, svc, type_name):
+        """Create three PUBLIC records; return their paths (a, b, c)."""
+        await svc.create_type(_descriptor(type_name))
+        paths = []
+        for label in ("a", "b", "c"):
+            rec = await svc.create_record(
+                type_name,
+                CustomEntityCreate(name=label, visibility="public", attributes={"title": label}),
+                owner="alice",
+            )
+            paths.append(rec.path)
+        return paths
+
+    async def test_restrict_none_returns_whole_type(self, service):
+        svc, type_name = service
+        await self._seed_three_public(svc, type_name)
+        # None = whole-type access; only the visibility filter applies (all public).
+        items, total = await svc.list_records(type_name, 0, 100, BOB, restrict_paths=None)
+        assert total == 3
+        assert {r.name for r in items} == {"a", "b", "c"}
+
+    async def test_restrict_to_one_path_returns_only_that_record(self, service):
+        svc, type_name = service
+        pa, _pb, _pc = await self._seed_three_public(svc, type_name)
+        # Granting ONE record path must surface only that record — NOT the sibling
+        # public records. This is the invariant, verified against real Mongo.
+        items, total = await svc.list_records(type_name, 0, 100, BOB, restrict_paths=[pa])
+        assert total == 1
+        assert {r.name for r in items} == {"a"}
+
+    async def test_restrict_to_subset_returns_that_subset(self, service):
+        svc, type_name = service
+        pa, pb, _pc = await self._seed_three_public(svc, type_name)
+        items, total = await svc.list_records(type_name, 0, 100, BOB, restrict_paths=[pa, pb])
+        assert total == 2
+        assert {r.name for r in items} == {"a", "b"}
+
+    async def test_empty_restrict_returns_nothing(self, service):
+        svc, type_name = service
+        await self._seed_three_public(svc, type_name)
+        # Fail-closed: an empty path grant ($in: []) matches no records.
+        items, total = await svc.list_records(type_name, 0, 100, BOB, restrict_paths=[])
+        assert total == 0
+        assert items == []
+
+    async def test_restrict_intersects_visibility_not_union(self, service):
+        """The path clause AND the visibility filter — a granted path the caller
+        cannot see by visibility is still excluded (neither layer alone suffices).
+        """
+        svc, type_name = service
+        await svc.create_type(_descriptor(type_name))
+        pub = await svc.create_record(
+            type_name,
+            CustomEntityCreate(name="pub", visibility="public", attributes={"title": "p"}),
+            owner="alice",
+        )
+        priv = await svc.create_record(
+            type_name,
+            CustomEntityCreate(name="priv", visibility="private", attributes={"title": "q"}),
+            owner="alice",  # owned by alice, NOT bob
+        )
+        # Bob is granted BOTH paths, but priv is alice's private record: the
+        # visibility filter must still exclude it (grant does not override
+        # visibility). Only pub survives the $and.
+        items, total = await svc.list_records(
+            type_name, 0, 100, BOB, restrict_paths=[pub.path, priv.path]
+        )
+        assert total == 1
+        assert {r.name for r in items} == {"pub"}
+
+        # Alice (the owner) granted the same two paths sees both — her private
+        # record passes visibility, confirming the exclusion above was visibility
+        # (owner mismatch), not the path clause.
+        items_a, total_a = await svc.list_records(
+            type_name, 0, 100, ALICE, restrict_paths=[pub.path, priv.path]
+        )
+        assert total_a == 2
+        assert {r.name for r in items_a} == {"pub", "priv"}
