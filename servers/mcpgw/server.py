@@ -11,6 +11,7 @@ Supports two auth modes:
 
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -38,9 +39,43 @@ logger.info(
 REGISTRY_URL = os.getenv("REGISTRY_BASE_URL", "http://localhost")
 REGISTRY_EXTERNAL_URL = os.getenv("REGISTRY_EXTERNAL_URL", "")
 
+# Host allowlist for FastMCP's DNS-rebinding protection (streamable-http).
+# FastMCP 3.x enables host/origin protection by default, allowing only
+# 127.0.0.1 / localhost. But mcpgw is always reached through the registry's
+# nginx/auth front door (proxy_pass http://<service-name>:8003/), so the request
+# Host is the container/service name, which the default rejects with 421 -> the
+# registry health check fails -> nginx drops the /airegistry-tools/ location ->
+# clients get 405.
+#
+# The fix keeps protection ON and allowlists the exact service name the gateway
+# uses to reach mcpgw. That name is "mcpgw-server" across every surface (Docker
+# Compose service name, ECS Service Connect alias, Kubernetes Service name) --
+# the same canonical value the registry's SSRF guard trusts as the built-in
+# proxy target (registry/utils/url_guard.py::_BUILTIN_PROXY_ALLOWED_HOSTS). The
+# port is stripped by FastMCP before matching, and 127.0.0.1/localhost are
+# always allowed by FastMCP's built-in defaults, so those are not listed here.
+# Operators who front mcpgw under a different name override the comma-separated
+# MCPGW_HTTP_ALLOWED_HOSTS (e.g. "my-mcpgw.svc"); "*" disables protection
+# entirely for the (discouraged) case where the Host is unpredictable.
+_DEFAULT_MCPGW_ALLOWED_HOSTS = "mcpgw-server"
+MCPGW_HTTP_ALLOWED_HOSTS = os.getenv("MCPGW_HTTP_ALLOWED_HOSTS", _DEFAULT_MCPGW_ALLOWED_HOSTS)
+
 MAX_QUERY_LENGTH: int = 500
 MIN_TOP_N: int = 1
 MAX_TOP_N: int = 50
+
+# Skill names are simple identifiers. A user-supplied value that is interpolated
+# into an outbound URL PATH segment must match this strict allowlist before the
+# URL is built; otherwise a value like "../../api/management/iam/users" would
+# normalize to a different registry endpoint and inherit this server's
+# privileged registry credential. Fail closed: reject anything that is not a
+# single safe path segment.
+#
+# The rule mirrors the registry's own skill-name schema (lowercase alphanumerics
+# in hyphen-separated groups), so it is exact rather than merely safe. \Z (not
+# $) anchors the true end of string: Python's $ also matches just before a
+# trailing newline, which would let "validname\n" slip through.
+_SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*\Z")
 
 # Max number of withheld candidates itemized in a discovery receipt. The full
 # count is always reported; this caps the listed near-miss items so the receipt
@@ -178,6 +213,34 @@ if _auth_provider:
             status_code=302,
             headers={"Cache-Control": "no-store"},
         )
+
+
+def _resolve_allowed_hosts(
+    raw_value: str,
+) -> tuple[bool, list[str] | None]:
+    """Resolve the FastMCP host-protection settings from the env value.
+
+    Args:
+        raw_value: The MCPGW_HTTP_ALLOWED_HOSTS env value (comma-separated
+            hostnames, or "*" to allow any Host).
+
+    Returns:
+        A (host_origin_protection, allowed_hosts) tuple to pass to mcp.run:
+        - a specific list (the default, "mcpgw-server") -> (True, [hosts]):
+          protection stays ON, allowing exactly those hosts plus FastMCP's
+          built-in loopback defaults (127.0.0.1 / localhost).
+        - "*" (opt-in escape hatch) -> (False, None): host/origin protection
+          OFF, for the discouraged case where the front-door Host is
+          unpredictable. mcpgw is never directly internet-exposed, but keeping
+          protection ON with a named allowlist is still preferred.
+        - empty -> (False, None): nothing to enforce.
+    """
+    hosts = [h.strip() for h in raw_value.split(",") if h.strip()]
+
+    if not hosts or "*" in hosts:
+        return False, None
+
+    return True, hosts
 
 
 def _validate_top_n(top_n: int) -> int:
@@ -570,6 +633,28 @@ async def get_skill_content(
 
     skill_name = skill_name.strip()
 
+    # skill_name is interpolated into an outbound URL path segment below, so it
+    # must be a single safe path segment. Reject anything that is not, before
+    # building the URL. This blocks path traversal ("..", "/"), encoded forms
+    # ("%2f"), and whitespace because none of them match the allowlist. Fail
+    # closed rather than trust downstream URL normalization.
+    if not _SKILL_NAME_PATTERN.match(skill_name):
+        return {
+            "skill_name": skill_name,
+            "error": (r"skill_name must be a single identifier matching ^[a-z0-9]+(-[a-z0-9]+)*\Z"),
+            "status": "failed",
+        }
+
+    # resource_path is passed as a query parameter (lower risk than a path
+    # segment), but reject absolute paths and traversal sequences as
+    # defense-in-depth before forwarding it.
+    if resource_path and (resource_path.startswith("/") or ".." in resource_path):
+        return {
+            "skill_name": skill_name,
+            "error": "resource_path must not be absolute or contain '..'",
+            "status": "failed",
+        }
+
     try:
         headers = await _get_registry_headers(ctx)
         url = f"{REGISTRY_URL}/api/skills/{skill_name}/content"
@@ -948,12 +1033,25 @@ if __name__ == "__main__":
         # Use configurable host with secure default (127.0.0.1)
         # Set HOST=0.0.0.0 in environment for Docker deployments
         host = os.environ.get("HOST", "127.0.0.1")
-        logger.info(f"Running in HTTP mode on {host}:{port} (stateless=True)")
+        # Configure FastMCP's DNS-rebinding protection so a reverse-proxied Host
+        # (the service/container name) is not rejected with 421. See
+        # MCPGW_HTTP_ALLOWED_HOSTS above for why the default is permissive.
+        host_origin_protection, allowed_hosts = _resolve_allowed_hosts(MCPGW_HTTP_ALLOWED_HOSTS)
+        logger.info(
+            "Running in HTTP mode on %s:%s (stateless=True, "
+            "host_origin_protection=%s, allowed_hosts=%s)",
+            host,
+            port,
+            host_origin_protection,
+            allowed_hosts if allowed_hosts is not None else "*",
+        )
         mcp.run(
             transport="streamable-http",
             host=host,
             port=int(port),
             stateless_http=True,
+            host_origin_protection=host_origin_protection,
+            allowed_hosts=allowed_hosts,
         )
     else:
         logger.info("Running in stdio mode")

@@ -136,7 +136,7 @@ class ServerUpdateRequest(BaseModel):
     auth_provider: str | None = None  # provider name only; non-secret
 
     # Metadata
-    tags: list[str] | str = Field(default_factory=list)
+    tags: list[str] | str = Field(default_factory=lambda: [])
     license: str = "N/A"
     num_tools: int | None = None
     tool_list: list[dict[str, Any]] | None = None

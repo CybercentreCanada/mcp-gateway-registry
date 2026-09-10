@@ -67,7 +67,7 @@ python client.py --host example.com --port 8001
 
 ```python
 result = await session.call_tool(
-    "quantum_flux_analyzer", 
+    "quantum_flux_analyzer",
     arguments={
         "energy_level": 7,
         "stabilization_factor": 0.85,
@@ -80,7 +80,7 @@ result = await session.call_tool(
 
 ```python
 result = await session.call_tool(
-    "neural_pattern_synthesizer", 
+    "neural_pattern_synthesizer",
     arguments={
         "input_patterns": ["alpha", "beta", "gamma"],
         "coherence_threshold": 0.8,
@@ -93,7 +93,7 @@ result = await session.call_tool(
 
 ```python
 result = await session.call_tool(
-    "hyper_dimensional_mapper", 
+    "hyper_dimensional_mapper",
     arguments={
         "coordinates": {
             "latitude": 37.7749,

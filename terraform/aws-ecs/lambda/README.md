@@ -33,8 +33,8 @@ Rotates DocumentDB cluster master password.
 - `secretsmanager:GetRandomPassword`
 - `kms:Decrypt`
 - `kms:GenerateDataKey`
-- `docdb:DescribeDBClusters`
-- `docdb:ModifyDBCluster`
+- `rds:DescribeDBClusters` (DocumentDB shares the RDS control-plane API)
+- `rds:ModifyDBCluster` (DocumentDB shares the RDS control-plane API)
 - VPC networking permissions for private subnet access
 
 **Network Configuration:**

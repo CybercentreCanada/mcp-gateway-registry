@@ -3,6 +3,10 @@ import axios from 'axios';
 import { useRegistryConfig } from '../hooks/useRegistryConfig';
 import type { LocalRuntime } from '../types/server';
 import type { CustomEntityRecord, CustomTypeDescriptor } from '../types/customEntity';
+import {
+  CUSTOM_ENTITY_PAGE_SIZE,
+  fetchAllPages,
+} from '../utils/fetchAllPages';
 
 interface ServerVersion {
   version: string;
@@ -154,45 +158,68 @@ export const ServerStatsProvider: React.FC<ServerStatsProviderProps> = ({ childr
       const agentsEnabled = registryConfig?.features.agents !== false;
       const skillsEnabled = registryConfig?.features.skills !== false;
 
-      // Build fetch promises based on enabled features
-      const fetchPromises: Promise<any>[] = [];
+      // Issue #880: page through list APIs (max page size 2000/1000) so the UI
+      // is not hard-capped to a single request's limit.
+      const fetchPromises: Promise<any[]>[] = [];
 
       if (serversEnabled) {
         // include_tools=false: the dashboard only needs num_tools for the card
         // badge, not the full per-server tool_list. Omitting it shrinks the
         // payload and skips per-server tool filtering on the backend.
-        fetchPromises.push(axios.get('/api/servers?limit=2000&include_tools=false').catch(() => ({ data: { servers: [] } })));
+        fetchPromises.push(
+          fetchAllPages({
+            url: '/api/servers',
+            itemsKey: 'servers',
+            params: { include_tools: false },
+          }).catch(() => [] as any[]),
+        );
       } else {
-        fetchPromises.push(Promise.resolve({ data: { servers: [] } }));
+        fetchPromises.push(Promise.resolve([]));
       }
 
       if (agentsEnabled) {
-        fetchPromises.push(axios.get('/api/agents?limit=2000').catch(() => ({ data: { agents: [] } })));
+        fetchPromises.push(
+          fetchAllPages({
+            url: '/api/agents',
+            itemsKey: 'agents',
+          }).catch(() => [] as any[]),
+        );
       } else {
-        fetchPromises.push(Promise.resolve({ data: { agents: [] } }));
+        fetchPromises.push(Promise.resolve([]));
       }
 
       // Fetch skills for stats if skills are enabled
       if (skillsEnabled) {
-        fetchPromises.push(axios.get('/api/skills?include_disabled=true&limit=2000').catch(() => ({ data: { skills: [] } })));
+        fetchPromises.push(
+          fetchAllPages({
+            url: '/api/skills',
+            itemsKey: 'skills',
+            params: { include_disabled: true },
+          }).catch(() => [] as any[]),
+        );
       } else {
-        fetchPromises.push(Promise.resolve({ data: { skills: [] } }));
+        fetchPromises.push(Promise.resolve([]));
       }
 
       // Fetch custom entity records (one call per type) alongside the core
       // entities so every count lands in the SAME stats update — no visible
       // jump from a core-only total to the full total. Each type 404s only if
-      // deleted mid-session.
+      // deleted mid-session. Custom list API uses skip/limit (max 1000).
       const customTypes = registryConfig?.features.custom_types
         ? (registryConfig.custom_types ?? [])
         : [];
       const customPromises = customTypes.map((t) =>
-        axios.get(`/api/custom/${t.name}?limit=1000`).catch((err) => {
+        fetchAllPages({
+          url: `/api/custom/${t.name}`,
+          itemsKey: 'records',
+          pageSize: CUSTOM_ENTITY_PAGE_SIZE,
+          offsetParam: 'skip',
+        }).catch((err) => {
           // Treat as zero records so one stale type doesn't blank the sidebar.
           // Log so a real failure (auth, 422, 5xx) is visible rather than
           // silently zeroed out.
           console.error(`Failed to fetch custom records for "${t.name}":`, err);
-          return { data: { records: [] } };
+          return [] as CustomEntityRecord[];
         }),
       );
       // One bulk fetch of every descriptor so Discover can render record cards
@@ -207,12 +234,12 @@ export const ServerStatsProvider: React.FC<ServerStatsProviderProps> = ({ childr
             })
         : Promise.resolve({ data: { custom_types: [] } });
 
-      const [coreResponses, customResponses, descriptorsResponse] = await Promise.all([
+      const [coreLists, customLists, descriptorsResponse] = await Promise.all([
         Promise.all(fetchPromises),
         Promise.all(customPromises),
         descriptorsPromise,
       ]);
-      const [serversResponse, agentsResponse, skillsResponse] = coreResponses;
+      const [serversList, agentsList, skillsList] = coreLists;
 
       const descriptorsByName = new Map<string, CustomTypeDescriptor>(
         ((descriptorsResponse.data?.custom_types ?? []) as CustomTypeDescriptor[]).map(
@@ -223,22 +250,10 @@ export const ServerStatsProvider: React.FC<ServerStatsProviderProps> = ({ childr
         name: t.name,
         displayName: t.display_name,
         descriptor: descriptorsByName.get(t.name) ?? null,
-        records: (customResponses[i].data?.records ?? []) as CustomEntityRecord[],
+        records: (customLists[i] ?? []) as CustomEntityRecord[],
       }));
       setCustomRecordsByType(customByType);
       const customRecords = customByType.flatMap((ct) => ct.records);
-
-      // The API returns {"servers": [...]}
-      const responseData = serversResponse.data || {};
-      const serversList = responseData.servers || [];
-
-      // The agents API returns {"agents": [...]}
-      const agentsData = agentsResponse.data || {};
-      const agentsList = agentsData.agents || [];
-
-      // The skills API returns {"skills": [...]}
-      const skillsData = skillsResponse.data || {};
-      const skillsList = skillsData.skills || [];
 
       // Transform server data from backend format to frontend format
       const transformedServers: Server[] = serversList.map((serverInfo: any) => {

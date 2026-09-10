@@ -198,7 +198,7 @@ sequenceDiagram
     O-->>P: exchanged token
     P->>P: strip Authorization/X-Authorization/Cookie/X-Internal-Token
     P->>M: forward with Authorization: Bearer <exchanged token>
-    Note over M,D: OPTIONAL server-side exchange (not the gateway; server-author's choice)
+    Note over M,D: OPTIONAL server-side exchange (not the gateway, server-author's choice)
     M->>M: validate aud == this server's app
     M->>I: grant_type=jwt-bearer, assertion=<exchanged token>,<br/>client_id/secret=MCP server app, scope=Graph
     I-->>M: downstream token (aud=Graph, sub still the user)

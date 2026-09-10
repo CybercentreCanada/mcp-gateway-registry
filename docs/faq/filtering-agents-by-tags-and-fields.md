@@ -116,5 +116,5 @@ If you need filtering by any of these fields, please open a feature request on [
 ## Related Documentation
 
 - [API Reference](../api-reference.md) -- full API documentation
-- [A2A Agent Management](../a2a-agent-management.md) -- agent registration and management guide
+- [A2A Protocol Support](../a2a.md) -- agent registration, management, and routing guide
 - [Custom Metadata](../custom-metadata.md) -- using metadata fields for organization and compliance

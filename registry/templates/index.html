@@ -335,12 +335,12 @@
              display: inline-block; /* Treat form like an inline block */
              vertical-align: middle;
         }
-        
+
         /* Token button styling */
         .token-button {
             transition: all 0.2s ease !important;
         }
-        
+
         .token-button:hover {
             background-color: #218838 !important;
             border-color: #218838 !important;
@@ -759,7 +759,7 @@
             // Use saved theme if available, otherwise respect user's OS preference
             const theme = savedTheme || (prefersDark ? 'dark' : 'light');
             console.log('[HEAD SCRIPT] Initial theme setup:', theme, 'from:', savedTheme ? 'localStorage' : 'OS preference');
-            
+
             const htmlElement = document.documentElement;
             if (theme === 'dark') {
                 htmlElement.classList.add('dark-mode');
@@ -1107,11 +1107,11 @@
 
             // Ensure the path is properly formatted with leading slash
             const apiPath = servicePath.startsWith('/') ? servicePath : '/' + servicePath;
-            
+
             // Explicitly construct the full URL through the gateway/proxy, NOT direct to port 7860
             const proxyUrl = window.location.origin + '/api/tools' + apiPath;
             console.log(`Fetching tools from: ${proxyUrl}`);
-            
+
             // Use fetch with proper error handling
             fetch(proxyUrl, {
                 method: 'GET',
@@ -1131,9 +1131,9 @@
                 .then(data => {
                     console.log(`Tool data received:`, data);
                     toolModalListContainer.innerHTML = '';
-                    
+
                     const tools = data.tools || [];
-                    
+
                     if (tools && tools.length > 0) {
                         tools.forEach(tool => {
                             const toolDiv = document.createElement('div');
@@ -1556,7 +1556,7 @@
                     }
                      // Update sidebar stats after processing the message
                      updateSidebarStats(data);
-                    
+
                     // Re-bind event handlers after dynamic updates
                     bindEventHandlers();
 
@@ -1585,7 +1585,7 @@
         function bindEventHandlers() {
             // Remove individual toggle event handlers - using event delegation instead
             // (Individual handlers were causing duplicate toggle requests)
-            
+
             // Bind tool icons click handlers using event delegation instead
             document.querySelectorAll('.clickable-tool-icon').forEach(icon => {
                 // Remove existing handler first to prevent duplicates
@@ -1627,7 +1627,7 @@
             // Use a simple spinner for loading feedback
             refreshButton.innerHTML = '<span class="status-spinner" style="width: 0.9em; height: 0.9em; border-width: 2px; top: 0;"></span>';
 
-            fetch(`/api/refresh${servicePath}`, { 
+            fetch(`/api/refresh${servicePath}`, {
                 method: 'POST',
                 credentials: 'same-origin'  // Include cookies for authentication
             })
@@ -1746,42 +1746,42 @@
             const htmlElement = document.documentElement;
             const wasDarkMode = htmlElement.classList.contains('dark-mode');
             const newIsDarkMode = !wasDarkMode;
-            
+
             console.log("Theme toggle state: was dark mode:", wasDarkMode, "→ new dark mode:", newIsDarkMode);
-            
+
             if (newIsDarkMode) {
                 // Apply dark mode
                 htmlElement.classList.add('dark-mode');
                 htmlElement.setAttribute('data-theme', 'dark');
-                
+
                 // Force direct styles on key elements
                 document.body.style.backgroundColor = '#212529';
                 document.body.style.color = '#f8f9fa';
-                
+
                 // Force dark mode on specific elements
                 document.querySelectorAll('.main-header').forEach(el => {
                     el.style.backgroundColor = '#212529';
                     el.style.borderBottomColor = '#495057';
                 });
-                
+
                 document.querySelectorAll('.service-card').forEach(el => {
                     el.style.backgroundColor = '#343a40';
                     el.style.borderColor = '#495057';
                 });
-                
+
                 document.querySelectorAll('.sidebar').forEach(el => {
                     el.style.backgroundColor = '#212529';
                     el.style.color = '#f8f9fa';
                 });
-                
+
                 document.querySelectorAll('.card-header h2, .service-card .owner, .service-card .description').forEach(el => {
                     el.style.color = '#f8f9fa';
                 });
-                
+
                 document.querySelectorAll('.sidebar-toggle-button, .theme-toggle-button, .logo span, .header-right .user-display').forEach(el => {
                     el.style.color = '#f8f9fa';
                 });
-                
+
                 document.querySelectorAll('.content h1').forEach(el => {
                     el.style.color = '#f8f9fa';
                 });
@@ -1795,35 +1795,35 @@
                 // Apply light mode
                 htmlElement.classList.remove('dark-mode');
                 htmlElement.setAttribute('data-theme', 'light');
-                
+
                 // Force direct styles on key elements
                 document.body.style.backgroundColor = '#f8f9fa';
                 document.body.style.color = '#16191f';
-                
+
                 // Force light mode on specific elements
                 document.querySelectorAll('.main-header').forEach(el => {
                     el.style.backgroundColor = '#ffffff';
                     el.style.borderBottomColor = '#e0e0e0';
                 });
-                
+
                 document.querySelectorAll('.service-card').forEach(el => {
                     el.style.backgroundColor = '#ffffff';
                     el.style.borderColor = '#e0e0e0';
                 });
-                
+
                 document.querySelectorAll('.sidebar').forEach(el => {
                     el.style.backgroundColor = '#f8f9fa';
                     el.style.color = '#16191f';
                 });
-                
+
                 document.querySelectorAll('.card-header h2, .service-card .owner, .service-card .description').forEach(el => {
                     el.style.color = '#16191f';
                 });
-                
+
                 document.querySelectorAll('.sidebar-toggle-button, .theme-toggle-button, .logo span, .header-right .user-display').forEach(el => {
                     el.style.color = '#16191f';
                 });
-                
+
                 document.querySelectorAll('.content h1').forEach(el => {
                     el.style.color = '#16191f';
                 });
@@ -1834,10 +1834,10 @@
                     themeToggleButton.textContent = '🌙';
                 }
             }
-            
+
             // Save the new state to localStorage
             localStorage.setItem('theme', newIsDarkMode ? 'dark' : 'light');
-            
+
             console.log("Theme toggled to:", newIsDarkMode ? 'dark' : 'light');
         }
 
@@ -1898,25 +1898,25 @@
                         console.error("Missing data attributes on tool icon", toolIcon);
                     }
                 }
-                
+
                 // Handle refresh button clicks
                 const refreshButton = event.target.closest('.refresh-button');
                 if (refreshButton && !refreshButton.disabled) {
                     event.preventDefault();
-                    
+
                     const servicePath = refreshButton.dataset.path;
                     if (!servicePath) {
                         console.error("Refresh button missing data-path attribute.");
                         return;
                     }
-                    
+
                     // Indicate loading state
                     refreshButton.disabled = true;
                     const originalIconHTML = refreshButton.innerHTML;
                     refreshButton.innerHTML = '<span class="status-spinner" style="width: 0.9em; height: 0.9em; border-width: 2px; top: 0;"></span>';
-                    
+
                     // Make the refresh API call
-                    fetch(`/api/refresh${servicePath}`, { 
+                    fetch(`/api/refresh${servicePath}`, {
                         method: 'POST',
                         credentials: 'same-origin'  // Include cookies for authentication
                     })
@@ -1948,48 +1948,48 @@
                             }, 300);
                         });
                 }
-                
+
                 // Handle theme toggle button clicks
                 if (event.target.closest('#theme-toggle')) {
                     handleThemeToggle();
                 }
             });
-            
+
             // 2. Handle toggle changes via event delegation
             document.addEventListener('change', function(event) {
                 if (event.target.matches('.toggle-checkbox')) {
                     const checkboxElement = event.target;
                     const servicePath = checkboxElement.dataset.path;
-                    
+
                     if (!servicePath) {
                         console.error("Missing data-path attribute on toggle checkbox");
                         return;
                     }
-                    
+
                     // Call the existing handleToggleClick function with proper parameters
                     handleToggleClick(event, checkboxElement, servicePath);
                 }
             });
-            
+
             // 3. Sidebar filter click handling
             document.addEventListener('click', function(event) {
                 const link = event.target.closest('.sidebar-link[data-filter]');
                 if (link) {
                     event.preventDefault();
-                    
+
                     const filterType = link.dataset.filter;
-                    
+
                     // Update active link style
                     document.querySelectorAll('.sidebar-nav .sidebar-link').forEach(l => {
                         l.classList.remove('active-filter');
                     });
                     link.classList.add('active-filter');
-                    
+
                     // Apply the filter
                     applyCardFilter(filterType);
                 }
             });
-            
+
             // 4. Modal overlay clicks (close when clicking outside)
             document.querySelectorAll('.modal-overlay').forEach(modal => {
                 modal.addEventListener('click', function(event) {
@@ -1999,26 +1999,26 @@
                     }
                 });
             });
-            
+
             // 5. Handle register server button
             const registerButton = document.getElementById('register-server-button');
             if (registerButton) {
                 registerButton.addEventListener('click', showRegisterModal);
             }
-            
+
             // 6. Tab switching in register modal
             document.querySelectorAll('.registration-tabs .tab-button').forEach(button => {
                 button.addEventListener('click', function() {
                     switchRegisterTab(this.dataset.tab);
                 });
             });
-            
+
             // 7. Handle sidebar toggle
             const sidebarToggle = document.getElementById('sidebar-toggle');
             if (sidebarToggle) {
                 sidebarToggle.addEventListener('click', handleSidebarToggle);
             }
-            
+
             // 8. Close modals with ESC key
             document.addEventListener('keydown', function(e) {
                 if (e.key === 'Escape') {
@@ -2026,7 +2026,7 @@
                     if (toolModal && toolModal.style.display !== 'none') {
                         closeToolModal();
                     }
-                    
+
                     const registerModal = document.getElementById('register-server-modal');
                     if (registerModal && registerModal.style.display !== 'none') {
                         closeRegisterModal();
@@ -2040,11 +2040,11 @@
                 registerForm.addEventListener('submit', function(event) {
                     event.preventDefault();
                     const formData = new FormData(this);
-                    
+
                     handleRegistrationSubmit(formData);
                 });
             }
-            
+
             // Set initial theme state
             const savedTheme = localStorage.getItem('theme');
             const themeToggle = document.getElementById('theme-toggle');
@@ -2063,12 +2063,12 @@
             updateAllTimestamps();
             applyThemeOnLoad(); // Add this line
             applyCardFilter('all');
-            
+
             // Initialize sidebar state from localStorage
             if (localStorage.getItem('sidebarCollapsed') === 'true') {
                 document.body.classList.add('sidebar-collapsed');
             }
-            
+
             // Connect WebSocket
             connectWebSocket();
         });
@@ -2080,7 +2080,7 @@
             // Use saved theme if available, otherwise respect user's OS preference
             const theme = savedTheme || (prefersDark ? 'dark' : 'light');
             console.log('[HEAD SCRIPT] Initial theme setup:', theme, 'from:', savedTheme ? 'localStorage' : 'OS preference');
-            
+
             const htmlElement = document.documentElement;
             if (theme === 'dark') {
                 htmlElement.classList.add('dark-mode');
@@ -2099,35 +2099,35 @@
                 // Apply dark mode styles directly
                 document.body.style.backgroundColor = '#212529';
                 document.body.style.color = '#f8f9fa';
-                
+
                 // Force dark mode on specific elements
                 document.querySelectorAll('.main-header').forEach(el => {
                     el.style.backgroundColor = '#212529';
                     el.style.borderBottomColor = '#495057';
                 });
-                
+
                 document.querySelectorAll('.service-card').forEach(el => {
                     el.style.backgroundColor = '#343a40';
                     el.style.borderColor = '#495057';
                 });
-                
+
                 document.querySelectorAll('.sidebar').forEach(el => {
                     el.style.backgroundColor = '#212529';
                     el.style.color = '#f8f9fa';
                 });
-                
+
                 document.querySelectorAll('.card-header h2, .service-card .owner, .service-card .description').forEach(el => {
                     el.style.color = '#f8f9fa';
                 });
-                
+
                 document.querySelectorAll('.sidebar-toggle-button, .theme-toggle-button, .logo span, .header-right .user-display').forEach(el => {
                     el.style.color = '#f8f9fa';
                 });
-                
+
                 document.querySelectorAll('.content h1').forEach(el => {
                     el.style.color = '#f8f9fa';
                 });
-                
+
                 // Theme toggle button icon
                 const themeToggle = document.getElementById('theme-toggle');
                 if (themeToggle) themeToggle.textContent = '☀️';
@@ -2135,35 +2135,35 @@
                 // Apply light mode styles directly
                 document.body.style.backgroundColor = '#f8f9fa';
                 document.body.style.color = '#16191f';
-                
+
                 // Force light mode on specific elements
                 document.querySelectorAll('.main-header').forEach(el => {
                     el.style.backgroundColor = '#ffffff';
                     el.style.borderBottomColor = '#e0e0e0';
                 });
-                
+
                 document.querySelectorAll('.service-card').forEach(el => {
                     el.style.backgroundColor = '#ffffff';
                     el.style.borderColor = '#e0e0e0';
                 });
-                
+
                 document.querySelectorAll('.sidebar').forEach(el => {
                     el.style.backgroundColor = '#f8f9fa';
                     el.style.color = '#16191f';
                 });
-                
+
                 document.querySelectorAll('.card-header h2, .service-card .owner, .service-card .description').forEach(el => {
                     el.style.color = '#16191f';
                 });
-                
+
                 document.querySelectorAll('.sidebar-toggle-button, .theme-toggle-button, .logo span, .header-right .user-display').forEach(el => {
                     el.style.color = '#16191f';
                 });
-                
+
                 document.querySelectorAll('.content h1').forEach(el => {
                     el.style.color = '#16191f';
                 });
-                
+
                 // Theme toggle button icon
                 const themeToggle = document.getElementById('theme-toggle');
                 if (themeToggle) themeToggle.textContent = '🌙';
@@ -2199,7 +2199,7 @@
                     {% if user_context.is_admin %}
                         🔑 Admin Access
                     {% elif user_context.can_modify_servers %}
-                        ⚙️ Modify Access 
+                        ⚙️ Modify Access
                     {% else %}
                         👁️ Read-only Access
                     {% endif %}
@@ -2358,7 +2358,7 @@
                                 {% if can_perform_action('modify_service', service.display_name) %}
                                     <a href="/edit{{ service.path }}" class="edit-button">Modify</a>
                                 {% endif %}
-                                
+
                                 {# Check if user has toggle_service permission for this specific service #}
                                 {% if can_perform_action('toggle_service', service.display_name) %}
                                     {# Add ID to form if needed, but action URL is sufficient #}
@@ -2587,12 +2587,12 @@
             async function handleToggleClick(event) {
                 const checkboxElement = event.target;
                 const servicePath = checkboxElement.dataset.path;
-                
+
                 if (!servicePath) {
                     console.error("Missing data-path attribute on toggle checkbox");
                     return;
                 }
-                
+
                 event.preventDefault(); // Prevent default form submission
                 console.log(`Toggle clicked for path: ${servicePath}`);
 
@@ -2665,11 +2665,11 @@
 
                 // Ensure the path is properly formatted with leading slash
                 const apiPath = servicePath.startsWith('/') ? servicePath : '/' + servicePath;
-                
+
                 // Explicitly construct the full URL through the gateway/proxy, NOT direct to port 7860
                 const proxyUrl = window.location.origin + '/api/tools' + apiPath;
                 console.log(`Fetching tools from: ${proxyUrl}`);
-                
+
                 // Use fetch with proper error handling
                 fetch(proxyUrl, {
                     method: 'GET',
@@ -2689,9 +2689,9 @@
                     .then(data => {
                         console.log(`Tool data received:`, data);
                         toolModalListContainer.innerHTML = '';
-                        
+
                         const tools = data.tools || [];
-                        
+
                         if (tools && tools.length > 0) {
                             tools.forEach(tool => {
                                 const toolDiv = document.createElement('div');

@@ -8,7 +8,7 @@ global:
   image:
     # Container registry (host + optional namespace), e.g. "public.ecr.aws/p3v1o3c6"
     registry: public.ecr.aws/p3v1o3c6
-    tag: 1.26.0
+    tag: 1.28.0
     pullPolicy: IfNotPresent
   # When installing chart from repository, add --set global.chartVersion=$(git rev-parse HEAD) to add the git hash to a configmap for debugging
   chartVersion:
@@ -66,8 +66,15 @@ global:
     scheme: internet-facing
     className: alb
     tls: true
+    # Name of the TLS secret for nginx ingress. When set, emits a spec.tls
+    # stanza referencing this secret. Has no effect with className: alb.
+    tlsSecretName: ""
+    # Subdomain prefix used in subdomain routing mode. Override per-environment
+    # (e.g. "mcpregistry-stg" for staging) to avoid hostname collisions across
+    # environments on the same domain.
+    registrySubdomain: "mcpregistry"
     # Routing mode: "subdomain" or "path"
-    # - subdomain: mcpregistry.domain.com
+    # - subdomain: mcpregistry.domain.com  (registrySubdomain.domain.com)
     # - path:      domain.com/registry
     routingMode: subdomain
     # Path prefixes used when routingMode: path. Keycloak's browser path
@@ -364,6 +371,8 @@ registry:
     batchWorkerLeaseTtlSeconds: "60.0"
     batchWorkerLeaseHeartbeatSeconds: "15.0"
     batchMaxRequestBytes: "4194304"
+    # Caller-supplied asset id (issue #1276). Fail-closed: OFF by default.
+    allowCallerSuppliedAssetId: false
     # Registration gate / admission control (issue #809)
     registrationGateEnabled: false
     registrationGateUrl: ""
@@ -434,6 +443,9 @@ registry:
     # Registry-UI internal token verification (the /api/ hop; minted by auth-server)
     internalTokenTtlSeconds: "30" # Token lifetime (seconds); the replay-window cap (min 5)
     internalTokenLeewaySeconds: "5" # Clock-skew leeway (seconds) on token exp/iat
+    # MCP token TTL configuration (also read by auth-server)
+    mcpTokenDefaultTtlHours: "8" # Default TTL (hours) for minted MCP tokens
+    mcpTokenMaxTtlHours: "24" # Maximum TTL (hours) a caller may request
     # Custom entity types (admin-defined, schema-driven catalog types)
     customEntityTypesEnabled: false # Main switch for dynamic tabs + endpoints; off = no behavior change
     customTypeCacheTtlSeconds: 60 # TTL (s) for the in-process custom-type descriptor cache
@@ -509,7 +521,10 @@ registry:
     passwordExistingSecretKey: "PF_ADMIN_PASS"
   ingress:
     enabled: true
-    ingressClassName: alb
+    # Use `className` (not `ingressClassName`) — the registry subchart template
+    # reads .Values.ingress.className; `ingressClassName` is silently ignored.
+    # Leave empty to inherit global.ingress.className (set per-environment).
+    className: ""
   nodeSelector: {}
   # Extra env vars / envFrom sources appended to the registry container.
   # See charts/registry/values.yaml for validation rules, reserved names,
@@ -553,6 +568,9 @@ auth-server:
     registryApiToken: ""
     # Rate limiting
     maxTokensPerUserPerHour: "100"
+    # MCP token TTL configuration (also read by registry)
+    mcpTokenDefaultTtlHours: "8" # Default TTL (hours) for minted MCP tokens
+    mcpTokenMaxTtlHours: "24" # Maximum TTL (hours) a caller may request
     # Application Log Configuration - reuses anchor from registry.app above
     !!merge <<: *appLogConfig
     # Tool-level access control (issue #1026)
@@ -577,6 +595,8 @@ auth-server:
     tenantId: ""
     loginBaseUrl: "" # Custom Entra login base URL for sovereign clouds
     graphBaseUrl: "" # Optional Microsoft Graph base URL override (auto-inferred from loginBaseUrl)
+    scopeFormat: "" # Entra PRM scope form: "v1" (api://<app-id>/<scope>) or "v2" (bare, default). Set "v1" only if your app exposes v1-style api:// scopes (issue #990).
+    applicationIdUri: "" # Application ID URI (e.g. api://<app-id>). Used as the v1 scope prefix and accepted as a token audience. Defaults to api://<clientId>.
   # Okta settings (used when global.authProvider.type = "okta")
   okta:
     domain: "" # e.g., dev-123456.okta.com

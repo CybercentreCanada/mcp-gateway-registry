@@ -25,17 +25,18 @@ import logging
 import os
 import re
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys
+
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import seaborn as sns
-import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -218,7 +219,9 @@ def _compute_series(
         if i < STREAK_WINDOW - 1:
             streak7.append(None)
         else:
-            window_sets = [by_day.get(full_dates[j], set()) for j in range(i - STREAK_WINDOW + 1, i + 1)]
+            window_sets = [
+                by_day.get(full_dates[j], set()) for j in range(i - STREAK_WINDOW + 1, i + 1)
+            ]
             common = set.intersection(*window_sets) if window_sets else set()
             streak7.append(len(common))
 
@@ -259,16 +262,18 @@ def _write_csv_sidecar(
     """
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow([
-            "date",
-            "daily_active",
-            "ma7",
-            "streak7",
-            "cumulative_installs",
-            "dai_pct_of_total",
-            "likely_alive_7d",
-            "dai_pct_of_likely_alive",
-        ])
+        w.writerow(
+            [
+                "date",
+                "daily_active",
+                "ma7",
+                "streak7",
+                "cumulative_installs",
+                "dai_pct_of_total",
+                "likely_alive_7d",
+                "dai_pct_of_likely_alive",
+            ]
+        )
         for i, d in enumerate(dates):
             ma_cell = "" if ma7[i] is None else f"{ma7[i]:.2f}"
             s_cell = "" if streak7[i] is None else str(streak7[i])
@@ -296,18 +301,32 @@ def _generate_chart(
     parsed = [datetime.strptime(d, "%Y-%m-%d") for d in dates]
     colors = sns.color_palette("Set2", 3)
 
-    ax.plot(parsed, dai, marker="o", markersize=4, linewidth=1.5,
-            color=colors[0], alpha=0.75, label="Daily Active Instances (DAI)")
+    ax.plot(
+        parsed,
+        dai,
+        marker="o",
+        markersize=4,
+        linewidth=1.5,
+        color=colors[0],
+        alpha=0.75,
+        label="Daily Active Instances (DAI)",
+    )
 
-    ma_dates = [p for p, v in zip(parsed, ma7) if v is not None]
+    ma_dates = [p for p, v in zip(parsed, ma7, strict=False) if v is not None]
     ma_vals = [v for v in ma7 if v is not None]
-    ax.plot(ma_dates, ma_vals, linewidth=2.5, color=colors[1],
-            label="7-day moving average (MA7)")
+    ax.plot(ma_dates, ma_vals, linewidth=2.5, color=colors[1], label="7-day moving average (MA7)")
 
-    s_dates = [p for p, v in zip(parsed, streak7) if v is not None]
+    s_dates = [p for p, v in zip(parsed, streak7, strict=False) if v is not None]
     s_vals = [v for v in streak7 if v is not None]
-    ax.plot(s_dates, s_vals, marker="s", markersize=4, linewidth=2.0,
-            color=colors[2], label="7-day consistency streak (S7)")
+    ax.plot(
+        s_dates,
+        s_vals,
+        marker="s",
+        markersize=4,
+        linewidth=2.0,
+        color=colors[2],
+        label="7-day consistency streak (S7)",
+    )
 
     ax.set_ylabel("Customer instances")
     ax.set_xlabel("Date")
@@ -388,9 +407,7 @@ def main() -> None:
     _generate_chart(dates, dai, ma7, streak7, args.output)
 
     if args.csv_out:
-        _write_csv_sidecar(
-            dates, dai, ma7, streak7, cumulative, likely_alive, args.csv_out
-        )
+        _write_csv_sidecar(dates, dai, ma7, streak7, cumulative, likely_alive, args.csv_out)
 
 
 if __name__ == "__main__":

@@ -28,7 +28,9 @@ def test_default_mongodb_runs_with_auth(repo_root: Path):
         line for line in content.splitlines() if "mongod" in line and "--replSet" in line
     )
     assert "--auth" in joined, "docker-compose.yml mongodb must run with --auth"
-    assert "--keyFile" in joined, "docker-compose.yml mongodb must run with --keyFile (replica-set auth)"
+    assert "--keyFile" in joined, (
+        "docker-compose.yml mongodb must run with --keyFile (replica-set auth)"
+    )
 
 
 def test_default_mongodb_has_keyfile_init(repo_root: Path):
@@ -37,7 +39,9 @@ def test_default_mongodb_has_keyfile_init(repo_root: Path):
     assert "mongodb-keyfile-init:" in content, (
         "docker-compose.yml must define mongodb-keyfile-init to generate the keyfile"
     )
-    assert "mongodb-keyfile:" in content, "docker-compose.yml must define the mongodb-keyfile volume"
+    assert "mongodb-keyfile:" in content, (
+        "docker-compose.yml must define the mongodb-keyfile volume"
+    )
 
 
 def test_mongodb_credentials_fail_closed(repo_root: Path):

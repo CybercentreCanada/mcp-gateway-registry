@@ -67,6 +67,44 @@ class TestSettingsInstantiation:
         assert settings.health_check_interval_seconds == 300  # 5 minutes
         assert settings.health_check_timeout_seconds == 2
 
+    def test_mcp_token_ttl_defaults(self) -> None:
+        """MCP access-token TTL settings default to 8h (default) and 24h (max)."""
+        settings = Settings()
+
+        assert settings.mcp_token_default_ttl_hours == 8
+        assert settings.mcp_token_max_ttl_hours == 24
+
+    def test_mcp_token_ttl_configurable(self, monkeypatch) -> None:
+        """Operator-supplied MCP token TTL values within range are honoured."""
+        monkeypatch.setenv("MCP_TOKEN_DEFAULT_TTL_HOURS", "12")
+        monkeypatch.setenv("MCP_TOKEN_MAX_TTL_HOURS", "72")
+
+        settings = Settings()
+
+        assert settings.mcp_token_default_ttl_hours == 12
+        assert settings.mcp_token_max_ttl_hours == 72
+
+    def test_mcp_token_max_ttl_clamped_to_absolute_ceiling(self, monkeypatch) -> None:
+        """A max TTL above the 7-day absolute ceiling is clamped to 168h."""
+        from registry.core.config import MCP_TOKEN_ABSOLUTE_MAX_TTL_HOURS
+
+        monkeypatch.setenv("MCP_TOKEN_MAX_TTL_HOURS", "9999")
+
+        settings = Settings()
+
+        assert MCP_TOKEN_ABSOLUTE_MAX_TTL_HOURS == 168
+        assert settings.mcp_token_max_ttl_hours == 168
+
+    def test_mcp_token_ttl_floored_at_one_hour(self, monkeypatch) -> None:
+        """A non-positive TTL setting is floored to 1 hour (fail closed)."""
+        monkeypatch.setenv("MCP_TOKEN_DEFAULT_TTL_HOURS", "0")
+        monkeypatch.setenv("MCP_TOKEN_MAX_TTL_HOURS", "-5")
+
+        settings = Settings()
+
+        assert settings.mcp_token_default_ttl_hours == 1
+        assert settings.mcp_token_max_ttl_hours == 1
+
     def test_settings_websocket_defaults(self) -> None:
         """Test WebSocket performance default values."""
         # Act
@@ -1124,7 +1162,7 @@ class TestSettingsTabVisibilityFeatureFlags:
         """All defaults (true) produce same features as REGISTRY_MODE=full."""
         from registry.api.config_routes import get_config
 
-        result = await get_config()
+        result = await get_config(user_context={"username": "test-user"})
         features = result["features"]
 
         assert features["mcp_servers"] is True
@@ -1142,7 +1180,7 @@ class TestSettingsTabVisibilityFeatureFlags:
         with patch("registry.api.config_routes.settings", new_settings):
             from registry.api.config_routes import get_config
 
-            result = await get_config()
+            result = await get_config(user_context={"username": "test-user"})
             assert result["features"]["agents"] is False
             assert result["features"]["mcp_servers"] is True
 
@@ -1157,7 +1195,7 @@ class TestSettingsTabVisibilityFeatureFlags:
         with patch("registry.api.config_routes.settings", new_settings):
             from registry.api.config_routes import get_config
 
-            result = await get_config()
+            result = await get_config(user_context={"username": "test-user"})
             assert result["features"]["agents"] is False
             assert result["features"]["mcp_servers"] is True
 
@@ -1166,7 +1204,7 @@ class TestSettingsTabVisibilityFeatureFlags:
         """virtual_servers key is present in features dict."""
         from registry.api.config_routes import get_config
 
-        result = await get_config()
+        result = await get_config(user_context={"username": "test-user"})
         assert "virtual_servers" in result["features"]
         assert result["features"]["virtual_servers"] is True
 
@@ -1180,7 +1218,7 @@ class TestSettingsTabVisibilityFeatureFlags:
         with patch("registry.api.config_routes.settings", new_settings):
             from registry.api.config_routes import get_config
 
-            result = await get_config()
+            result = await get_config(user_context={"username": "test-user"})
             assert result["features"]["virtual_servers"] is False
 
     @pytest.mark.asyncio
@@ -1194,7 +1232,7 @@ class TestSettingsTabVisibilityFeatureFlags:
         with patch("registry.api.config_routes.settings", new_settings):
             from registry.api.config_routes import get_config
 
-            result = await get_config()
+            result = await get_config(user_context={"username": "test-user"})
             assert result["features"]["virtual_servers"] is False
             assert result["features"]["agents"] is True
 

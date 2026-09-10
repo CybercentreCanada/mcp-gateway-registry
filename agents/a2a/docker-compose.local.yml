@@ -18,8 +18,19 @@ services:
       - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
       - AGENT_NAME=travel-assistant
       - AGENTCORE_RUNTIME_URL=http://travel-assistant-agent:9000/
-      - KEYCLOAK_URL=${KEYCLOAK_URL:-}
-      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-}
+      # Bind on all interfaces so the gateway (separate container) can reach the
+      # agent over the docker network. Auth stays ENABLED (JWT validated against
+      # the same Keycloak realm the registry uses), so this is not the blocked
+      # AGENT_AUTH_DISABLED + 0.0.0.0 combination.
+      - AGENT_HOST=0.0.0.0
+      # Presence-only auth (TEST/DEMO): accept any non-empty bearer without
+      # JWKS verification, to exercise the gateway's Authorization passthrough.
+      - AGENT_AUTH_PRESENCE_ONLY=${AGENT_AUTH_PRESENCE_ONLY:-true}
+      # Presence-only is effectively unauthenticated, so binding to 0.0.0.0 above
+      # requires this explicit acknowledgement (TEST/DEMO local sandbox only).
+      - AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY=${AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY:-true}
+      - KEYCLOAK_URL=${KEYCLOAK_URL:-http://keycloak:8080}
+      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-mcp-gateway}
       - MCP_REGISTRY_URL=${MCP_REGISTRY_URL:-http://registry}
       - REGISTRY_JWT_TOKEN=${REGISTRY_JWT_TOKEN:-}
       - M2M_CLIENT_ID=${TRAVEL_AGENT_M2M_CLIENT_ID:-}
@@ -52,8 +63,19 @@ services:
       - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
       - AGENT_NAME=flight-booking
       - AGENTCORE_RUNTIME_URL=http://flight-booking-agent:9000/
-      - KEYCLOAK_URL=${KEYCLOAK_URL:-}
-      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-}
+      # Bind on all interfaces so the gateway (separate container) can reach the
+      # agent over the docker network. Auth stays ENABLED (JWT validated against
+      # the same Keycloak realm the registry uses), so this is not the blocked
+      # AGENT_AUTH_DISABLED + 0.0.0.0 combination.
+      - AGENT_HOST=0.0.0.0
+      # Presence-only auth (TEST/DEMO): accept any non-empty bearer without
+      # JWKS verification, to exercise the gateway's Authorization passthrough.
+      - AGENT_AUTH_PRESENCE_ONLY=${AGENT_AUTH_PRESENCE_ONLY:-true}
+      # Presence-only is effectively unauthenticated, so binding to 0.0.0.0 above
+      # requires this explicit acknowledgement (TEST/DEMO local sandbox only).
+      - AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY=${AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY:-true}
+      - KEYCLOAK_URL=${KEYCLOAK_URL:-http://keycloak:8080}
+      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-mcp-gateway}
       - MCP_REGISTRY_URL=${MCP_REGISTRY_URL:-http://registry}
       - REGISTRY_JWT_TOKEN=${REGISTRY_JWT_TOKEN:-}
       - M2M_CLIENT_ID=${FLIGHT_BOOKING_M2M_CLIENT_ID:-}
@@ -72,7 +94,7 @@ volumes:
     driver: local
   flight_booking_data:
     driver: local
-    
+
 networks:
   default:
     # Use the external network created by the main mcp-gateway-registry docker-compose

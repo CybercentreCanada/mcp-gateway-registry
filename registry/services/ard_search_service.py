@@ -190,7 +190,7 @@ async def _build_origin_map() -> tuple[dict[str, str], list[ArdReferral]]:
                 )
             )
     except Exception as e:  # noqa: BLE001 - federation optional; degrade to local-only
-        logger.debug("Could not load peers for federation: %s", e)
+        logger.debug(f"Could not load peers for federation type={type(e).__name__}")
     try:
         from ..repositories.factory import get_federation_config_repository
 
@@ -199,7 +199,9 @@ async def _build_origin_map() -> tuple[dict[str, str], list[ArdReferral]]:
             for src in config.ai_catalog.sources:
                 origin_map[src.source_id] = src.resolve_uri()
     except Exception as e:  # noqa: BLE001
-        logger.debug("Could not load ai_catalog sources for federation: %s", e)
+        logger.debug(
+            f"Could not load ai_catalog sources for federation type={type(e).__name__}",
+        )
     return origin_map, referrals
 
 
@@ -268,7 +270,10 @@ async def search_and_scope(
             scoped_out += 1
             continue
         entry = ard_mapping.map_server(
-            path, hit, publisher, _public_record_url(base_url, "servers", path),
+            path,
+            hit,
+            publisher,
+            _public_record_url(base_url, "servers", path),
             _namespace_for("server"),
         )
         if entry:
@@ -289,7 +294,10 @@ async def search_and_scope(
             scoped_out += 1
             continue
         entry = ard_mapping.map_agent(
-            path, card, publisher, _public_record_url(base_url, "agents", path),
+            path,
+            card,
+            publisher,
+            _public_record_url(base_url, "agents", path),
             _namespace_for("agent"),
         )
         if entry:
@@ -306,16 +314,26 @@ async def search_and_scope(
         if src is None:
             continue
         allowed = await user_can_access_skill(
-            path, hit.get("visibility", ""), hit.get("owner", ""),
-            hit.get("allowed_groups", []) or [], user_context,
+            path,
+            hit.get("visibility", ""),
+            hit.get("owner", ""),
+            hit.get("allowed_groups", []) or [],
+            user_context,
         )
         if not allowed:
             scoped_out += 1
             continue
         entry = ard_mapping.map_skill(
-            path, hit.get("skill_name", ""), hit.get("description"), hit.get("tags") or [],
-            [], hit.get("version"), hit.get("last_checked_time"), publisher,
-            _public_record_url(base_url, "skills", path), _namespace_for("skill"),
+            path,
+            hit.get("skill_name", ""),
+            hit.get("description"),
+            hit.get("tags") or [],
+            [],
+            hit.get("version"),
+            hit.get("last_checked_time"),
+            publisher,
+            _public_record_url(base_url, "skills", path),
+            _namespace_for("skill"),
         )
         if entry:
             out.append(_to_result(entry, hit.get("relevance_score", 0.0), src))
@@ -346,7 +364,9 @@ async def _override_source_descriptor(
         # filter by _id. find_with_filter returns a dict keyed by _id.
         docs = await repo.find_with_filter({"_id": {"$in": paths}}, limit=None)
     except Exception as e:  # noqa: BLE001 - degrade to locally-built url on error
-        logger.debug("Could not load source descriptors for federated results: %s", e)
+        logger.debug(
+            f"Could not load source descriptors for federated results type={type(e).__name__}",
+        )
         return
     for result, path in federated:
         doc = docs.get(path) or {}
@@ -393,7 +413,10 @@ async def browse(
             if not await user_can_access_server(path, doc.get("server_name", ""), user_context):
                 continue
             e = ard_mapping.map_server(
-                path, doc, publisher, _public_record_url(base_url, "servers", path),
+                path,
+                doc,
+                publisher,
+                _public_record_url(base_url, "servers", path),
                 _namespace_for("server"),
             )
             if e:
@@ -407,7 +430,10 @@ async def browse(
             if not user_can_access_agent_from_doc({**doc, "path": path}, user_context):
                 continue
             e = ard_mapping.map_agent(
-                path, doc, publisher, _public_record_url(base_url, "agents", path),
+                path,
+                doc,
+                publisher,
+                _public_record_url(base_url, "agents", path),
                 _namespace_for("agent"),
             )
             if e:
@@ -417,20 +443,29 @@ async def browse(
         skills = await get_skill_repository().list_filtered(include_disabled=False)
         for skill in skills:
             allowed = await user_can_access_skill(
-                skill.path, getattr(skill, "visibility", "") or "",
+                skill.path,
+                getattr(skill, "visibility", "") or "",
                 getattr(skill, "owner", "") or "",
-                list(getattr(skill, "allowed_groups", []) or []), user_context,
+                list(getattr(skill, "allowed_groups", []) or []),
+                user_context,
             )
             if not allowed:
                 continue
             if not _has_all_tags(getattr(skill, "tags", []), tags):
                 continue
-            tool_names = [t.get("name") for t in (getattr(skill, "tools", []) or []) if t.get("name")]
+            tool_names = [
+                t.get("name") for t in (getattr(skill, "tools", []) or []) if t.get("name")
+            ]
             e = ard_mapping.map_skill(
-                skill.path, getattr(skill, "skill_name", "") or skill.path,
-                getattr(skill, "description", None), list(getattr(skill, "tags", []) or []),
-                tool_names, getattr(skill, "version", None), getattr(skill, "updated_at", None),
-                publisher, _public_record_url(base_url, "skills", skill.path),
+                skill.path,
+                getattr(skill, "skill_name", "") or skill.path,
+                getattr(skill, "description", None),
+                list(getattr(skill, "tags", []) or []),
+                tool_names,
+                getattr(skill, "version", None),
+                getattr(skill, "updated_at", None),
+                publisher,
+                _public_record_url(base_url, "skills", skill.path),
                 _namespace_for("skill"),
             )
             if e:

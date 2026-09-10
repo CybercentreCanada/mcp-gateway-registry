@@ -96,7 +96,7 @@ class DocumentDBSkillSecurityScanRepository(SkillSecurityScanRepositoryBase):
         """
         collection = await self._get_collection()
 
-        pipeline = [
+        pipeline: list[dict[str, Any]] = [
             {"$sort": {"scan_timestamp": -1}},
             {"$group": {"_id": "$skill_path", "doc": {"$first": "$$ROOT"}}},
         ]

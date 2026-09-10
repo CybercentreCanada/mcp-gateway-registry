@@ -87,10 +87,13 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("session_cookie_domain", "Cookie Domain", False),
             ("ide_oauth_client_id", "IDE OAuth Client ID", False),
             ("ide_oauth_callback_port", "IDE OAuth Callback Port", False),
+            ("ide_connect_scope", "Claude Code Connect Scope", False),
             ("registry_static_token_auth_enabled", "Static Token Auth Enabled", False),
             ("registry_api_token", "Registry API Token", True),
             ("registry_api_keys", "Registry API Keys", True),
             ("max_tokens_per_user_per_hour", "JWT Token Vending Rate Limit (per user/hour)", False),
+            ("mcp_token_default_ttl_hours", "MCP Token Default TTL (hours)", False),
+            ("mcp_token_max_ttl_hours", "MCP Token Max TTL (hours)", False),
             ("m2m_direct_registration_enabled", "M2M Direct Registration Enabled", False),
             # Tool-level access control (issue #1026)
             ("mcp_tools_list_filter_enabled", "MCP tools/list Filter Enabled", False),
@@ -149,6 +152,8 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
                     ("entra_client_id", "Client ID", True),
                     ("entra_client_secret", "Client Secret", True),
                     ("entra_group_admin_id", "Admin Group ID", False),
+                    ("entra_scope_format", "Scope Format (v1/v2)", False),
+                    ("entra_application_id_uri", "Application ID URI", False),
                 ],
             },
             {
@@ -177,6 +182,12 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("vector_search_ef_search", "Vector Search EF", False),
             ("embeddings_api_key", "API Key", True),
             ("embeddings_secret_key", "Secret Key", True),
+            ("embeddings_auth_mode", "Auth Mode", False),
+            ("embeddings_idp_token_endpoint", "IdP Token Endpoint", False),
+            ("embeddings_idp_client_id", "IdP Client ID", False),
+            ("embeddings_idp_client_secret", "IdP Client Secret", True),
+            ("embeddings_idp_scope", "IdP Scope", False),
+            ("embeddings_idp_timeout_seconds", "IdP Timeout (s)", False),
         ],
     },
     "health_check": {
@@ -235,6 +246,7 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("audit_log_local_retention_hours", "Local Retention Hours", False),
             ("audit_log_mongodb_enabled", "MongoDB Enabled", False),
             ("audit_log_mongodb_ttl_days", "MongoDB TTL Days", False),
+            ("audit_log_require_durable", "Require Durable Sink", False),
             ("audit_log_health_checks", "Log Health Checks", False),
             ("audit_log_static_assets", "Log Static Assets", False),
         ],
@@ -271,6 +283,7 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("ard_registry_enabled", "ARD Registry Adapter", False),
             ("ard_publisher_domain", "ARD Publisher Domain", False),
             ("ard_catalog_default_namespace", "ARD URN Namespace", False),
+            ("ard_catalog_max_entries_per_type", "ARD Catalog Max Entries Per Type", False),
         ],
     },
     "otel": {
@@ -314,6 +327,7 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("registration_webhook_timeout_seconds", "Timeout (s)", False),
             ("registration_webhook_signing_secret", "Signing Secret", True),
             ("registration_enforced_status", "Enforced Initial Status", False),
+            ("allow_caller_supplied_asset_id", "Allow Caller-Supplied Asset ID", False),
         ],
     },
     "registration_gate": {
@@ -421,6 +435,35 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("openbao_kv_mount", "OpenBao KV Mount", False),
             ("openbao_auth_method", "OpenBao Auth Method", False),
             ("openbao_role", "OpenBao Role", False),
+        ],
+    },
+    "a2a_reverse_proxy": {
+        "title": "A2A Reverse-Proxy Mode",
+        "order": 26,
+        "fields": [
+            ("a2a_reverse_proxy_enabled", "Enabled", False),
+            ("ssrf_allowed_hosts", "SSRF Allowed Hosts", False),
+            ("ssrf_allowed_cidrs", "SSRF Allowed CIDRs", False),
+        ],
+    },
+    "rate_limiting": {
+        "title": "Rate Limiting",
+        "order": 27,
+        "fields": [
+            ("rate_limiting_enabled", "Enabled", False),
+            ("rate_limit_backend", "Counter Backend", False),
+            ("rate_limit_fail_open", "Fail Open on Backend Error", False),
+            ("rate_limit_quarantine_fail_closed", "Quarantine Fail Closed", False),
+            ("rate_limit_definitions_cache_ttl_seconds", "Definitions Cache TTL (seconds)", False),
+            ("rate_limit_backend_timeout_ms", "Backend Op Timeout (ms)", False),
+        ],
+    },
+    "frontend_observability": {
+        "title": "Frontend Observability",
+        "order": 28,
+        "fields": [
+            ("rum_snippet_b64", "RUM Snippet (base64)", True),
+            ("rum_allowed_hosts", "RUM Allowed Hosts", False),
         ],
     },
 }
@@ -715,7 +758,68 @@ async def get_full_config(
         except Exception:
             logger.debug("Could not write structured audit event for config_view", exc_info=True)
 
-    return _get_cached_config_response()
+    response = _get_cached_config_response()
+    # Append a live, read-only view of the current rate-limit definitions. These
+    # are dynamic Mongo documents (not static settings), so they are fetched fresh
+    # per request and never cached with the static config. Fail-soft: a lookup
+    # error must not break the whole config view.
+    rate_limit_group = await _build_rate_limit_definitions_group()
+    if rate_limit_group is not None:
+        response = dict(response)
+        response["groups"] = [*response["groups"], rate_limit_group]
+        response["total_groups"] = len(response["groups"])
+    return response
+
+
+async def _build_rate_limit_definitions_group() -> dict[str, Any] | None:
+    """Build a read-only config group listing the current rate-limit definitions.
+
+    Returns a group whose fields are one-per-definition (``key``/``label`` = the
+    definition id, ``value`` = a human summary). Returns an empty-fields group when
+    none exist, or None on error (fail-soft so the config view still renders).
+    """
+    try:
+        from ..rate_limiting.definitions_repository import DefinitionsRepository
+
+        repository = DefinitionsRepository()
+        definitions = await repository.list_all()
+    except Exception as exc:
+        logger.warning("Could not load rate-limit definitions for config view: %s", exc)
+        return None
+
+    fields: list[dict[str, Any]] = []
+    for d in sorted(definitions, key=lambda x: x.build_id()):
+        state = "enabled" if d.enabled else "disabled"
+        # Caller (group) defs carry per-caller-type limits; target defs a single one.
+        if d.axis == "caller":
+            parts = []
+            if d.user_max_requests is not None:
+                parts.append(f"user {d.user_max_requests}")
+            if d.agent_max_requests is not None:
+                parts.append(f"agent {d.agent_max_requests}")
+            limit_str = ", ".join(parts)
+        else:
+            limit_str = f"{d.max_requests} req"
+        summary = f"{limit_str} / {d.window_seconds}s ({state})"
+        if d.fail_closed:
+            summary += ", fail-closed"
+        fields.append(
+            {
+                "key": d.build_id(),
+                "label": d.build_id(),
+                "value": summary,
+                "raw_value": None,  # read-only; not copyable as a config value
+                "is_masked": False,
+                "unit": None,
+            }
+        )
+
+    return {
+        "id": "rate_limit_definitions",
+        "title": "Rate Limit Definitions (read-only)",
+        "order": 999,
+        "fields": fields,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -755,8 +859,19 @@ async def _custom_type_tabs() -> list[dict[str, str]]:
     summary="Get registry configuration",
     description="Returns the current deployment mode, registry mode, and enabled features",
 )
-async def get_config() -> dict[str, Any]:
-    """Get current registry configuration."""
+async def get_config(
+    user_context: Annotated[dict, Depends(enhanced_auth)],
+) -> dict[str, Any]:
+    """Get current registry configuration.
+
+    Requires authentication. This endpoint exposes deployment topology, enabled
+    feature flags, the active auth provider, and other internal configuration
+    that aids reconnaissance, so it is gated behind an authenticated session and
+    fails closed (401) for anonymous callers. Pre-login UI needs (application
+    title, available OAuth providers) are served by the dedicated unauthenticated
+    ``/api/version`` and ``/api/auth/*`` endpoints instead.
+    """
+    del user_context  # Presence enforces authentication; contents unused here.
     # User-group fallback feature flags (issue #1127). These let the frontend
     # decide whether to show the "User Groups" IAM tab and the "Also create in
     # PingFederate" checkbox without baking provider names into the UI.

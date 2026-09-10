@@ -29,7 +29,7 @@ from .models import (
     Response,
     mask_credential,
 )
-from .service import AuditLogger
+from .service import AuditLogger, NonDurableAuditError, enforce_durable_audit_sink
 
 __all__ = [
     # Models
@@ -47,6 +47,8 @@ __all__ = [
     "SENSITIVE_QUERY_PARAMS",
     # Service
     "AuditLogger",
+    "NonDurableAuditError",
+    "enforce_durable_audit_sink",
     # MCP Logger
     "MCPLogger",
     # Middleware

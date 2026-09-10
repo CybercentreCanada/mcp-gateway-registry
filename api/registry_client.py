@@ -17,10 +17,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 from urllib.parse import quote
-from uuid import UUID
 
 import requests
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Configure logging
 logging.basicConfig(
@@ -56,6 +55,14 @@ class InternalServiceRegistration(BaseModel):
 
     service_path: str = Field(
         ..., alias="path", description="Service path (e.g., /cloudflare-docs)"
+    )
+    # Optional caller-supplied asset id (#1276). Omitted -> server auto-generates
+    # a uuid4. Honored only when the registry enables ALLOW_CALLER_SUPPLIED_ASSET_ID.
+    id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=512,
+        description="Optional caller-supplied id (UUID, ARN, ...). Auto-generated if omitted.",
     )
     name: str | None = Field(None, description="Service name")
     description: str | None = Field(None, description="Service description")
@@ -182,6 +189,22 @@ class ServerDetailResponse(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    @field_validator("num_tools", mode="before")
+    @classmethod
+    def _default_num_tools(cls, value: Any) -> Any:
+        """Coerce a null num_tools to 0.
+
+        Freshly-registered servers return ``num_tools: null`` until their tools
+        are discovered; without this a register-then-read flow fails validation.
+        """
+        return 0 if value is None else value
+
+    @field_validator("tool_list", mode="before")
+    @classmethod
+    def _default_tool_list(cls, value: Any) -> Any:
+        """Coerce a null tool_list to an empty list (see _default_num_tools)."""
+        return [] if value is None else value
+
 
 class ServerUpdateResponse(BaseModel):
     """Response from PUT/PATCH /api/servers/{path}.
@@ -233,10 +256,54 @@ class ErrorResponse(BaseModel):
 
 
 class SecurityScanResult(BaseModel):
-    """Security scan result model."""
+    """Security scan result model (GET /api/servers/{path}/security-scan).
 
-    analysis_results: dict[str, Any] = Field(..., description="Analysis results by analyzer")
-    tool_results: list[dict[str, Any]] = Field(..., description="Detailed tool scan results")
+    The endpoint returns the full scan summary (safety flags + severity counts)
+    with the per-analyzer findings nested under ``raw_output.analysis_results``.
+    For backwards compatibility the ``analysis_results`` and ``tool_results``
+    fields are still exposed at the top level: they are lifted out of
+    ``raw_output`` when the API nests them there.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    analysis_results: dict[str, Any] = Field(
+        default_factory=dict, description="Analysis results by analyzer"
+    )
+    tool_results: list[dict[str, Any]] = Field(
+        default_factory=list, description="Detailed tool scan results"
+    )
+    server_url: str | None = Field(None, description="Server URL that was scanned")
+    server_path: str | None = Field(None, description="Server path")
+    scan_timestamp: str | None = Field(None, description="Scan timestamp")
+    is_safe: bool | None = Field(None, description="Whether the server is safe")
+    critical_issues: int | None = Field(None, description="Number of critical issues")
+    high_severity: int | None = Field(None, description="Number of high severity issues")
+    medium_severity: int | None = Field(None, description="Number of medium severity issues")
+    low_severity: int | None = Field(None, description="Number of low severity issues")
+    analyzers_used: list[str] = Field(default_factory=list, description="Analyzers used in scan")
+    scan_failed: bool | None = Field(None, description="Whether the scan failed")
+    error_message: str | None = Field(None, description="Error message if scan failed")
+    raw_output: dict[str, Any] | None = Field(None, description="Raw scan output")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_nested_results(cls, data: Any) -> Any:
+        """Lift analysis_results / tool_results out of raw_output when nested.
+
+        The current API nests the per-analyzer findings under raw_output; older
+        callers expect them at the top level. Populate the top-level fields from
+        raw_output only when they are not already present.
+        """
+        if not isinstance(data, dict):
+            return data
+        raw = data.get("raw_output")
+        if isinstance(raw, dict):
+            if not data.get("analysis_results") and "analysis_results" in raw:
+                data["analysis_results"] = raw["analysis_results"]
+            if not data.get("tool_results") and "tool_results" in raw:
+                data["tool_results"] = raw["tool_results"]
+        return data
 
 
 class RescanResponse(BaseModel):
@@ -475,6 +542,15 @@ class AgentRegistration(BaseModel):
     specification (v0.3.0), with extensions for MCP Gateway Registry integration.
     Note: Uses snake_case internally but serializes to camelCase for A2A compliance.
     """
+
+    # Optional caller-supplied asset id (#1276). Omitted -> server auto-generates
+    # a uuid4. Honored only when the registry enables ALLOW_CALLER_SUPPLIED_ASSET_ID.
+    id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=512,
+        description="Optional caller-supplied id (UUID, ARN, ...). Auto-generated if omitted.",
+    )
 
     # Required A2A fields
     protocol_version: str = Field(
@@ -1492,6 +1568,14 @@ class SkillRegistrationRequest(BaseModel):
 
     name: str = Field(..., description="Skill name (lowercase alphanumeric with hyphens)")
     skill_md_url: str = Field(..., description="URL to SKILL.md file")
+    # Optional caller-supplied asset id (#1276). Omitted -> server auto-generates
+    # a uuid4. Honored only when the registry enables ALLOW_CALLER_SUPPLIED_ASSET_ID.
+    id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=512,
+        description="Optional caller-supplied id (UUID, ARN, ...). Auto-generated if omitted.",
+    )
     description: str | None = Field(None, description="Skill description")
     repository_url: str | None = Field(None, description="Repository URL")
     version: str | None = Field(None, description="Skill version (e.g., 1.0.0)")
@@ -1511,7 +1595,10 @@ class SkillRegistrationRequest(BaseModel):
 class SkillCard(BaseModel):
     """Response model for a skill."""
 
-    id: UUID = Field(..., description="Unique identifier (UUID) for this skill")
+    id: str = Field(
+        ...,
+        description="Unique identifier for this skill (any non-empty string: UUID, ARN, ...)",
+    )
     name: str = Field(..., description="Skill name")
     path: str = Field(..., description="Skill path (e.g., /skills/pdf-processing)")
     description: str | None = Field(None, description="Skill description")
@@ -1707,11 +1794,14 @@ class RegistryClient:
             or endpoint.startswith("/api/custom-types")
             or endpoint.startswith("/api/custom")
             or endpoint.startswith("/api/admin")
+            or endpoint.startswith("/api/rate-limit")
             or endpoint.startswith("/api/v1/registry")
             or endpoint.startswith("/api/v1/health")
             or endpoint == "/api/servers/groups/import"
             or "/auth-credential" in endpoint
             or "/versions" in endpoint
+            or "/egress-auth" in endpoint
+            or "/egress-pat" in endpoint
             # The server rate endpoint (POST /api/servers/{path}/rate) takes a
             # JSON RatingRequest body, not form data.
             or endpoint.endswith("/rate")
@@ -2106,6 +2196,248 @@ class RegistryClient:
             f"registry_mode={result.get('registry_mode')}"
         )
         return result
+
+    def list_rate_limits(self) -> dict[str, Any]:
+        """List all rate-limit definitions (admin only).
+
+        Returns:
+            Dict with a "definitions" list.
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        logger.info("Listing rate-limit definitions")
+        response = self._make_request(method="GET", endpoint="/api/rate-limits")
+        return response.json()
+
+    def set_rate_limit(
+        self,
+        axis: str,
+        entity_type: str,
+        name: str,
+        max_requests: int | None = None,
+        user_max_requests: int | None = None,
+        agent_max_requests: int | None = None,
+        window_seconds: int = 60,
+        fail_closed: bool = False,
+        enabled: bool = True,
+        members: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Create or update a rate-limit definition (admin only).
+
+        Caller (group) axis: pass ``user_max_requests`` and/or ``agent_max_requests``.
+        Target axis: pass ``max_requests``. For a ``server_group`` target entity, also
+        pass ``members`` (a list of server paths); each listed server gets its own
+        independent ``max_requests``/window bucket (per-member uniform, not pooled).
+        The ``_id`` is derived server-side; this client builds the matching URL id.
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 400 invalid definition).
+        """
+        definition_id = f"{axis}:{entity_type}:{name}:{window_seconds}"
+        body: dict[str, Any] = {
+            "axis": axis,
+            "entity_type": entity_type,
+            "name": name,
+            "window_seconds": window_seconds,
+            "fail_closed": fail_closed,
+            "enabled": enabled,
+        }
+        # Only include limit fields that were provided (schema requires the right
+        # one per axis and rejects the others).
+        if max_requests is not None:
+            body["max_requests"] = max_requests
+        if user_max_requests is not None:
+            body["user_max_requests"] = user_max_requests
+        if agent_max_requests is not None:
+            body["agent_max_requests"] = agent_max_requests
+        if members is not None:
+            body["members"] = members
+        logger.info(f"Setting rate-limit definition {definition_id}")
+        response = self._make_request(
+            method="PUT",
+            endpoint=f"/api/rate-limits/{definition_id}",
+            data=body,
+        )
+        return response.json()
+
+    def delete_rate_limit(
+        self,
+        definition_id: str,
+    ) -> dict[str, Any]:
+        """Delete a rate-limit definition by its id (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 404 not found).
+        """
+        logger.info(f"Deleting rate-limit definition {definition_id}")
+        response = self._make_request(
+            method="DELETE",
+            endpoint=f"/api/rate-limits/{definition_id}",
+        )
+        return response.json()
+
+    def get_rate_limit(
+        self,
+        definition_id: str,
+    ) -> dict[str, Any]:
+        """Read a single rate-limit definition by id (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 404 not found).
+        """
+        logger.info(f"Getting rate-limit definition {definition_id}")
+        response = self._make_request(
+            method="GET",
+            endpoint=f"/api/rate-limits/{definition_id}",
+        )
+        return response.json()
+
+    def set_rate_limit_enabled(
+        self,
+        definition_id: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        """Enable or disable a rate-limit definition in place (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 404 not found).
+        """
+        logger.info(f"Setting rate-limit definition {definition_id} enabled={enabled}")
+        response = self._make_request(
+            method="POST",
+            endpoint=f"/api/rate-limits-enabled/{definition_id}",
+            params={"enabled": str(enabled).lower()},
+        )
+        return response.json()
+
+    def rate_limit_status(
+        self,
+        identity: str | None = None,
+        entity_type: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """Introspect rate-limit definitions for a caller and/or target (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        params: dict[str, Any] = {}
+        if identity:
+            params["identity"] = identity
+        if entity_type:
+            params["entity_type"] = entity_type
+        if name:
+            params["name"] = name
+        logger.info("Fetching rate-limit status")
+        response = self._make_request(
+            method="GET",
+            endpoint="/api/rate-limits-status",
+            params=params,
+        )
+        return response.json()
+
+    def list_rate_limit_memberships(self) -> dict[str, Any]:
+        """List all rate-limit memberships (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        logger.info("Listing rate-limit memberships")
+        response = self._make_request(method="GET", endpoint="/api/rate-limit-memberships")
+        return response.json()
+
+    def set_rate_limit_membership(
+        self,
+        subject_type: str,
+        subject: str,
+        groups: list[str],
+    ) -> dict[str, Any]:
+        """Create or update a rate-limit membership (admin only).
+
+        Maps a user (subject_type='user', subject=username) or an agent
+        (subject_type='client', subject=client_id) to rate-limit group name(s).
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 400 invalid membership).
+        """
+        membership_id = f"{subject_type}:{subject}"
+        body = {"subject_type": subject_type, "subject": subject, "groups": groups}
+        logger.info(f"Setting rate-limit membership {membership_id} -> {groups}")
+        response = self._make_request(
+            method="PUT",
+            endpoint=f"/api/rate-limit-memberships/{membership_id}",
+            data=body,
+        )
+        return response.json()
+
+    def delete_rate_limit_membership(
+        self,
+        membership_id: str,
+    ) -> dict[str, Any]:
+        """Delete a rate-limit membership by id (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 404 not found).
+        """
+        logger.info(f"Deleting rate-limit membership {membership_id}")
+        response = self._make_request(
+            method="DELETE",
+            endpoint=f"/api/rate-limit-memberships/{membership_id}",
+        )
+        return response.json()
+
+    def quarantine_add(
+        self,
+        subject_type: str,
+        subject: str,
+    ) -> dict[str, Any]:
+        """Quarantine a subject (drops ALL its data-plane traffic). Admin only.
+
+        ``subject_type`` is one of user/client (caller) or server/agent (target);
+        the server picks the correct reserved group from it.
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 400 invalid subject_type).
+        """
+        subject_id = f"{subject_type}:{subject}"
+        logger.info(f"Quarantining {subject_id}")
+        response = self._make_request(
+            method="POST",
+            endpoint=f"/api/rate-limit-quarantine/{subject_id}",
+        )
+        return response.json()
+
+    def quarantine_remove(
+        self,
+        subject_type: str,
+        subject: str,
+    ) -> dict[str, Any]:
+        """Remove a subject from quarantine (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        subject_id = f"{subject_type}:{subject}"
+        logger.info(f"Removing quarantine for {subject_id}")
+        response = self._make_request(
+            method="DELETE",
+            endpoint=f"/api/rate-limit-quarantine/{subject_id}",
+        )
+        return response.json()
+
+    def quarantine_list(self) -> dict[str, Any]:
+        """List everything currently quarantined (callers + targets). Admin only.
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        logger.info("Listing quarantined subjects")
+        response = self._make_request(
+            method="GET",
+            endpoint="/api/rate-limit-quarantine",
+        )
+        return response.json()
 
     def get_well_known_registry_card(self) -> RegistryCardResponse:
         """
@@ -3109,9 +3441,7 @@ class RegistryClient:
             requests.HTTPError on 400/403/404/502.
         """
         normalized = path if path.startswith("/") else f"/{path}"
-        logger.info(
-            f"Pulling agent card for '{normalized}' (dry_run={dry_run})"
-        )
+        logger.info(f"Pulling agent card for '{normalized}' (dry_run={dry_run})")
 
         response = self._make_request(
             method="POST",
@@ -3540,6 +3870,249 @@ class RegistryClient:
             method="GET", endpoint=f"/api/servers/{encoded_path}/versions"
         )
 
+        return response.json()
+
+    # Egress Auth Methods (per-user egress credential vault)
+
+    def configure_egress_auth(
+        self,
+        server_path: str,
+        mode: str,
+        provider: str | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        scopes: list[str] | None = None,
+        target_audience: str | None = None,
+        custom_authorize_url: str | None = None,
+        custom_token_url: str | None = None,
+        custom_scope_separator: str | None = None,
+        custom_token_auth_style: str | None = None,
+        custom_resource: str | None = None,
+    ) -> dict[str, Any]:
+        """Configure per-user egress auth on a server (admin only).
+
+        Wraps POST /api/servers/{path}/egress-auth. Sets the egress auth mode
+        and the mode-specific parameters. For ``pat`` mode, pass ``mode="pat"``
+        and ``provider=<slug>``.
+
+        Args:
+            server_path: Server path (e.g., "/github" or "github").
+            mode: Egress auth mode (none, oauth_user, obo_exchange, pat).
+            provider: Provider slug/name. Required for oauth_user and pat.
+            client_id: OAuth client id (oauth_user only).
+            client_secret: OAuth client secret (oauth_user only, write-only).
+            scopes: Optional list of OAuth scopes.
+            target_audience: Target audience (obo_exchange only).
+            custom_authorize_url: Authorize endpoint. REQUIRED when
+                ``provider="custom"`` (server-side ``resolve_provider`` rejects
+                the config without it).
+            custom_token_url: Token endpoint. REQUIRED when
+                ``provider="custom"``.
+            custom_scope_separator: Scope delimiter when the provider does not
+                use a space (custom only).
+            custom_token_auth_style: Where the client secret goes on the token
+                request -- "post_body" (default) or "basic_header" (custom only).
+            custom_resource: RFC 8707 resource indicator, sent on both the
+                authorize and token requests to bind the token to one protected
+                resource (custom only).
+
+        Returns:
+            Non-secret egress config view dict.
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 400 invalid config,
+                403 admin required, 404 server not found).
+        """
+        encoded_path = quote(server_path.lstrip("/"), safe="")
+        logger.info(f"Configuring egress auth for /{encoded_path}: mode={mode}")
+
+        body: dict[str, Any] = {"egress_auth_mode": mode}
+        if provider is not None:
+            body["egress_provider"] = provider
+        if client_id is not None:
+            body["client_id"] = client_id
+        if client_secret is not None:
+            body["client_secret"] = client_secret
+        if scopes is not None:
+            body["scopes"] = scopes
+        if target_audience is not None:
+            body["target_audience"] = target_audience
+        # Custom-OIDC overrides. Only meaningful when provider == "custom"; the
+        # server ignores them for built-in providers, so they are forwarded
+        # unconditionally like the fields above rather than gated here.
+        if custom_authorize_url is not None:
+            body["custom_authorize_url"] = custom_authorize_url
+        if custom_token_url is not None:
+            body["custom_token_url"] = custom_token_url
+        if custom_scope_separator is not None:
+            body["custom_scope_separator"] = custom_scope_separator
+        if custom_token_auth_style is not None:
+            body["custom_token_auth_style"] = custom_token_auth_style
+        if custom_resource is not None:
+            body["custom_resource"] = custom_resource
+
+        response = self._make_request(
+            method="POST",
+            endpoint=f"/api/servers/{encoded_path}/egress-auth",
+            data=body,
+        )
+        return response.json()
+
+    def get_egress_auth_config(
+        self,
+        server_path: str,
+    ) -> dict[str, Any]:
+        """Fetch the (non-secret) egress auth config for a server.
+
+        Wraps GET /api/servers/{path}/egress-auth.
+
+        Args:
+            server_path: Server path (e.g., "/github" or "github").
+
+        Returns:
+            Non-secret egress config view dict.
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 404 server not found).
+        """
+        encoded_path = quote(server_path.lstrip("/"), safe="")
+        logger.info(f"Fetching egress auth config for /{encoded_path}")
+
+        response = self._make_request(
+            method="GET",
+            endpoint=f"/api/servers/{encoded_path}/egress-auth",
+        )
+        return response.json()
+
+    def set_egress_pat(
+        self,
+        server_path: str,
+        secret: str,
+        ttl_value: int,
+        ttl_unit: str,
+        sub: str | None = None,
+        auth_method: str | None = None,
+    ) -> dict[str, Any]:
+        """Submit (or replace) a per-user PAT for a ``pat`` server (write-only).
+
+        Wraps PUT /api/servers/{path}/egress-pat. The secret is stored, never
+        returned. ``sub`` is passed through; the server enforces admin-gating
+        (a non-admin supplying ``sub`` is rejected 403).
+
+        Args:
+            server_path: Server path (e.g., "/github" or "github").
+            secret: The PAT / API key to store.
+            ttl_value: Positive integer validity amount.
+            ttl_unit: Validity unit (minutes, hours, or days).
+            sub: Admin-only override to submit on another user's behalf.
+            auth_method: Admin-only, REQUIRED with ``sub``: the target's ingress
+                auth method (the vault partition the target vends from, e.g.
+                "oauth2"). Ignored for self-submit.
+
+        Returns:
+            Status dict with path, configured, sub, updated_at, expires_at.
+            The secret is never echoed.
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 400 bad TTL/empty
+                secret or on-behalf missing auth_method, 403 non-admin sub, 409
+                server not in pat mode).
+        """
+        encoded_path = quote(server_path.lstrip("/"), safe="")
+        # Do NOT log the secret value.
+        logger.info(f"Submitting egress PAT for /{encoded_path}: ttl={ttl_value} {ttl_unit}")
+
+        body: dict[str, Any] = {
+            "secret": secret,
+            "ttl_value": ttl_value,
+            "ttl_unit": ttl_unit,
+        }
+        if sub is not None:
+            body["sub"] = sub
+        if auth_method is not None:
+            body["auth_method"] = auth_method
+
+        response = self._make_request(
+            method="PUT",
+            endpoint=f"/api/servers/{encoded_path}/egress-pat",
+            data=body,
+        )
+        return response.json()
+
+    def get_egress_pat_status(
+        self,
+        server_path: str,
+        sub: str | None = None,
+        auth_method: str | None = None,
+    ) -> dict[str, Any]:
+        """Report whether a per-user PAT is stored and when it expires.
+
+        Wraps GET /api/servers/{path}/egress-pat. Never returns the secret.
+
+        Args:
+            server_path: Server path (e.g., "/github" or "github").
+            sub: Admin-only override to query another user's status.
+            auth_method: Admin-only, REQUIRED with ``sub``: the target's ingress
+                auth method.
+
+        Returns:
+            Status dict with path, configured, expires_at, expired.
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 403 non-admin sub,
+                409 server not in pat mode).
+        """
+        encoded_path = quote(server_path.lstrip("/"), safe="")
+        logger.info(f"Fetching egress PAT status for /{encoded_path}")
+
+        params: dict[str, Any] = {}
+        if sub is not None:
+            params["sub"] = sub
+        if auth_method is not None:
+            params["auth_method"] = auth_method
+        response = self._make_request(
+            method="GET",
+            endpoint=f"/api/servers/{encoded_path}/egress-pat",
+            params=params or None,
+        )
+        return response.json()
+
+    def delete_egress_pat(
+        self,
+        server_path: str,
+        sub: str | None = None,
+        auth_method: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete a stored per-user PAT (idempotent).
+
+        Wraps DELETE /api/servers/{path}/egress-pat.
+
+        Args:
+            server_path: Server path (e.g., "/github" or "github").
+            sub: Admin-only override to delete another user's PAT.
+            auth_method: Admin-only, REQUIRED with ``sub``: the target's ingress
+                auth method.
+
+        Returns:
+            Dict with path and configured (always False).
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 403 non-admin sub,
+                409 server not in pat mode).
+        """
+        encoded_path = quote(server_path.lstrip("/"), safe="")
+        logger.info(f"Deleting egress PAT for /{encoded_path}")
+
+        params: dict[str, Any] = {}
+        if sub is not None:
+            params["sub"] = sub
+        if auth_method is not None:
+            params["auth_method"] = auth_method
+        response = self._make_request(
+            method="DELETE",
+            endpoint=f"/api/servers/{encoded_path}/egress-pat",
+            params=params or None,
+        )
         return response.json()
 
     # Management API Methods (IAM/User Management)
@@ -4513,13 +5086,24 @@ class RegistryClient:
         logger.info(f"Retrieved skill content: {content_len} characters")
         return SkillContentResponse(**result)
 
-    def search_skills(self, query: str, tags: str | None = None) -> SkillSearchResponse:
+    def search_skills(
+        self,
+        query: str,
+        tags: str | None = None,
+        include_draft: bool = False,
+        include_deprecated: bool = False,
+    ) -> SkillSearchResponse:
         """
         Search for skills by query.
 
         Args:
             query: Search query
             tags: Optional comma-separated tags filter
+            include_draft: Include skills whose lifecycle status is ``draft``
+                (newly registered skills default to ``draft`` and are excluded
+                from search unless this is set)
+            include_deprecated: Include skills whose lifecycle status is
+                ``deprecated``
 
         Returns:
             SkillSearchResponse with matching skills
@@ -4527,11 +5111,18 @@ class RegistryClient:
         Raises:
             requests.HTTPError: If request fails
         """
-        logger.info(f"Searching skills: query='{query}', tags={tags}")
+        logger.info(
+            f"Searching skills: query='{query}', tags={tags}, "
+            f"include_draft={include_draft}, include_deprecated={include_deprecated}"
+        )
 
-        params = {"q": query}
+        params: dict[str, str] = {"q": query}
         if tags:
             params["tags"] = tags
+        if include_draft:
+            params["include_draft"] = "true"
+        if include_deprecated:
+            params["include_deprecated"] = "true"
 
         response = self._make_request(method="GET", endpoint="/api/skills/search", params=params)
 
@@ -5134,9 +5725,7 @@ class RegistryClient:
         Raises:
             requests.HTTPError: 401 if unauthenticated.
         """
-        logger.info(
-            f"Listing user-groups (skip={skip}, limit={limit}, provider={provider}, q={q})"
-        )
+        logger.info(f"Listing user-groups (skip={skip}, limit={limit}, provider={provider}, q={q})")
 
         params: dict[str, Any] = {"skip": skip, "limit": limit}
         if provider is not None:
@@ -5352,9 +5941,7 @@ class RegistryClient:
                 limit is reached; 422 on schema validation errors.
         """
         logger.info(f"Creating custom type: {descriptor.get('name')}")
-        response = self._make_request(
-            method="POST", endpoint="/api/custom-types", data=descriptor
-        )
+        response = self._make_request(method="POST", endpoint="/api/custom-types", data=descriptor)
         logger.info(f"Custom type created: {descriptor.get('name')}")
         return response.json()
 
@@ -5405,9 +5992,7 @@ class RegistryClient:
         Returns:
             Dict with records list and total_count.
         """
-        response = self._make_request(
-            method="GET", endpoint=f"/api/custom/{type_name}"
-        )
+        response = self._make_request(method="GET", endpoint=f"/api/custom/{type_name}")
         return response.json()
 
 

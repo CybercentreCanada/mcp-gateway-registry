@@ -71,11 +71,28 @@ def integration_client(mock_settings, mock_peer_federation):
 class TestDeploymentModeIntegration:
     """Integration tests for deployment mode endpoints."""
 
-    def test_config_endpoint_returns_mode(self, integration_client):
-        """Config endpoint should return deployment mode fields."""
+    def test_config_endpoint_requires_auth(self, integration_client):
+        """Anonymous GET /api/config must be rejected (fail closed)."""
         response = integration_client.get("/api/config")
-        assert response.status_code == 200
-        data = response.json()
+        assert response.status_code == 401
+
+    def test_config_endpoint_returns_mode(self, integration_client):
+        """Config endpoint should return deployment mode fields for an authed user."""
+        from registry.auth.dependencies import enhanced_auth
+        from registry.main import app
+
+        app.dependency_overrides[enhanced_auth] = lambda: {
+            "username": "regular-user",
+            "groups": ["engineering"],
+            "is_admin": False,
+        }
+        try:
+            response = integration_client.get("/api/config")
+            assert response.status_code == 200
+            data = response.json()
+        finally:
+            app.dependency_overrides.clear()
+
         assert "deployment_mode" in data
         assert "registry_mode" in data
         assert "nginx_updates_enabled" in data
@@ -89,14 +106,21 @@ class TestDeploymentModeIntegration:
         assert isinstance(data["ui_title"], str)
         assert data["ui_title"]  # non-empty
 
-    def test_health_includes_deployment_mode(self, integration_client):
-        """Health endpoint should include deployment mode info."""
+    def test_health_does_not_leak_deployment_topology(self, integration_client):
+        """The anonymous /health probe must not disclose deployment topology.
+
+        deployment_mode / registry_mode / nginx_updates_enabled are the same
+        reconnaissance data GET /api/config was gated to protect; they must not
+        leak through the unauthenticated health probe. /health stays a simple
+        liveness signal (status + service), which is all a load balancer needs.
+        """
         response = integration_client.get("/health")
         assert response.status_code == 200
         data = response.json()
-        assert "deployment_mode" in data
-        assert "registry_mode" in data
-        assert "nginx_updates_enabled" in data
+        assert data["status"] == "healthy"
+        assert "deployment_mode" not in data
+        assert "registry_mode" not in data
+        assert "nginx_updates_enabled" not in data
 
     def test_version_endpoint_returns_ui_title(self, integration_client):
         """Version endpoint surfaces ui_title for unauthenticated pre-login pages."""

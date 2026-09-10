@@ -33,10 +33,11 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys  # noqa: E402
+
 import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import seaborn as sns  # noqa: E402
-import sys as _sys  # noqa: E402
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402

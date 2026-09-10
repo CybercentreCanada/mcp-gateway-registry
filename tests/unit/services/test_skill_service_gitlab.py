@@ -24,7 +24,6 @@ from registry.services.skill_service import (
     _resolve_tree_api,
 )
 
-
 # =============================================================================
 # _build_fetch_headers — GitLab URL translation
 # =============================================================================
@@ -49,9 +48,7 @@ class TestBuildFetchHeadersGitlab:
     def test_gitlab_url_with_bearer_auth_also_translates(self):
         url = "https://gitlab.example.com/g/r/-/raw/main/SKILL.md"
 
-        fetch_url, headers = _build_fetch_headers(
-            url, auth_scheme="bearer", auth_credential="tok"
-        )
+        fetch_url, headers = _build_fetch_headers(url, auth_scheme="bearer", auth_credential="tok")
 
         assert headers == {"Authorization": "Bearer tok"}
         assert fetch_url == (
@@ -122,9 +119,7 @@ class TestBuildFetchHeadersGitlab:
         # Simulate gitlab_url_utils being absent (upstream-only deployment).
         url = "https://gitlab.example.com/g/r/-/raw/main/SKILL.md"
 
-        with patch.dict(
-            sys.modules, {"registry.utils.gitlab_url_utils": None}
-        ):
+        with patch.dict(sys.modules, {"registry.utils.gitlab_url_utils": None}):
             fetch_url, headers = _build_fetch_headers(
                 url, auth_scheme="api_key", auth_credential="glpat-xxx"
             )
@@ -142,9 +137,7 @@ class TestResolveTreeApiGitlab:
     """GitLab path through the tree-API resolver."""
 
     def test_gitlab_url_returns_api_v4_tree_url(self):
-        skill_md_url = (
-            "https://gitlab.example.com/g/r/-/raw/main/skills/demo/SKILL.md"
-        )
+        skill_md_url = "https://gitlab.example.com/g/r/-/raw/main/skills/demo/SKILL.md"
 
         result = _resolve_tree_api(skill_md_url)
 
@@ -160,9 +153,7 @@ class TestResolveTreeApiGitlab:
 
     def test_self_hosted_gitlab_without_gitlab_in_hostname(self):
         """Self-hosted GitLab without 'gitlab' in hostname resolves tree URL."""
-        skill_md_url = (
-            "https://code.internal.corp/team/project/-/raw/main/skills/demo/SKILL.md"
-        )
+        skill_md_url = "https://code.internal.corp/team/project/-/raw/main/skills/demo/SKILL.md"
 
         result = _resolve_tree_api(skill_md_url)
 
@@ -188,9 +179,7 @@ class TestResolveTreeApiGitlab:
         # With gitlab_url_utils unavailable, a GitHub URL must still resolve.
         github_url = "https://github.com/anthropics/skills/blob/main/x/SKILL.md"
 
-        with patch.dict(
-            sys.modules, {"registry.utils.gitlab_url_utils": None}
-        ):
+        with patch.dict(sys.modules, {"registry.utils.gitlab_url_utils": None}):
             result = _resolve_tree_api(github_url)
 
         assert result is not None
@@ -259,14 +248,10 @@ class TestAppendPageParam:
         ("global_credentials", "abc", {}),
     ],
 )
-def test_build_fetch_headers_non_gitlab_url_leaves_url_intact(
-    scheme, credential, expected_header
-):
+def test_build_fetch_headers_non_gitlab_url_leaves_url_intact(scheme, credential, expected_header):
     url = "https://example.com/path/SKILL.md"
 
-    fetch_url, headers = _build_fetch_headers(
-        url, auth_scheme=scheme, auth_credential=credential
-    )
+    fetch_url, headers = _build_fetch_headers(url, auth_scheme=scheme, auth_credential=credential)
 
     assert fetch_url == url
     assert headers == expected_header

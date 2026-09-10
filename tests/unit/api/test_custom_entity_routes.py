@@ -30,9 +30,37 @@ from registry.services.custom_entity_errors import (
 
 logger = logging.getLogger(__name__)
 
-USER_CTX: dict[str, Any] = {"username": "bob", "is_admin": False, "groups": []}
-VALID_UUID: str = str(uuid4())
 TYPE: str = "workflow"
+VALID_UUID: str = str(uuid4())
+
+# A non-admin who holds the full per-type scope set for TYPE. Used for the
+# happy-path tests below (the gate passes, then service behavior is exercised).
+FULL_SCOPES: dict[str, list[str]] = {
+    f"list_{TYPE}_entity": ["all"],
+    f"create_{TYPE}_entity": ["all"],
+    f"modify_{TYPE}_entity": ["all"],
+    f"delete_{TYPE}_entity": ["all"],
+}
+USER_CTX: dict[str, Any] = {
+    "username": "bob",
+    "is_admin": False,
+    "groups": [],
+    "ui_permissions": FULL_SCOPES,
+}
+# Admin bypasses every gate via is_admin, regardless of ui_permissions.
+ADMIN_CTX: dict[str, Any] = {
+    "username": "admin",
+    "is_admin": True,
+    "groups": [],
+    "ui_permissions": {},
+}
+# A non-admin with NO per-type scopes; every gate should deny (404/403).
+NO_SCOPE_CTX: dict[str, Any] = {
+    "username": "eve",
+    "is_admin": False,
+    "groups": [],
+    "ui_permissions": {},
+}
 
 
 def _record(name: str = "r") -> CustomEntityRecord:
@@ -167,4 +195,87 @@ class TestUpdateDelete:
         )
         client = _make_client(USER_CTX)
         resp = client.delete(f"/api/custom/{TYPE}/{VALID_UUID}")
+        assert resp.status_code == 404
+
+
+@pytest.mark.unit
+class TestPerTypeScopeGates:
+    """Per-type authorization gates: read hides the type (404), mutate 403.
+
+    Each gate is checked for a non-holder (deny), a scope-holder (pass), and an
+    admin (catch-all pass). Admin bypasses via is_admin even with empty
+    ui_permissions.
+    """
+
+    # ── Read gate: no list scope hides the type entirely (404) ──
+    def test_list_no_scope_404_hides_type(self, patched_service):
+        client = _make_client(NO_SCOPE_CTX)
+        resp = client.get(f"/api/custom/{TYPE}")
+        assert resp.status_code == 404
+        patched_service.list_records.assert_not_awaited()
+
+    def test_list_holder_ok(self, patched_service):
+        client = _make_client(USER_CTX)
+        assert client.get(f"/api/custom/{TYPE}").status_code == 200
+
+    def test_list_admin_ok(self, patched_service):
+        client = _make_client(ADMIN_CTX)
+        assert client.get(f"/api/custom/{TYPE}").status_code == 200
+
+    def test_get_no_scope_404(self, patched_service):
+        client = _make_client(NO_SCOPE_CTX)
+        resp = client.get(f"/api/custom/{TYPE}/{VALID_UUID}")
+        assert resp.status_code == 404
+        patched_service.get_record.assert_not_awaited()
+
+    def test_get_admin_ok(self, patched_service):
+        client = _make_client(ADMIN_CTX)
+        assert client.get(f"/api/custom/{TYPE}/{VALID_UUID}").status_code == 200
+
+    # ── Create gate: the PRIMARY GAP being closed (403 for non-holder) ──
+    def test_create_no_scope_403(self, patched_service):
+        client = _make_client(NO_SCOPE_CTX)
+        resp = client.post(f"/api/custom/{TYPE}", json={"name": "x"})
+        assert resp.status_code == 403
+        patched_service.create_record.assert_not_awaited()
+
+    def test_create_holder_ok(self, patched_service):
+        client = _make_client(USER_CTX)
+        assert client.post(f"/api/custom/{TYPE}", json={"name": "x"}).status_code == 201
+
+    def test_create_admin_ok(self, patched_service):
+        client = _make_client(ADMIN_CTX)
+        assert client.post(f"/api/custom/{TYPE}", json={"name": "x"}).status_code == 201
+
+    def test_create_list_only_scope_still_403(self, patched_service):
+        # Holding only the read scope must NOT permit create.
+        ctx = {**NO_SCOPE_CTX, "ui_permissions": {f"list_{TYPE}_entity": ["all"]}}
+        client = _make_client(ctx)
+        resp = client.post(f"/api/custom/{TYPE}", json={"name": "x"})
+        assert resp.status_code == 403
+
+    # ── Update / delete gates ──
+    def test_update_no_scope_403(self, patched_service):
+        client = _make_client(NO_SCOPE_CTX)
+        resp = client.put(f"/api/custom/{TYPE}/{VALID_UUID}", json={"name": "x"})
+        assert resp.status_code == 403
+        patched_service.update_record.assert_not_awaited()
+
+    def test_delete_no_scope_403(self, patched_service):
+        client = _make_client(NO_SCOPE_CTX)
+        resp = client.delete(f"/api/custom/{TYPE}/{VALID_UUID}")
+        assert resp.status_code == 403
+        patched_service.delete_record.assert_not_awaited()
+
+    # ── Rating routes are view-gated (require list scope) ──
+    def test_rate_no_scope_404(self, patched_service):
+        patched_service.update_rating = AsyncMock(return_value=4.0)
+        client = _make_client(NO_SCOPE_CTX)
+        resp = client.post(f"/api/custom/{TYPE}/{VALID_UUID}/rate", json={"rating": 4})
+        assert resp.status_code == 404
+
+    def test_get_rating_no_scope_404(self, patched_service):
+        patched_service.get_rating = AsyncMock(return_value={"num_stars": 0})
+        client = _make_client(NO_SCOPE_CTX)
+        resp = client.get(f"/api/custom/{TYPE}/{VALID_UUID}/rating")
         assert resp.status_code == 404

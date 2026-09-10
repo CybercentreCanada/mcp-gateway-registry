@@ -36,9 +36,7 @@ class TestFilterSessionGroups:
     async def test_scope_derived_keeps_only_mapped(self):
         """Design C keeps only groups present in the scope-mapped set."""
         repo = _make_scope_repo({"registry-admins", "registry-readonly"})
-        groups = ["registry-admins", "noise-1", "registry-readonly"] + [
-            f"g{i}" for i in range(500)
-        ]
+        groups = ["registry-admins", "noise-1", "registry-readonly"] + [f"g{i}" for i in range(500)]
         with patch.object(group_filter, "ALLOWED_IDP_GROUPS", []):
             with patch(
                 "registry.repositories.factory.get_scope_repository",

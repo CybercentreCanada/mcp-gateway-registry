@@ -103,7 +103,7 @@ def _extract_default(source: str) -> str:
     import re
 
     match = re.search(
-        r'''os\.environ\.get\(\s*["']EXCLUDE_CHARACTERS["']\s*,\s*(["'])((?:[^\\]|\\.)*?)\1''',
+        r"""os\.environ\.get\(\s*["']EXCLUDE_CHARACTERS["']\s*,\s*(["'])((?:[^\\]|\\.)*?)\1""",
         source,
     )
     assert match, "Could not find EXCLUDE_CHARACTERS default in source"

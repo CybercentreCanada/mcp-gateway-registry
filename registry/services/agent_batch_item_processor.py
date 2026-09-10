@@ -24,6 +24,10 @@ from ..schemas.agent_models import (
     AgentBatchItemResult,
     AgentCard,
     BatchItemOp,
+    _DeleteItem,
+    _PatchItem,
+    _RegisterItem,
+    _ReplaceItem,
 )
 from .agent_service import agent_service
 from .registration_gate_service import check_registration_gate
@@ -55,11 +59,22 @@ async def _authorize(
 ) -> tuple[bool, str]:
     """Re-authorize a batch item using the submitter's persisted permissions.
 
-    Mirrors the single-card handlers: publish_agent to register, modify_service
-    + owner-or-admin to patch/replace, and the federated read-only guard plus
-    owner-or-admin to delete.
+    Mirrors the single-card handlers EXACTLY, via the canonical asset-permission
+    helper so the batch path can never diverge from them again:
+
+    - register: publish_agent.
+    - patch/replace: modify_agent scope AND (admin OR owner).
+    - delete:        delete_agent scope AND (admin OR owner).
+
+    The scope half routes through ``user_has_asset_permission("agent", ...)`` (the
+    same map the HTTP handlers use), so a sibling family's scope (e.g.
+    modify_service) can never satisfy an agent op here -- the previous bug where
+    batch patch/replace accepted modify_service and batch delete required no
+    delete_agent scope at all (owner-or-admin only, bypassing the single-card
+    gate). ``user_has_asset_permission`` reads only is_admin + ui_permissions, so
+    the submitter's persisted snapshot is packaged into a minimal context.
     """
-    from ..auth.dependencies import user_has_ui_permission_for_service
+    from ..auth.asset_permissions import user_has_asset_permission
 
     if item.op == BatchItemOp.register:
         if not ui_permissions.get("publish_agent"):
@@ -75,12 +90,16 @@ async def _authorize(
         source_peer = sync_metadata.get("source_peer_id", "unknown peer registry")
         return False, f"agent is synced from {source_peer} and cannot be modified locally"
 
-    if item.op in (BatchItemOp.patch, BatchItemOp.replace):
-        if not user_has_ui_permission_for_service("modify_service", existing.name, ui_permissions):
-            return False, f"modify_service permission required for {existing.name}"
+    # Scope half: the canonical per-action agent scope for this specific agent.
+    ctx = {"is_admin": is_admin, "ui_permissions": ui_permissions}
+    action = "delete" if item.op == BatchItemOp.delete else "modify"
+    if not user_has_asset_permission("agent", action, existing.name, ctx):
+        return False, f"{action}_agent permission required for {existing.name}"
 
+    # Ownership half: admins bypass; otherwise the submitter must own the agent.
     if not is_admin and existing.registered_by != submitted_by:
-        return False, "you can only modify agents you registered"
+        verb = "delete" if item.op == BatchItemOp.delete else "modify"
+        return False, f"you can only {verb} agents you registered"
 
     return True, ""
 
@@ -195,7 +214,7 @@ def _build_card_from_request(request, path: str, existing: AgentCard | None) -> 
 
 async def _do_register(
     index: int,
-    item: AgentBatchItem,
+    item: _RegisterItem,
     submitted_by: str,
 ) -> AgentBatchItemResult:
     """Register a new agent (POST /api/agents/register parity)."""
@@ -234,7 +253,7 @@ async def _do_register(
 
 async def _do_patch(
     index: int,
-    item: AgentBatchItem,
+    item: _PatchItem,
     submitted_by: str,
 ) -> AgentBatchItemResult:
     """Apply a JSON Merge Patch to an existing agent (PATCH parity)."""
@@ -286,7 +305,7 @@ async def _do_patch(
 
 async def _do_replace(
     index: int,
-    item: AgentBatchItem,
+    item: _ReplaceItem,
     submitted_by: str,
 ) -> AgentBatchItemResult:
     """Fully replace an existing agent card (PUT parity)."""
@@ -321,7 +340,7 @@ async def _do_replace(
 
 async def _do_delete(
     index: int,
-    item: AgentBatchItem,
+    item: _DeleteItem,
     submitted_by: str,
 ) -> AgentBatchItemResult:
     """Delete an existing agent (DELETE parity)."""

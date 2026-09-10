@@ -26,6 +26,7 @@ def _load_recent_forecast_history(
 ) -> list[dict]:
     """Load the last N install-forecast JSON files (excluding current)."""
     import re
+
     date_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     candidates = []
     for entry in sorted(os.listdir(search_dir), reverse=True):
@@ -46,7 +47,7 @@ def _load_recent_forecast_history(
                 d = json.load(f)
                 d["_snapshot_date"] = date_str
                 out.append(d)
-        except Exception:
+        except Exception:  # nosec B110 - best-effort load of optional forecast history
             pass
     return out
 
@@ -85,7 +86,24 @@ def rule_milestone_install_count(
     prev = vars_.get("prev_total_instances", 0)
     if not isinstance(cur, int) or not isinstance(prev, int):
         return None
-    for milestone in (1000, 900, 800, 700, 600, 500):
+    for milestone in (
+        2000,
+        1900,
+        1800,
+        1700,
+        1600,
+        1500,
+        1400,
+        1300,
+        1200,
+        1100,
+        1000,
+        900,
+        800,
+        700,
+        600,
+        500,
+    ):
         if cur >= milestone > prev:
             return (
                 f"**Crossed {milestone} unique registry installs.** "
@@ -151,8 +169,8 @@ def rule_install_pace_acceleration(
     if consecutive_acceleration:
         for h in history:
             r = h.get("recent_pace", {}).get("daily_add_rate", 0)
-            l = h.get("linear", {}).get("slope_per_day", 0)
-            if r <= l:
+            slope = h.get("linear", {}).get("slope_per_day", 0)
+            if r <= slope:
                 consecutive_acceleration = False
                 break
     if consecutive_acceleration and len(history) >= 2:
@@ -182,16 +200,18 @@ def rule_install_forecast_eta(
         return None
     try:
         from datetime import datetime
+
         linear_eta = datetime.strptime(linear_eta_str, "%Y-%m-%d")
         recent_eta = datetime.strptime(recent_eta_str, "%Y-%m-%d")
         gap = abs((linear_eta - recent_eta).days)
     except ValueError:
         return None
+    target_str = vars_.get("forecast_target", "2,000")
     if gap <= 2:
         return (
             f"**Forecast models converged within {gap} day{'s' if gap != 1 else ''}** "
             f"(linear: {linear_eta_str}, recent-pace: {recent_eta_str}). "
-            f"The 1,000-install milestone is forecastable to within a small window."
+            f"The {target_str}-install milestone is forecastable to within a small window."
         )
     if gap >= 7:
         return (
@@ -275,6 +295,7 @@ def rule_one_day_wonder_trend(
     # We need previous metrics to compare; stash via load
     search_dir = args.search_dir or str(Path(args.output_dir).parent)
     import re
+
     date_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     prev_pct = None
     for entry in sorted(os.listdir(search_dir), reverse=True):
@@ -288,7 +309,7 @@ def rule_one_day_wonder_trend(
                 with open(path) as f:
                     prev_pct = json.load(f).get("stickiness", {}).get("one_day_wonder_pct")
                     break
-            except Exception:
+            except Exception:  # nosec B110 - best-effort parse of optional history entry
                 pass
     if prev_pct is None:
         return None

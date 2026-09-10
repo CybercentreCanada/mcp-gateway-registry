@@ -55,11 +55,7 @@ def default_storage_path() -> Path:
 def resolve_ui_credentials() -> tuple[str, str]:
     """Pick UI login credentials from env, falling back to .env defaults."""
     username = os.getenv("STRESS_UI_USERNAME", "admin")
-    password = (
-        os.getenv("STRESS_UI_PASSWORD")
-        or os.getenv("INITIAL_ADMIN_PASSWORD")
-        or "changeme"
-    )
+    password = os.getenv("STRESS_UI_PASSWORD") or os.getenv("INITIAL_ADMIN_PASSWORD") or "changeme"
     return username, password
 
 
@@ -134,9 +130,7 @@ async def _drive_login(
         await page.fill("input[name='username']", username)
         await page.fill("input[name='password']", password)
 
-        submit = page.locator(
-            "input[type='submit'], button[type='submit'], #kc-login"
-        ).first
+        submit = page.locator("input[type='submit'], button[type='submit'], #kc-login").first
         await submit.click()
 
         await _wait_for_authed(page, base_url)
@@ -171,9 +165,7 @@ async def get_storage_state(
     reason = "force_relogin=True" if force_relogin else "no valid cached state"
     logger.info("%s; running Keycloak login flow", reason)
 
-    user, pw = (username or resolve_ui_credentials()[0]), (
-        password or resolve_ui_credentials()[1]
-    )
+    user, pw = (username or resolve_ui_credentials()[0]), (password or resolve_ui_credentials()[1])
     state = await _drive_login(base_url, user, pw, headless=headless)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, default=str))

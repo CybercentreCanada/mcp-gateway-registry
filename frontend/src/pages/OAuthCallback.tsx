@@ -42,4 +42,4 @@ const OAuthCallback: React.FC = () => {
   );
 };
 
-export default OAuthCallback; 
+export default OAuthCallback;

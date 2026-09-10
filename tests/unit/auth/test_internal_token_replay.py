@@ -226,9 +226,11 @@ class TestValidateInternalAuthSingleUse:
         ):
             token = generate_internal_token(subject="registry-service", purpose="test")
 
-            # First presentation: accepted, returns caller identity.
+            # First presentation: accepted, returns the attributable caller
+            # identity (`<service>@<instance_id>`; the instance suffix is
+            # host-derived, so assert on the service component).
             caller = await validate_internal_auth(_make_request(token))
-            assert caller == "registry-service"
+            assert caller.split("@", 1)[0] == "registry-service"
 
             # Replay of the exact same token: rejected 401.
             with pytest.raises(HTTPException) as exc_info:
@@ -481,10 +483,12 @@ class TestCrossEndpointReplay:
             token = generate_internal_token(subject="registry-service", purpose="reload-scopes")
 
             # First hop: /internal/reload-scopes accepts and consumes the jti.
+            # Caller is the attributable `<service>@<instance_id>`; the instance
+            # suffix is host-derived, so assert on the service component.
             caller = await validate_internal_auth(
                 _make_request(token, path="/internal/reload-scopes")
             )
-            assert caller == "registry-service"
+            assert caller.split("@", 1)[0] == "registry-service"
 
             # Attacker replays the SAME token against a different internal route.
             with pytest.raises(HTTPException) as exc_info:

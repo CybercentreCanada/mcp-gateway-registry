@@ -40,10 +40,11 @@ function setConfig(customTypes: { name: string; display_name: string }[]) {
 }
 
 // Route axios.get by URL so the order of the parallel fetches doesn't matter.
+// fetchAllPages uses axios.get(url, { params }) — match on the path only.
 function mockGetByUrl(handlers: Record<string, any>) {
   mockedAxios.get.mockImplementation((url: string) => {
     for (const [needle, response] of Object.entries(handlers)) {
-      if (url.startsWith(needle)) {
+      if (url === needle || url.startsWith(needle)) {
         return response instanceof Error
           ? Promise.reject(response)
           : Promise.resolve({ data: response });
@@ -62,20 +63,74 @@ describe('ServerStatsContext custom entities', () => {
     jest.clearAllMocks();
   });
 
-  test('requests each custom type with limit=1000 (the endpoint max)', async () => {
+  test('requests each custom type with skip/limit page size 1000 (issue #880)', async () => {
     setConfig([{ name: 'prompt_template', display_name: 'Prompt Templates' }]);
     mockGetByUrl({
-      '/api/servers': { servers: [] },
-      '/api/agents': { agents: [] },
-      '/api/skills': { skills: [] },
-      '/api/custom/prompt_template': { records: [] },
+      '/api/servers': { servers: [], total_count: 0 },
+      '/api/agents': { agents: [], total_count: 0 },
+      '/api/skills': { skills: [], total_count: 0 },
+      '/api/custom/prompt_template': { records: [], total_count: 0 },
     });
 
     const { result } = renderHook(() => useServerStats(), { wrapper });
 
     await waitFor(() => expect(result.current.loading).toBe(false));
 
-    expect(mockedAxios.get).toHaveBeenCalledWith('/api/custom/prompt_template?limit=1000');
+    expect(mockedAxios.get).toHaveBeenCalledWith('/api/custom/prompt_template', {
+      params: { limit: 1000, skip: 0 },
+    });
+  });
+
+  test('pages through servers when total_count exceeds one page', async () => {
+    setConfig([]);
+    let serverCalls = 0;
+    mockedAxios.get.mockImplementation((url: string, config?: any) => {
+      if (url === '/api/servers') {
+        serverCalls += 1;
+        const offset = config?.params?.offset ?? 0;
+        if (offset === 0) {
+          return Promise.resolve({
+            data: {
+              servers: Array.from({ length: 2000 }, (_, i) => ({
+                path: `/s${i}`,
+                display_name: `S${i}`,
+                is_enabled: true,
+                health_status: 'healthy',
+              })),
+              total_count: 2001,
+            },
+          });
+        }
+        return Promise.resolve({
+          data: {
+            servers: [
+              {
+                path: '/s2000',
+                display_name: 'S2000',
+                is_enabled: true,
+                health_status: 'healthy',
+              },
+            ],
+            total_count: 2001,
+          },
+        });
+      }
+      if (url === '/api/agents') {
+        return Promise.resolve({ data: { agents: [], total_count: 0 } });
+      }
+      if (url === '/api/skills') {
+        return Promise.resolve({ data: { skills: [], total_count: 0 } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    const { result } = renderHook(() => useServerStats(), { wrapper });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(serverCalls).toBe(2);
+    expect(result.current.servers).toHaveLength(2001);
+    expect(result.current.stats.total).toBe(2001);
   });
 
   test('folds custom records into stats and exposes them by type', async () => {
@@ -84,17 +139,19 @@ describe('ServerStatsContext custom entities', () => {
       { name: 'dataset', display_name: 'Datasets' },
     ]);
     mockGetByUrl({
-      '/api/servers': { servers: [] },
-      '/api/agents': { agents: [] },
-      '/api/skills': { skills: [] },
+      '/api/servers': { servers: [], total_count: 0 },
+      '/api/agents': { agents: [], total_count: 0 },
+      '/api/skills': { skills: [], total_count: 0 },
       '/api/custom/prompt_template': {
         records: [
           { path: '/prompt_template/a', name: 'A', is_enabled: true },
           { path: '/prompt_template/b', name: 'B', is_enabled: true },
         ],
+        total_count: 2,
       },
       '/api/custom/dataset': {
         records: [{ path: '/dataset/c', name: 'C', is_enabled: false }],
+        total_count: 1,
       },
     });
 

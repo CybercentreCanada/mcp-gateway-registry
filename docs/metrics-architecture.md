@@ -91,8 +91,8 @@ These are the primary operational metrics emitted by the middleware layer.
 
 | Instrument | Type | Service | Attributes |
 |-----------|------|---------|------------|
-| `auth_request_total` | Counter | auth-server, registry | `success`, `method`, `server` |
-| `auth_request_duration_seconds` | Histogram | auth-server, registry | `success`, `method`, `server` |
+| `auth_request_total` | Counter | auth-server, registry | `success`, `method`, `server`, `target_kind` |
+| `auth_request_duration_seconds` | Histogram | auth-server, registry | `success`, `method`, `server`, `target_kind` |
 | `tool_execution_total` | Counter | auth-server, registry | `method`, `tool_name`, `success` |
 | `tool_execution_duration_seconds` | Histogram | auth-server, registry | `method`, `tool_name`, `success` |
 | `tool_discovery_total` | Counter | auth-server, registry | `success`, `resource_type` |

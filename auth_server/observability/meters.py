@@ -88,7 +88,11 @@ _meter = metrics.get_meter("mcp-auth-server")
 
 auth_request_total = _meter.create_counter(
     name="mcpgw_registry_auth_request_total",
-    description="Authentication request count, labeled by outcome and method",
+    description=(
+        "Authentication request count, labeled by outcome, method, and "
+        "target_kind (a2a_agent | virtual_mcp_server | mcp_server | "
+        "control_plane | unknown) for routing breakdown"
+    ),
     unit="1",
 )
 
@@ -137,6 +141,21 @@ protocol_latency_ms = _meter.create_histogram(
 token_mint_total = _meter.create_counter(
     name="mcpgw_registry_token_mint_total",
     description="Token mint count, labeled by kind, resource type, path, and outcome",
+    unit="1",
+)
+
+
+# =============================================================================
+# Redirect-validation metrics (open-redirect hardening, PR #1475 follow-up)
+# =============================================================================
+
+redirect_rejected_total = _meter.create_counter(
+    name="mcpgw_registry_redirect_rejected_total",
+    description=(
+        "Login/logout redirect URIs rejected by the allowlist, labeled by flow "
+        "(login | logout) and reason (backslash | protocol_relative | scheme | "
+        "not_in_allowlist | cookie_domain | empty)"
+    ),
     unit="1",
 )
 

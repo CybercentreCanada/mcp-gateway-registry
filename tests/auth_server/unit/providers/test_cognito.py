@@ -121,7 +121,7 @@ class TestCognitoValidateToken:
     """
 
     @staticmethod
-    def _provider(ide_client_id=None):
+    def _provider(ide_client_id=None, m2m_client_ids=None):
         from auth_server.providers.cognito import CognitoProvider
 
         return CognitoProvider(
@@ -130,6 +130,7 @@ class TestCognitoValidateToken:
             client_secret="s",
             region="us-east-1",
             ide_oauth_client_id=ide_client_id,
+            m2m_client_ids=m2m_client_ids,
         )
 
     def _run_validate(self, provider, decoded_claims):
@@ -196,3 +197,84 @@ class TestCognitoValidateToken:
         )
 
         assert result["valid"] is True
+
+    def test_m2m_access_token_accepted_for_listed_client(self):
+        """A machine (client_credentials) access token from an allowlisted M2M
+        client is accepted. Pattern B: each agent has its own M2M client_id, all
+        listed in COGNITO_M2M_CLIENT_IDS."""
+        provider = self._provider(m2m_client_ids=["booking-agent-m2m", "search-agent-m2m"])
+        result = self._run_validate(
+            provider,
+            {
+                "token_use": "access",
+                "client_id": "search-agent-m2m",
+                "sub": "svc-1",
+                # M2M token: no username / cognito:groups; authz from scope.
+                "scope": "rl-test-api/invoke",
+            },
+        )
+
+        assert result["valid"] is True
+        assert result["client_id"] == "search-agent-m2m"
+        # M2M token has no cognito:groups; authorization comes from the scope claim.
+        assert result["groups"] == []
+        assert result["scopes"] == ["rl-test-api/invoke"]
+        # The raw token claims carry no end-user 'username' -> the rate-limit
+        # caller resolver classifies this as an agent (keyed on client_id).
+        assert "username" not in result["data"]
+
+    def test_m2m_access_token_rejected_when_not_listed(self):
+        """A machine token whose client_id is not in the allowlist is rejected
+        (fail closed): a rogue client in the same pool cannot reach the gateway."""
+        provider = self._provider(m2m_client_ids=["booking-agent-m2m"])
+        with pytest.raises(ValueError, match="not in the accepted client"):
+            self._run_validate(
+                provider,
+                {"token_use": "access", "client_id": "unlisted-m2m", "sub": "svc-2"},
+            )
+
+    def test_m2m_allowlist_empty_by_default_fail_closed(self):
+        """With no M2M allowlist configured, an M2M client token is rejected."""
+        provider = self._provider()  # no m2m_client_ids
+        assert provider.m2m_client_ids == []
+        assert provider.m2m_accept_any is False
+        with pytest.raises(ValueError, match="not in the accepted client"):
+            self._run_validate(
+                provider,
+                {"token_use": "access", "client_id": "some-m2m", "sub": "svc-3"},
+            )
+
+    def test_m2m_wildcard_accepts_any_machine_token(self):
+        """COGNITO_M2M_CLIENT_IDS='*' accepts a machine token (no username) from
+        ANY client in the pool -- so Pattern B (100 agents) needs no enumeration."""
+        provider = self._provider(m2m_client_ids=["*"])
+        assert provider.m2m_accept_any is True
+        assert provider.m2m_client_ids == []  # "*" is not a literal client id
+        result = self._run_validate(
+            provider,
+            {
+                "token_use": "access",
+                "client_id": "agent-73-m2m",  # never explicitly listed
+                "sub": "svc-73",
+                "scope": "rl-test-api/invoke",
+            },
+        )
+        assert result["valid"] is True
+        assert result["client_id"] == "agent-73-m2m"
+
+    def test_m2m_wildcard_does_not_accept_user_token_from_unknown_client(self):
+        """SECURITY: the '*' wildcard is scoped to machine tokens only. A USER
+        token (has a username claim) from a client not in the web/IDE allowlist
+        is still rejected, so '*' cannot be abused to forge a login."""
+        provider = self._provider(m2m_client_ids=["*"])
+        with pytest.raises(ValueError, match="not in the accepted client"):
+            self._run_validate(
+                provider,
+                {
+                    "token_use": "access",
+                    "client_id": "rogue-web-client",
+                    "sub": "user-9",
+                    "username": "victim",  # user token -> wildcard must NOT apply
+                    "cognito:groups": ["registry-admins"],
+                },
+            )

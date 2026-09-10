@@ -38,11 +38,52 @@ RRF_K: int = 60
 
 # Stopwords (same as production)
 _STOPWORDS: set[str] = {
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "can", "to", "of", "in", "on", "at", "by",
-    "for", "with", "about", "as", "into", "through", "from", "what",
-    "when", "where", "who", "which", "how", "why", "get", "set", "put",
+    "a",
+    "an",
+    "the",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "could",
+    "should",
+    "may",
+    "might",
+    "can",
+    "to",
+    "of",
+    "in",
+    "on",
+    "at",
+    "by",
+    "for",
+    "with",
+    "about",
+    "as",
+    "into",
+    "through",
+    "from",
+    "what",
+    "when",
+    "where",
+    "who",
+    "which",
+    "how",
+    "why",
+    "get",
+    "set",
+    "put",
 }
 
 
@@ -81,7 +122,7 @@ def _cosine_similarity(
     """Cosine similarity between two vectors."""
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(y * y for y in b))
     if norm_a == 0 or norm_b == 0:
@@ -268,9 +309,11 @@ def _evaluate_query(
 
     ndcg = _ndcg_at_k(relevance_grades, ideal_grades, k)
 
-    recall_at_k = sum(
-        1 for path in result_paths if path in expected_map
-    ) / len(expected_map) if expected_map else 0.0
+    recall_at_k = (
+        sum(1 for path in result_paths if path in expected_map) / len(expected_map)
+        if expected_map
+        else 0.0
+    )
 
     first_relevant_rank = None
     for i, path in enumerate(result_paths):
@@ -319,11 +362,13 @@ def _run_evaluation(
         ranked = score_fn(docs, query_embedding, query_tokens)
         eval_result = _evaluate_query(ranked, expected)
 
-        metrics.append({
-            "query": query,
-            "description": gt.get("description", ""),
-            **eval_result,
-        })
+        metrics.append(
+            {
+                "query": query,
+                "description": gt.get("description", ""),
+                **eval_result,
+            }
+        )
 
         if verbose:
             found_str = ", ".join(eval_result["found_in_top10"][:3]) or "(none)"
@@ -414,11 +459,11 @@ def main():
         results[method] = result
 
     # Print summary
-    print(f"\n{'='*70}")
-    print(f"SEARCH SCORING EVALUATION RESULTS")
-    print(f"{'='*70}")
+    print(f"\n{'=' * 70}")
+    print("SEARCH SCORING EVALUATION RESULTS")
+    print(f"{'=' * 70}")
     print(f"Dataset: {len(docs)} documents | Queries: {len(ground_truth)}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     header = f"{'Metric':<30}"
     for method in methods:

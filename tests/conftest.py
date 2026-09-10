@@ -98,6 +98,17 @@ def pytest_configure(config):
     # conftest, because Settings() is constructed during import and refuses
     # to start without one — pytest_configure runs too late for that path.
 
+    # Snapshot the pristine, test-configured env NOW — before collection imports
+    # any test module. Several modules (e.g. credentials-provider OAuth flows,
+    # agent CLIs) call dotenv.load_dotenv() at import time, which loads a
+    # developer's local .env into os.environ during collection, before any
+    # per-test fixture runs. The _reset_os_environ autouse fixture restores this
+    # baseline at the start of every test so that collection-time and cross-test
+    # env leaks can't override values tests read from defaults or mocked settings
+    # (e.g. SESSION_COOKIE_*, MCP_TELEMETRY_HEARTBEAT_INTERVAL_MINUTES).
+    global _PRISTINE_ENV
+    _PRISTINE_ENV = dict(os.environ)
+
     print(
         "Test environment configured: DOCUMENTDB_HOST=localhost, STORAGE_BACKEND=mongodb-ce, DOCUMENTDB_DIRECT_CONNECTION=true, DOCUMENTDB_USE_TLS=false"
     )
@@ -177,6 +188,13 @@ os.environ.setdefault(
     "host.docker.internal,example.com,server.com,test-server,fake-server,"
     "currenttime,realserverfaketools,external.example.com",
 )
+
+
+# Pristine, test-configured env snapshot. Populated at the end of
+# pytest_configure() (after the DOCUMENTDB_*/gate defaults are set, before test
+# collection imports any module that calls load_dotenv() at import time). The
+# _reset_os_environ autouse fixture restores this at the start of every test.
+_PRISTINE_ENV: dict[str, str] = dict(os.environ)
 
 
 # Now we can safely import registry modules
@@ -483,6 +501,38 @@ def mock_skill_security_scan_repository():
     mock.query_by_status.return_value = []
     mock.load_all.return_value = None
     return mock
+
+
+@pytest.fixture(autouse=True)
+def _reset_os_environ():
+    """Reset os.environ to the pristine test baseline around every test.
+
+    Several modules call ``dotenv.load_dotenv()`` at *import* time (e.g. the
+    credentials-provider OAuth flows) or during execution (agent CLIs). That
+    loads a developer's local ``.env`` into the process env — during collection,
+    before any per-test fixture runs, and persisting across tests on the same
+    xdist worker. It silently overrides values tests read from code defaults or
+    mocked settings (e.g. SESSION_COOKIE_*, MCP_TELEMETRY_HEARTBEAT_INTERVAL_MINUTES).
+
+    Resetting to the snapshot captured in pytest_configure() (before collection)
+    both scrubs the collection-time leak and contains any per-test mutation, so
+    tests are hermetic regardless of what a developer's .env contains.
+
+    pytest manages its own os.environ keys (e.g. PYTEST_CURRENT_TEST) during a
+    test's lifecycle, so those are preserved rather than reset.
+    """
+
+    def _reset() -> None:
+        preserved = {k: v for k, v in os.environ.items() if k.startswith("PYTEST_")}
+        os.environ.clear()
+        os.environ.update(_PRISTINE_ENV)
+        os.environ.update(preserved)
+
+    _reset()
+    try:
+        yield
+    finally:
+        _reset()
 
 
 @pytest.fixture(autouse=True)

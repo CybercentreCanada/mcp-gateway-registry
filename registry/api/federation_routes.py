@@ -897,7 +897,7 @@ async def _deregister_agents_from_registry(
     agent_repo = get_agent_repository()
 
     # Primary: query by metadata
-    matching_paths = set()
+    matching_paths: set[str] = set()
     by_metadata = await agent_repo.find_with_filter({"metadata.agentcore_registry_id": registry_id})
     matching_paths.update(by_metadata.keys())
 
@@ -944,9 +944,9 @@ async def _deregister_skills_from_registry(
     skill_service = get_skill_service()
     all_skills = await skill_repo.list_all()
 
-    matching_paths = set()
+    matching_paths: set[str] = set()
     for skill in all_skills:
-        meta = skill.metadata or {}
+        meta: Any = skill.metadata or {}
         extra = meta.extra if hasattr(meta, "extra") else {}
         meta_dict = meta if isinstance(meta, dict) else {}
 

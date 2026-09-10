@@ -241,3 +241,17 @@ output "documentdb_secrets_manager_secret_arn" {
   value       = local.is_aws_documentdb ? aws_secretsmanager_secret.documentdb_credentials[0].arn : null
   sensitive   = true
 }
+
+output "unsafe_password_chars_override_warning" {
+  description = <<-EOT
+    Non-empty only when allow_unsafe_password_chars=true. Surfaces a loud
+    reminder at plan/apply that the URI/RDS-safe password validation (#1354) is
+    being bypassed for this install. Empty string when the override is off.
+  EOT
+  value = var.allow_unsafe_password_chars ? join("", [
+    "WARNING: allow_unsafe_password_chars=true -- the URI/RDS-safe password ",
+    "validation (#1354) is BYPASSED. Only valid for an existing install whose ",
+    "databases were created with such a password. New installs must use a ",
+    "compliant password (no / @ \" ' + : ? # & ! = % or spaces).",
+  ]) : ""
+}

@@ -24,7 +24,7 @@ dependencies = [
     "sentence-transformers>=3.0.0",
     "websockets>=15.0.1",
     "scikit-learn>=1.3.0",
-    "torch>=2.12.1",
+    "torch>=2.13.0",
     "huggingface-hub>=0.31.1",
     "bandit>=1.8.3",
     "langchain-core>=1.3.3",
@@ -217,6 +217,10 @@ exclude_dirs = ["tests", "*/test/*", "*/tests/*", ".venv"]
 [tool.mypy]
 explicit_package_bases = true
 mypy_path = "."
+# The Pydantic plugin teaches mypy about model __init__ signatures, including
+# populate_by_name aliases, so constructing a model by its snake_case field
+# name (not just the camelCase alias) type-checks correctly.
+plugins = ["pydantic.mypy"]
 
 # Ruff Configuration
 [tool.ruff]

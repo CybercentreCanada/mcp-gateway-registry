@@ -14,11 +14,14 @@ _SOURCE_URI = "http://reg.example.com/api/ard/search"
 # origin_map: known foreign origin ids -> their origin URLs.
 _ORIGIN_MAP = {
     "acme": "https://acme.com/.well-known/ai-catalog.json",  # ingested catalog
-    "peerb": "https://peerb.example/api/ard",                 # peer registry
+    "peerb": "https://peerb.example/api/ard",  # peer registry
 }
 _REFERRALS = [
-    ArdReferral(identifier="urn:air:peerb.example:registry:self",
-                type="application/ai-registry+json", url="https://peerb.example/api/ard"),
+    ArdReferral(
+        identifier="urn:air:peerb.example:registry:self",
+        type="application/ai-registry+json",
+        url="https://peerb.example/api/ard",
+    ),
 ]
 
 # Three server hits: one local, one ingested (acme), one peer (peerb).
@@ -81,19 +84,23 @@ class TestOverrideSourceDescriptor:
 
         r = ArdSearchResult(
             **ArdCatalogEntry(
-                identifier="urn:air:local:server:acme-github", display_name="GH",
+                identifier="urn:air:local:server:acme-github",
+                display_name="GH",
                 type="application/mcp-server-card+json",
                 url="http://reg.example.com/api/public/servers/github/server.json",
             ).model_dump(by_alias=True, exclude_none=True),
-            score=90, source="https://acme.com/.well-known/ai-catalog.json",
+            score=90,
+            source="https://acme.com/.well-known/ai-catalog.json",
         )
         repo = AsyncMock()
-        repo.find_with_filter = AsyncMock(return_value={
-            "/acme/github": {
-                "ard_source_url": "https://acme.com/api/public/servers/github/server.json",
-                "ard_source_identifier": "urn:air:acme.com:server:github",
+        repo.find_with_filter = AsyncMock(
+            return_value={
+                "/acme/github": {
+                    "ard_source_url": "https://acme.com/api/public/servers/github/server.json",
+                    "ard_source_identifier": "urn:air:acme.com:server:github",
+                }
             }
-        })
+        )
         await s._override_source_descriptor([(r, "/acme/github")], repo)
         assert r.url == "https://acme.com/api/public/servers/github/server.json"
         assert r.identifier == "urn:air:acme.com:server:github"

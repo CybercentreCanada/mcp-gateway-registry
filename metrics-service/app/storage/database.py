@@ -44,9 +44,7 @@ async def _migrate_schema_if_needed(db):
             "faiss_search_time_ms" in discovery_columns
             and "vector_search_time_ms" not in discovery_columns
         ):
-            logger.info(
-                "Renaming discovery_metrics.faiss_search_time_ms to vector_search_time_ms"
-            )
+            logger.info("Renaming discovery_metrics.faiss_search_time_ms to vector_search_time_ms")
             await db.execute(
                 "ALTER TABLE discovery_metrics "
                 "RENAME COLUMN faiss_search_time_ms TO vector_search_time_ms"
@@ -218,20 +216,20 @@ async def init_database():
             CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics(timestamp);
             CREATE INDEX IF NOT EXISTS idx_metrics_service_type ON metrics(service, metric_type);
             CREATE INDEX IF NOT EXISTS idx_metrics_type_timestamp ON metrics(metric_type, timestamp);
-            
+
             CREATE INDEX IF NOT EXISTS idx_auth_timestamp ON auth_metrics(timestamp);
             CREATE INDEX IF NOT EXISTS idx_auth_success ON auth_metrics(success, timestamp);
             CREATE INDEX IF NOT EXISTS idx_auth_user ON auth_metrics(user_hash, timestamp);
-            
+
             CREATE INDEX IF NOT EXISTS idx_discovery_timestamp ON discovery_metrics(timestamp);
             CREATE INDEX IF NOT EXISTS idx_discovery_results ON discovery_metrics(results_count, timestamp);
-            
+
             CREATE INDEX IF NOT EXISTS idx_tool_timestamp ON tool_metrics(timestamp);
             CREATE INDEX IF NOT EXISTS idx_tool_name ON tool_metrics(tool_name, timestamp);
             CREATE INDEX IF NOT EXISTS idx_tool_success ON tool_metrics(success, timestamp);
             CREATE INDEX IF NOT EXISTS idx_tool_client ON tool_metrics(client_name, timestamp);
             CREATE INDEX IF NOT EXISTS idx_tool_method ON tool_metrics(method, timestamp);
-            
+
             CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
             CREATE INDEX IF NOT EXISTS idx_api_keys_service ON api_keys(service_name);
         """)
@@ -376,7 +374,7 @@ class MetricsStorage:
             async with db.execute(
                 """
                 SELECT service_name, is_active, rate_limit, last_used_at
-                FROM api_keys 
+                FROM api_keys
                 WHERE key_hash = ?
             """,
                 (key_hash,),
@@ -396,8 +394,8 @@ class MetricsStorage:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
-                UPDATE api_keys 
-                SET last_used_at = datetime('now') 
+                UPDATE api_keys
+                SET last_used_at = datetime('now')
                 WHERE key_hash = ?
             """,
                 (key_hash,),

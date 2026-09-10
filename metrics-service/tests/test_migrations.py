@@ -163,7 +163,7 @@ class TestMigrationManager:
         # Verify table was created
         async with aiosqlite.connect(temp_db) as db:
             cursor = await db.execute("""
-                SELECT name FROM sqlite_master 
+                SELECT name FROM sqlite_master
                 WHERE type='table' AND name='test_table'
             """)
             result = await cursor.fetchone()
@@ -250,7 +250,7 @@ class TestMigrationManager:
         # Verify table was dropped
         async with aiosqlite.connect(temp_db) as db:
             cursor = await db.execute("""
-                SELECT name FROM sqlite_master 
+                SELECT name FROM sqlite_master
                 WHERE type='table' AND name='test_table'
             """)
             result = await cursor.fetchone()
@@ -299,7 +299,7 @@ class TestMigrationManager:
             for table_name in ["schema_migrations", "table2", "table3"]:
                 cursor = await db.execute(
                     """
-                    SELECT name FROM sqlite_master 
+                    SELECT name FROM sqlite_master
                     WHERE type='table' AND name=?
                 """,
                     (table_name,),
@@ -331,7 +331,7 @@ class TestMigrationManager:
         # Verify only first two tables exist
         async with aiosqlite.connect(temp_db) as db:
             cursor = await db.execute("""
-                SELECT name FROM sqlite_master 
+                SELECT name FROM sqlite_master
                 WHERE type='table' AND name='table3'
             """)
             result = await cursor.fetchone()
@@ -392,7 +392,7 @@ class TestMigrationManager:
             for table_name in ["table2", "table3"]:
                 cursor = await db.execute(
                     """
-                    SELECT name FROM sqlite_master 
+                    SELECT name FROM sqlite_master
                     WHERE type='table' AND name=?
                 """,
                     (table_name,),

@@ -185,9 +185,7 @@ def _refresh_token_via_keycloak(token_file: Path) -> str:
         timeout=60,
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"Token regen script exited {result.returncode}: {result.stderr[:500]}"
-        )
+        raise RuntimeError(f"Token regen script exited {result.returncode}: {result.stderr[:500]}")
 
     # The generator always writes the M2M token here regardless of caller's path.
     generated = project_root() / ".oauth-tokens" / "mcp-gateway-m2m-token.json"
@@ -573,10 +571,11 @@ def _build_api_perf_md(report: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append(f"# API performance — {report['backend']} @ size={report['size']}")
     lines.append("")
-    lines.append(f"- Iterations: **{report['iterations']}** "
-                 f"(samples per op after warmup discard)")
-    lines.append(f"- Warmup strategy: `{report['warmup_strategy']}` "
-                 "(first iteration timed but excluded from percentile math)")
+    lines.append(f"- Iterations: **{report['iterations']}** (samples per op after warmup discard)")
+    lines.append(
+        f"- Warmup strategy: `{report['warmup_strategy']}` "
+        "(first iteration timed but excluded from percentile math)"
+    )
     lines.append(f"- Base URL: `{report['base_url']}`")
     lines.append(f"- Collected at: `{report['collected_at']}`")
     lines.append(f"- Wall clock: **{report['wall_clock_seconds']:.1f}** s")
@@ -584,7 +583,9 @@ def _build_api_perf_md(report: dict[str, Any]) -> str:
 
     lines.append("## List endpoints")
     lines.append("")
-    lines.append("| Operation | Samples | p50 ms | p95 ms | p99 ms | min ms | max ms | mean ms | errors |")
+    lines.append(
+        "| Operation | Samples | p50 ms | p95 ms | p99 ms | min ms | max ms | mean ms | errors |"
+    )
     lines.append("|---|---|---|---|---|---|---|---|---|")
     for op in list_ops:
         lat = op.get("latency_ms") or {}
@@ -612,8 +613,9 @@ def _build_api_perf_md(report: dict[str, Any]) -> str:
 
     lines.append("## Semantic search")
     lines.append("")
-    lines.append("Query body sets `include_draft: true`; Phase 1 entities are registered as "
-                 "`status: draft`.")
+    lines.append(
+        "Query body sets `include_draft: true`; Phase 1 entities are registered as `status: draft`."
+    )
     lines.append("")
     lines.append("| Query | k | Samples | p50 ms | p95 ms | p99 ms | mean ms | hits | errors |")
     lines.append("|---|---|---|---|---|---|---|---|---|")
@@ -639,9 +641,11 @@ def _build_api_perf_md(report: dict[str, Any]) -> str:
         lines.append("## Operations with errors")
         lines.append("")
         for op in bad:
-            lines.append(f"- `{op['name']}`"
-                         + (f" query=`{op['query_id']}` k={op['k']}" if op.get("query_id") else "")
-                         + f": error_count={op['error_count']}, samples={op['samples']}")
+            lines.append(
+                f"- `{op['name']}`"
+                + (f" query=`{op['query_id']}` k={op['k']}" if op.get("query_id") else "")
+                + f": error_count={op['error_count']}, samples={op['samples']}"
+            )
         lines.append("")
 
     return "\n".join(lines)
@@ -722,9 +726,7 @@ def _main(args: argparse.Namespace) -> int:
                     args.iterations,
                 )
                 operations.append(
-                    _run_semantic_search(
-                        client, args.base_url, q, k, args.iterations, token_state
-                    )
+                    _run_semantic_search(client, args.base_url, q, k, args.iterations, token_state)
                 )
 
     registry_info = fetch_registry_info(args.base_url, token_state.token)

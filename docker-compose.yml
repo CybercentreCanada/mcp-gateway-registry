@@ -168,6 +168,10 @@ services:
       - CODING_ASSISTANTS=${CODING_ASSISTANTS:-}
       # UI title override. Empty = deployment-mode-aware default.
       - UI_TITLE=${UI_TITLE:-}
+      # Base64-encoded HTML snippet served as /rum.js for frontend RUM. Empty disables RUM. May contain a vendor token.
+      - RUM_SNIPPET_B64=${RUM_SNIPPET_B64:-}
+      # Comma-separated host allowlist for the RUM snippet (fail-closed when set). Empty disables the check.
+      - RUM_ALLOWED_HOSTS=${RUM_ALLOWED_HOSTS:-}
       - GATEWAY_ADDITIONAL_SERVER_NAMES=${GATEWAY_ADDITIONAL_SERVER_NAMES:-}
       # Registry Card Configuration
       - REGISTRY_URL=${REGISTRY_URL:-http://localhost}
@@ -190,6 +194,17 @@ services:
       - MCP_HTTPS_REQUIRED=${MCP_HTTPS_REQUIRED:-true}
       - MCP_RESOURCE_DOCUMENTATION_URL=${MCP_RESOURCE_DOCUMENTATION_URL:-}
       - MCP_ADVERTISED_SCOPES=${MCP_ADVERTISED_SCOPES:-}
+      # A2A reverse-proxy gateway (opt-in; default off). When true, each enabled
+      # A2A agent gets nginx location blocks proxying its card + JSON-RPC through
+      # the gateway for centralized auth/metrics.
+      - A2A_REVERSE_PROXY_ENABLED=${A2A_REVERSE_PROXY_ENABLED:-false}
+      # SSRF guard bypass for internal MCP-server / A2A-agent upstreams at private
+      # IPs (e.g. docker-network hostnames). The health checker and proxy validate
+      # each upstream URL through the SSRF guard, which blocks private IPs by
+      # default. List exact hosts (least privilege) or CIDR ranges here; the cloud
+      # metadata address (169.254.169.254) is never permitted by either.
+      - SSRF_ALLOWED_HOSTS=${SSRF_ALLOWED_HOSTS:-}
+      - SSRF_ALLOWED_CIDRS=${SSRF_ALLOWED_CIDRS:-}
       - SECRET_KEY=${SECRET_KEY}
       # Per-user egress credential vault (off by default)
       - EGRESS_AUTH_ENABLED=${EGRESS_AUTH_ENABLED:-false}
@@ -358,6 +373,17 @@ services:
       - DOCUMENTDB_USE_IAM=${DOCUMENTDB_USE_IAM:-false}
       - DOCUMENTDB_REPLICA_SET=${DOCUMENTDB_REPLICA_SET:-rs0}
       - DOCUMENTDB_READ_PREFERENCE=${DOCUMENTDB_READ_PREFERENCE:-secondaryPreferred}
+      # Rate Limiting Configuration (issue #295). Off by default; the registry
+      # side hosts the admin CRUD API for definitions.
+      - RATE_LIMITING_ENABLED=${RATE_LIMITING_ENABLED:-false}
+      - RATE_LIMIT_BACKEND=${RATE_LIMIT_BACKEND:-documentdb}
+      - RATE_LIMIT_FAIL_OPEN=${RATE_LIMIT_FAIL_OPEN:-true}
+      - RATE_LIMIT_QUARANTINE_FAIL_CLOSED=${RATE_LIMIT_QUARANTINE_FAIL_CLOSED:-false}
+      - RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS=${RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS:-30}
+      - RATE_LIMIT_BACKEND_TIMEOUT_MS=${RATE_LIMIT_BACKEND_TIMEOUT_MS:-250}
+      # Lockout-safeguard floors (registry validates group definitions at config time).
+      - RATE_LIMIT_USER_FLOOR_PER_MIN=${RATE_LIMIT_USER_FLOOR_PER_MIN:-20}
+      - RATE_LIMIT_AGENT_FLOOR_PER_MIN=${RATE_LIMIT_AGENT_FLOOR_PER_MIN:-10}
       # Embeddings Configuration
       - EMBEDDINGS_PROVIDER=${EMBEDDINGS_PROVIDER:-sentence-transformers}
       - EMBEDDINGS_MODEL_NAME=${EMBEDDINGS_MODEL_NAME:-all-MiniLM-L6-v2}
@@ -365,6 +391,14 @@ services:
       - EMBEDDINGS_API_KEY=${EMBEDDINGS_API_KEY}
       - EMBEDDINGS_API_BASE=${EMBEDDINGS_API_BASE}
       - EMBEDDINGS_AWS_REGION=${EMBEDDINGS_AWS_REGION:-us-east-1}
+      # Embeddings IdP Auth (only when EMBEDDINGS_AUTH_MODE=idp)
+      - EMBEDDINGS_AUTH_MODE=${EMBEDDINGS_AUTH_MODE}
+      - EMBEDDINGS_IDP_TOKEN_ENDPOINT=${EMBEDDINGS_IDP_TOKEN_ENDPOINT}
+      - EMBEDDINGS_IDP_CLIENT_ID=${EMBEDDINGS_IDP_CLIENT_ID}
+      - EMBEDDINGS_IDP_CLIENT_SECRET=${EMBEDDINGS_IDP_CLIENT_SECRET}
+      - EMBEDDINGS_IDP_SCOPE=${EMBEDDINGS_IDP_SCOPE}
+      - EMBEDDINGS_IDP_TIMEOUT_SECONDS=${EMBEDDINGS_IDP_TIMEOUT_SECONDS:-30}
+      - EMBEDDINGS_IDP_ALLOW_INSECURE=${EMBEDDINGS_IDP_ALLOW_INSECURE:-false}
       # ANS (Agent Name Service) Configuration
       - ANS_INTEGRATION_ENABLED=${ANS_INTEGRATION_ENABLED:-false}
       - ANS_API_ENDPOINT=${ANS_API_ENDPOINT:-https://api.godaddy.com}
@@ -400,6 +434,8 @@ services:
       - BATCH_JOB_RETENTION_DAYS=${BATCH_JOB_RETENTION_DAYS:-7}
       - BATCH_WORKER_POLL_INTERVAL_SECONDS=${BATCH_WORKER_POLL_INTERVAL_SECONDS:-1.0}
       - BATCH_MAX_REQUEST_BYTES=${BATCH_MAX_REQUEST_BYTES:-4194304}
+      # Caller-supplied asset id (Issue #1276)
+      - ALLOW_CALLER_SUPPLIED_ASSET_ID=${ALLOW_CALLER_SUPPLIED_ASSET_ID:-false}
       # Registration Gate (Admission Control)
       - REGISTRATION_GATE_ENABLED=${REGISTRATION_GATE_ENABLED:-false}
       - REGISTRATION_GATE_URL=${REGISTRATION_GATE_URL:-}
@@ -415,6 +451,11 @@ services:
       # M2M Direct Registration
       - M2M_DIRECT_REGISTRATION_ENABLED=${M2M_DIRECT_REGISTRATION_ENABLED:-true}
       - MAX_TOKENS_PER_USER_PER_HOUR=${MAX_TOKENS_PER_USER_PER_HOUR:-100}
+      # MCP access-token lifetime (hours). Default when omitted / hard cap on
+      # requests. Read by the registry (validation); mirrored to auth-server
+      # (minting). Max is bounded to a 7-day ceiling in code. Issue #1477.
+      - MCP_TOKEN_DEFAULT_TTL_HOURS=${MCP_TOKEN_DEFAULT_TTL_HOURS:-8}
+      - MCP_TOKEN_MAX_TTL_HOURS=${MCP_TOKEN_MAX_TTL_HOURS:-24}
       # OpenTelemetry / OTLP (mirrored for config panel visibility)
       - OTEL_OTLP_ENDPOINT=${OTEL_OTLP_ENDPOINT:-}
       - OTEL_OTLP_EXPORT_INTERVAL_MS=${OTEL_OTLP_EXPORT_INTERVAL_MS:-30000}
@@ -516,6 +557,10 @@ services:
       # refuses to start without a strong value. Generated into .env by
       # build_and_run.sh; rotating it invalidates existing API-key hashes.
       - METRICS_KEY_PEPPER=${METRICS_KEY_PEPPER}
+      # Dedicated admin API key that gates /admin/* (retention/cleanup/db stats).
+      # Must be distinct from the ingest keys above; /admin/* denies by default
+      # until it is set. Do NOT set it equal to an ingest key.
+      - METRICS_ADMIN_API_KEY=${METRICS_ADMIN_API_KEY}
       - OTEL_SERVICE_NAME=mcp-metrics-service
       - OTEL_PROMETHEUS_ENABLED=true
       - OTEL_PROMETHEUS_PORT=9465
@@ -565,7 +610,16 @@ services:
       - TRUSTED_EXTERNAL_HOSTS=${TRUSTED_EXTERNAL_HOSTS:-}
       - REGISTRY_ORGANIZATION_NAME=${REGISTRY_ORGANIZATION_NAME:-ACME Inc.}
       - AUTH_SERVER_EXTERNAL_URL=${AUTH_SERVER_EXTERNAL_URL:-http://localhost:8888}
+      # Exact-match allowlist of OAuth login/logout redirect URIs (comma-separated
+      # absolute URLs). Empty (default) falls back to the weaker cookie-domain
+      # heuristic; set it to harden against open-redirect via a controlled subdomain.
+      - OAUTH2_ALLOWED_REDIRECT_URIS=${OAUTH2_ALLOWED_REDIRECT_URIS:-}
       - SECRET_KEY=${SECRET_KEY}
+      # MCP access-token lifetime (hours). auth-server mints + clamps to the
+      # configured max (bounded to a 7-day ceiling in code). Must match the
+      # registry's values. Issue #1477.
+      - MCP_TOKEN_DEFAULT_TTL_HOURS=${MCP_TOKEN_DEFAULT_TTL_HOURS:-8}
+      - MCP_TOKEN_MAX_TTL_HOURS=${MCP_TOKEN_MAX_TTL_HOURS:-24}
       # Egress vault: auth-server does the marker check + the vend call to the
       # registry (it does NOT touch the secret store, so no SECRET_STORE/AWS/
       # OPENBAO vars here).
@@ -580,6 +634,7 @@ services:
       - COGNITO_CLIENT_SECRET=${COGNITO_CLIENT_SECRET}
       - COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID}
       - COGNITO_DOMAIN=${COGNITO_DOMAIN:-auto}
+      - COGNITO_M2M_CLIENT_IDS=${COGNITO_M2M_CLIENT_IDS:-}
       - COGNITO_ENABLED=${COGNITO_ENABLED:-false}
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
@@ -671,6 +726,14 @@ services:
       - DOCUMENTDB_USE_IAM=${DOCUMENTDB_USE_IAM:-false}
       - DOCUMENTDB_REPLICA_SET=${DOCUMENTDB_REPLICA_SET:-rs0}
       - DOCUMENTDB_READ_PREFERENCE=${DOCUMENTDB_READ_PREFERENCE:-secondaryPreferred}
+      # Rate Limiting Configuration (issue #295). Off by default; enforcement
+      # runs here in the /validate hop.
+      - RATE_LIMITING_ENABLED=${RATE_LIMITING_ENABLED:-false}
+      - RATE_LIMIT_BACKEND=${RATE_LIMIT_BACKEND:-documentdb}
+      - RATE_LIMIT_FAIL_OPEN=${RATE_LIMIT_FAIL_OPEN:-true}
+      - RATE_LIMIT_QUARANTINE_FAIL_CLOSED=${RATE_LIMIT_QUARANTINE_FAIL_CLOSED:-false}
+      - RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS=${RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS:-30}
+      - RATE_LIMIT_BACKEND_TIMEOUT_MS=${RATE_LIMIT_BACKEND_TIMEOUT_MS:-250}
       # Registry API static token auth (IdP-independent access)
       - REGISTRY_STATIC_TOKEN_AUTH_ENABLED=${REGISTRY_STATIC_TOKEN_AUTH_ENABLED:-false}
       - REGISTRY_API_TOKEN=${REGISTRY_API_TOKEN:-}

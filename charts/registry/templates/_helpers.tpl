@@ -14,7 +14,10 @@ Sections (in order below):
   1. env: block — feature flags and IdP secrets via valueFrom. Includes
      PingFederate plain env vars (BASE_URL, EXTERNAL_URL, CLIENT_ID,
      M2M_CLIENT_ID, APPLICATION_ID_URI, GROUPS_CLAIM, ENABLED) and
-     valueFrom-sourced secrets (CLIENT_SECRET, M2M_CLIENT_SECRET).
+     valueFrom-sourced secrets (CLIENT_SECRET, M2M_CLIENT_SECRET). Also
+     RUM_SNIPPET_B64 and RUM_ALLOWED_HOSTS (feature #1471), rendered from
+     .Values.rumSnippetB64 / .Values.rumAllowedHosts only when non-empty;
+     token-bearing snippets come via extraEnvFrom.
   2. registry-app-log-config configmap
   3. registry-otel-config configmap
   4. registry-batch-config configmap

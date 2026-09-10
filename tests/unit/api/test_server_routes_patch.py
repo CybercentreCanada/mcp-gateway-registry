@@ -260,7 +260,7 @@ class TestServerPatch:
         with (
             patch("registry.api.server_routes.server_service") as svc,
             patch(
-                "registry.auth.dependencies.user_has_ui_permission_for_service",
+                "registry.api.server_routes.user_has_asset_permission",
                 return_value=False,
             ),
         ):
@@ -584,9 +584,7 @@ class TestServerPatchLifecycleStatusPermission:
             svc.get_server_info = AsyncMock(side_effect=[existing, fresh])
             svc.update_server = AsyncMock(return_value=True)
 
-            response = client.patch(
-                "/servers/test-server", json={"description": "patched"}
-            )
+            response = client.patch("/servers/test-server", json={"description": "patched"})
 
         assert response.status_code == 200
         gate.assert_not_called()

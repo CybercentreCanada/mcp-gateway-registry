@@ -12,12 +12,7 @@ from registry.services import ard_service
 
 # The authoritative ARD schema (ards-project/ard-spec), vendored into the
 # committed test fixtures so it is available in CI.
-_SCHEMA_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "fixtures"
-    / "ard"
-    / "ai-catalog.schema.json"
-)
+_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "fixtures" / "ard" / "ai-catalog.schema.json"
 
 
 def _fake_request(host="registry.example.com", proto="https"):
@@ -101,9 +96,7 @@ class TestBuildCatalog:
             patch.object(ard_service.settings, "ard_registry_enabled", True),
         ):
             manifest = await ard_service.build_catalog(_fake_request())
-        registry_entries = [
-            e for e in manifest.entries if e.type == "application/ai-registry+json"
-        ]
+        registry_entries = [e for e in manifest.entries if e.type == "application/ai-registry+json"]
         assert len(registry_entries) == 1
         assert registry_entries[0].identifier == "urn:air:registry.example.com:registry:self"
         assert registry_entries[0].url.endswith("/api/ard")

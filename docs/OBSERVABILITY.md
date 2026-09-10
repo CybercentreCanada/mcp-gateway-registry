@@ -278,7 +278,7 @@ exposition form** (after the OTel exporter appends the unit suffix).
 
 | Metric | Source | Labels | What it counts |
 |---|---|---|---|
-| `mcpgw_registry_auth_request_total` | auth-server | `success`, `method`, `server` | Authenticated /validate calls |
+| `mcpgw_registry_auth_request_total` | auth-server | `success`, `method`, `server`, `target_kind` | Authenticated /validate calls. `target_kind` = `a2a_agent` \| `virtual_mcp_server` \| `mcp_server` \| `control_plane` \| `unknown` (routing breakdown; `control_plane` = `/api/*`, static, oauth2 — never counted as a data-plane target) |
 | `mcpgw_registry_tool_execution_total` | auth-server | `tool_name`, `server_name`, `success`, `method`, `client_name`, `client_version` | MCP tool calls detected at the auth layer |
 | `mcpgw_registry_operation_total` | registry middleware | `operation`, `resource_type`, `success` | Registry API operations (list/create/update/delete/search) |
 | `tool_discovery_total` | registry middleware | `results_count_bucket` | Semantic search calls |
@@ -302,18 +302,24 @@ exposition form** (after the OTel exporter appends the unit suffix).
 | `m2m_management_requests_total` | registry | `operation`, `outcome` | Direct M2M client API calls |
 | `mcpgw_registry_metrics_emission_path_total` | registry, auth-server, mcpgw | `path` (`otel`/`legacy`) | Migration self-observability |
 | `mcpgw_registry_deployment_mode_info` (Gauge) | registry | `deployment_mode`, `registry_mode` | Current deployment mode (always 1, observed each cycle) |
+| `mcpgw_rate_limit_checks_total` | auth-server (`/validate`) | `axis` (`clr`/`tgt`/`ctg`), `entity_type`, `window_seconds`, `outcome` (`allow`/`deny`) | Every rate-limit gate evaluation (denominator for a throttle rate) |
+| `mcpgw_rate_limit_throttled_total` | auth-server (`/validate`) | `axis` (`clr`/`tgt`/`ctg`), `entity_type`, `window_seconds` | Times a gate denied a request. `ctg` = the per-caller-per-target axis; `clr`/`tgt` are the caller/target axes |
+| `mcpgw_rate_limit_quarantine_denied_total` | auth-server (`/validate`) | `scope` (`caller`/`target`), `entity_type` | Requests dropped because a caller or target is **quarantined** (kill switch) |
+| `mcpgw_rate_limit_quarantine_members` (Gauge) | registry | `group` (`quarantine-callers`/`quarantine-targets`) | Current member count of each kill-switch group, observed each export cycle (correct across replicas) |
+| `mcpgw_rate_limit_errors_total` | auth-server (`/validate`) | `axis` (incl. `qtn` for a quarantine-membership read error) | Rate-limit backend errors (counter-store unreachable/timeout → fail-open/closed) |
 
 ### Histograms
 
 | Metric | Source | Labels | What it measures |
 |---|---|---|---|
-| `mcpgw_registry_auth_request_duration_milliseconds` (`_count`, `_sum`, `_bucket`) | auth-server | `success`, `method`, `server` | Auth /validate latency |
+| `mcpgw_registry_auth_request_duration_milliseconds` (`_count`, `_sum`, `_bucket`) | auth-server | `success`, `method`, `server`, `target_kind` | Auth /validate latency |
 | `tool_execution_duration_milliseconds` | auth-server | same as `mcpgw_registry_tool_execution_total` | Tool call latency at auth layer |
 | `mcpgw_registry_protocol_latency_milliseconds` | auth-server | `flow_step`, `server_name` | Time between MCP protocol stages (init → tools/list, etc.) |
 | `mcpgw_registry_operation_duration_milliseconds` | registry middleware | same as `mcpgw_registry_operation_total` | Registry API operation latency |
 | `mcpgw_registry_tool_discovery_duration_milliseconds` | registry middleware | same as `tool_discovery_total` | Semantic search latency |
 | `peer_sync_duration_seconds` | registry | `peer_id`, `success` | Peer sync operation duration |
 | `mcpgw_registry_tool_duration_milliseconds` | mcpgw | `tool`, `success` | Per-tool invocation latency |
+| `mcpgw_rate_limit_backend_duration_milliseconds` (`_count`, `_sum`, `_bucket`) | auth-server (`/validate`) | `backend` (`documentdb`), `op` | Counter-store round-trip latency per rate-limit op (the hop bounded by `RATE_LIMIT_BACKEND_TIMEOUT_MS`, default 250 ms) |
 
 ### HTTP auto-instrumentation (when OTel auto-instrument is active)
 
@@ -379,6 +385,20 @@ Replace `<TARGET>` with the path you care about (e.g. `/api/servers`,
 |---|---|
 | Auth requests per second by outcome | `sum by (success)(rate(mcpgw_registry_auth_request_total[5m]))` |
 | Auth p95 latency | `histogram_quantile(0.95, sum by (le)(rate(mcpgw_registry_auth_request_duration_milliseconds_bucket[5m])))` |
+
+#### Target-type routing (`target_kind`)
+
+`mcpgw_registry_auth_request_total` carries a `target_kind` label so you can see how `/validate` traffic splits across routed targets: `a2a_agent`, `virtual_mcp_server`, `mcp_server`, `control_plane` (the `/api/*` / static / oauth2 control plane, never a data-plane target), and `unknown`. Chart these as a Grafana **Time series** panel with legend `{{target_kind}}`.
+
+| Goal | Query |
+|---|---|
+| Routing split — one line per target kind (main timeseries) | `sum by (target_kind)(rate(mcpgw_registry_auth_request_total[5m]))` |
+| Data-plane only (drop control-plane / dashboard noise) | `sum by (target_kind)(rate(mcpgw_registry_auth_request_total{target_kind!="control_plane"}[5m]))` |
+| A2A agent routing only | `sum(rate(mcpgw_registry_auth_request_total{target_kind="a2a_agent"}[5m]))` |
+| Routing split by success/failure | `sum by (target_kind, success)(rate(mcpgw_registry_auth_request_total[5m]))` |
+| Share of total per target kind (stacked %) | `sum by (target_kind)(rate(mcpgw_registry_auth_request_total[5m])) / ignoring(target_kind) group_left sum(rate(mcpgw_registry_auth_request_total[5m]))` |
+| p95 auth latency per target kind | `histogram_quantile(0.95, sum by (le, target_kind)(rate(mcpgw_registry_auth_request_duration_milliseconds_bucket[5m])))` |
+| Cumulative counts (raw growth, not rate) | `sum by (target_kind)(mcpgw_registry_auth_request_total)` |
 | Session-store hit rate | `sum(rate(mcpgw_registry_session_store_resolve_total{result="hit"}[5m])) / sum(rate(mcpgw_registry_session_store_resolve_total[5m]))` |
 | Federation peer sync failures by type | `sum by (peer_id, failure_type)(rate(peer_sync_failures_total[5m]))` |
 | Logout JWT validation failure rate | `rate(mcpgw_registry_logout_jwt_validation_failed_total[5m])` |
@@ -393,6 +413,42 @@ Replace `<TARGET>` with the path you care about (e.g. `/api/servers`,
 | M2M orphan cleanups | `sum by (idp_had_record)(rate(m2m_orphan_cleanups_total[5m]))` |
 | Cloud detection method distribution | `sum by (cloud, method)(mcpgw_registry_cloud_detection_total)` |
 | Telemetry pings success rate | `sum(rate(telemetry_sends_total{status="success"}[5m])) / sum(rate(telemetry_sends_total[5m]))` |
+
+### Rate limiting
+
+Application-level rate limiting runs in the auth-server `/validate` hop. The metrics carry only low-cardinality labels (`axis`, `entity_type`, `window_seconds`, `scope`, `group`) — deliberately **not** the caller's username/client_id, which would be unbounded cardinality. To attribute a throttle or a quarantine deny to a specific user or client, use the app logs instead (see below).
+
+| Goal | Query |
+|---|---|
+| Throttles per second by axis / entity type | `sum by (axis, entity_type)(rate(mcpgw_rate_limit_throttled_total[5m]))` |
+| Per-caller-per-target throttles only (the `ctg` axis) | `sum by (entity_type)(rate(mcpgw_rate_limit_throttled_total{axis="ctg"}[5m]))` |
+| Throttle rate (fraction of checks denied) | `sum(rate(mcpgw_rate_limit_throttled_total[5m])) / sum(rate(mcpgw_rate_limit_checks_total[5m]))` |
+| Quarantine denies per second (caller vs target) | `sum by (scope)(rate(mcpgw_rate_limit_quarantine_denied_total[5m]))` |
+| Currently quarantined callers / targets | `mcpgw_rate_limit_quarantine_members` |
+| Backend-error rate (fail-open/closed events; `qtn` = quarantine-read error) | `sum by (axis)(rate(mcpgw_rate_limit_errors_total[5m]))` |
+| Counter-store p95 latency | `histogram_quantile(0.95, sum by (le)(rate(mcpgw_rate_limit_backend_duration_milliseconds_bucket[5m])))` |
+| Counter-store calls exceeding the 250 ms budget | `sum(rate(mcpgw_rate_limit_backend_duration_milliseconds_bucket{le="250"}[5m])) / sum(rate(mcpgw_rate_limit_backend_duration_milliseconds_count[5m]))` (fraction **within** budget; alert when it drops) |
+
+**Quarantine attribution (app logs).** A quarantine deny logs a structured `WARNING` line: `rate-limit quarantine deny: scope=caller entity_type=group caller_username=alice caller_client_id=`. Search the auth-server app logs for `rate-limit quarantine deny` and filter on `caller_username=` / `caller_client_id=`. The metric labels stay bounded (scope only), so a nonzero `mcpgw_rate_limit_quarantine_denied_total` is your signal that quarantine is actively dropping traffic.
+
+**Attributing a throttle to a user / client_id (app logs, not metrics).** On every denial the limiter logs a structured `WARNING` line carrying the validated-token identity, e.g.:
+
+```
+rate-limit throttled: axis=clr entity_type=group name=alice limit=5/60s caller_type=user caller_username=alice caller_client_id=
+```
+
+`caller_type` is `user` or `agent` (agent = a client_id was present); exactly one of `caller_username` / `caller_client_id` is populated. Search the auth-server application logs (MongoDB `application_logs` collection, or your log backend) for `rate-limit throttled` and filter on `caller_username=` / `caller_client_id=`.
+
+#### Recommended alerts
+
+These are the two signals worth alarming on. Both indicate the limiter is degrading, not that a caller is merely hitting a limit (throttles themselves are expected and are not an alert condition).
+
+| Alert | Condition (PromQL) | Why it matters |
+|---|---|---|
+| **Rate-limit backend errors** | `sum(rate(mcpgw_rate_limit_errors_total[5m])) > 0` for 5m | The DocumentDB counter store is unreachable or timing out. With the default `RATE_LIMIT_FAIL_OPEN=true` this means limits are **not being enforced** (requests fail open); with a fail-closed definition it means those callers are being **denied**. Either way the limiter is not doing its job. |
+| **Counter-store latency near budget** | `histogram_quantile(0.95, sum by (le)(rate(mcpgw_rate_limit_backend_duration_milliseconds_bucket[5m]))) > 200` for 10m | Each `/validate` waits on this hop up to `RATE_LIMIT_BACKEND_TIMEOUT_MS` (default **250 ms**). A p95 creeping toward 250 ms means throttle checks are about to start timing out (→ `mcpgw_rate_limit_errors_total` fail-open) and are adding latency to every gated request. Investigate DocumentDB health / connection pool before it crosses the timeout. |
+
+Tune the `200` threshold relative to your configured `RATE_LIMIT_BACKEND_TIMEOUT_MS`: alert at roughly 80% of the timeout so you have headroom before ops start failing open.
 
 ## Verifying the migration is working
 

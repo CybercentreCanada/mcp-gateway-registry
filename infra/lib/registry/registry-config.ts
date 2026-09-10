@@ -136,6 +136,13 @@ export interface FederationConfig {
   encryptionKey: string;
   /** Enable AWS Agent Registry federation */
   awsRegistryFederationEnabled: boolean;
+  /**
+   * IAM role ARNs the registry task may assume for cross-account AWS Agent
+   * Registry federation. Empty (default) disables cross-account access: the
+   * sts:AssumeRole grant is omitted entirely and only same-account federation
+   * works. Fail-closed: an unset list grants no cross-account trust.
+   */
+  awsRegistryFederationAssumeRoleArns: string[];
 }
 
 export interface AuditConfig {
@@ -165,6 +172,18 @@ export interface EntraConfig {
   clientId: string;
   /** Entra ID Client Secret (from env CDK_ENTRA_CLIENT_SECRET) */
   clientSecret: string;
+  /**
+   * PRM scope-advertisement form: 'v1' (api://<app-id>/<scope>) or 'v2'
+   * (bare, default). Set 'v1' only if the Entra app exposes v1-style api://
+   * scopes (issue #990). Empty string uses the provider default (v2).
+   */
+  scopeFormat: string;
+  /**
+   * Application ID URI (e.g. api://<app-id>) registered on the Entra app.
+   * Used as the v1 scope prefix and accepted as a token audience. Empty
+   * defaults to api://<clientId>.
+   */
+  applicationIdUri: string;
 }
 
 export interface OktaConfig {
@@ -275,6 +294,13 @@ export interface SessionConfig {
   cookieSecure: boolean;
   /** Domain for session cookies */
   cookieDomain: string;
+  /**
+   * Comma-separated exact-match allowlist of OAuth login/logout redirect URIs
+   * (open-redirect hardening). When set, an absolute redirect_uri is accepted
+   * only if it exactly matches an entry; relative paths are always allowed.
+   * Empty falls back to the weaker cookie-domain heuristic.
+   */
+  oauth2AllowedRedirectUris: string;
   /** Store OAuth provider tokens in session cookies */
   oauthStoreTokensInSession: boolean;
 }
@@ -397,7 +423,7 @@ export const DEFAULT_REGISTRY_CONFIG: RegistryConfig = {
   deploymentMode: 'with-gateway',
   registryMode: 'full',
   enableObservability: true,
-  enableWaf: false,
+  enableWaf: true,
   createCodebuild: false,
   idpGroupFilterPrefix: '',
   disableAiRegistryToolsServer: 'false',
@@ -474,6 +500,7 @@ export const DEFAULT_REGISTRY_CONFIG: RegistryConfig = {
     staticToken: '',
     encryptionKey: '',
     awsRegistryFederationEnabled: false,
+    awsRegistryFederationAssumeRoleArns: [],
   },
 
   audit: {
@@ -493,6 +520,8 @@ export const DEFAULT_REGISTRY_CONFIG: RegistryConfig = {
     tenantId: '',
     clientId: '',
     clientSecret: '',
+    scopeFormat: '',
+    applicationIdUri: '',
   },
 
   okta: {
@@ -560,6 +589,7 @@ export const DEFAULT_REGISTRY_CONFIG: RegistryConfig = {
   session: {
     cookieSecure: true,
     cookieDomain: '',
+    oauth2AllowedRedirectUris: '',
     oauthStoreTokensInSession: false,
   },
 
@@ -704,6 +734,18 @@ export function loadRegistryConfig(configPath: string): RegistryConfig {
         'Set them as environment variables before running cdk synth/deploy.',
       );
     }
+  }
+
+  // Keycloak sslRequired=external blocks admin ops over plain HTTP, so a
+  // public HTTPS front is required. Fail fast at synth if neither option is
+  // enabled — otherwise KeycloakService throws late during construct build.
+  if (!config.enableRoute53Dns && !config.cloudfront.enabled) {
+    throw new Error(
+      'Keycloak needs a public HTTPS front: set enableRoute53Dns=true (custom ' +
+      'domain + ACM) or cloudfront.enabled=true (CloudFront default cert) in config.yaml. ' +
+      'Plain HTTP ALB is not supported because Keycloak sslRequired=external ' +
+      'blocks admin/OIDC endpoints over unencrypted connections.',
+    );
   }
 
   return config;

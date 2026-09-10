@@ -118,6 +118,15 @@ ALLOWED_SECRET_STORES: frozenset[str] = frozenset(
     }
 )
 
+# Absolute upper bound (hours) on the configurable MCP access-token max TTL.
+# mcp_token_max_ttl_hours is clamped to this regardless of operator config.
+# These are self-signed bearer tokens with NO revocation path (no introspection
+# / denylist; the only kill switch is rotating SECRET_KEY, which invalidates
+# every token at once), so an unbounded lifetime is a security risk. 7 days is
+# the hard ceiling; longer-lived, revocable credentials should come from an IdP.
+# Issue #1477.
+MCP_TOKEN_ABSOLUTE_MAX_TTL_HOURS: int = 168
+
 
 class DeploymentMode(str, Enum):
     """Deployment mode options."""
@@ -160,6 +169,16 @@ class Settings(BaseSettings):
     # image does not have. See docs/TELEMETRY.md and
     # docs/unified-parameter-reference.md (Group 4) for details.
     bind_host: str = "0.0.0.0"  # nosec B104 - bind to all IPv4 interfaces inside container
+
+    # Frontend Real User Monitoring (RUM) hook
+    rum_snippet_b64: str = Field(
+        default="",
+        description="Base64-encoded HTML snippet injected as /rum.js for Real User Monitoring (RUM). Empty disables RUM (default). May contain a vendor access token, so treat as sensitive.",
+    )
+    rum_allowed_hosts: str = Field(
+        default="",
+        description="Comma-separated allowlist of hosts the RUM snippet may reference (script src and beacon endpoints). If set, the snippet is rejected (fail closed) when it references any host not on the list. Empty disables the check.",
+    )
 
     # Auth settings
     secret_key: str = ""
@@ -208,6 +227,14 @@ class Settings(BaseSettings):
     registry_api_token: str = ""  # Static API token for registry access
     registry_api_keys: str = ""  # Multi-key static tokens JSON (Issue #779)
     max_tokens_per_user_per_hour: int = 100  # JWT token vending rate limit
+    # MCP access-token (self-signed gateway JWT) lifetime, in hours. The Generate
+    # Token page / POST /api/tokens/generate mints these; `default` is used when a
+    # caller omits expires_in_hours, and a requested value is clamped to `max`.
+    # `max` is itself bounded by MCP_TOKEN_ABSOLUTE_MAX_TTL_HOURS (168h / 7 days):
+    # these are self-signed bearer tokens with no revocation path, so an unbounded
+    # lifetime is a security risk. See _clamp_token_max_ttl_hours. Issue #1477.
+    mcp_token_default_ttl_hours: int = 8
+    mcp_token_max_ttl_hours: int = 24
     ide_oauth_client_id: str = Field(
         default="",
         description=(
@@ -234,6 +261,19 @@ class Settings(BaseSettings):
         ),
         ge=0,
         le=65535,
+    )
+    ide_connect_scope: str = Field(
+        default="",
+        description=(
+            "Optional scope for the Claude Code Connect snippet. When set, the "
+            "generated `claude mcp add` command emits `--scope <value>` (e.g. "
+            "`user` to install the server for every project instead of only the "
+            "current directory, or `project` to share it via .mcp.json). Empty "
+            "(default) omits the flag entirely, preserving Claude Code's own "
+            "default (`local`) and the historical snippet. Only affects the "
+            "displayed Claude Code snippet — no effect on Cursor/Codex configs "
+            "or on gateway behaviour."
+        ),
     )
 
     # Registration webhook settings (Issue #742)
@@ -270,6 +310,19 @@ class Settings(BaseSettings):
             "new asset registrations. A registration with no status is forced to this "
             "value; a registration with a different explicit status fails with 4xx. "
             "Unset = current behavior (new assets default to 'active')."
+        ),
+    )
+
+    # Caller-supplied asset id (Issue #1276)
+    allow_caller_supplied_asset_id: bool = Field(
+        default=False,
+        description=(
+            "Allow callers to supply their own asset 'id' on the public "
+            "server/agent/skill registration routes. Fail-closed: OFF by default, "
+            "so a supplied id is rejected (422) and ids auto-generate as before. "
+            "When true, a supplied id must pass the safe-charset validation and be "
+            "unique. Federation sync is NOT affected by this flag (peer ids are "
+            "governed by the peer allowlist)."
         ),
     )
 
@@ -378,6 +431,25 @@ class Settings(BaseSettings):
     embeddings_api_base: str | None = None
     embeddings_aws_region: str | None = "us-east-1"
 
+    # Response shape of the litellm embeddings endpoint.
+    #   "openai"    -> standard {"data": [{"embedding": [...]}]} envelope (default).
+    #   "raw_array" -> endpoint returns a bare array of vectors ([[...], [...]]);
+    #                  litellm cannot parse that, so the registry calls the endpoint
+    #                  directly and extracts the vectors itself. Opt-in only.
+    embeddings_response_format: str = "openai"  # "openai" | "raw_array"
+
+    # IdP client-credentials auth for the litellm embeddings provider.
+    # When embeddings_auth_mode == "idp", a bearer token is fetched from the IdP
+    # per token-lifetime and injected on each embedding call instead of a static key.
+    # Works with any OAuth2-compliant IdP (Keycloak, Entra, Okta, Auth0, PingFederate).
+    embeddings_auth_mode: str | None = None  # None | "static" | "idp"
+    embeddings_idp_token_endpoint: str | None = None
+    embeddings_idp_client_id: str | None = None
+    embeddings_idp_client_secret: str | None = None
+    embeddings_idp_scope: str | None = None
+    embeddings_idp_timeout_seconds: int = 30
+    embeddings_idp_allow_insecure: bool = False  # Local dev only: allow http:// token endpoint
+
     # Health check settings
     health_check_interval_seconds: int = (
         300  # 5 minutes for automatic background checks (configurable via env var)
@@ -422,6 +494,15 @@ class Settings(BaseSettings):
         description=(
             "Optional override for the URN namespace segment. "
             "Empty uses the entity type (server/agent/skill)."
+        ),
+    )
+    ard_catalog_max_entries_per_type: int = Field(
+        default=500,
+        description=(
+            "Maximum number of entries to load per entity type (servers, agents, "
+            "skills) when building the ARD catalog. Caps the DB queries to "
+            "prevent unbounded result sets from exhausting memory or starving "
+            "connections."
         ),
     )
 
@@ -501,6 +582,19 @@ class Settings(BaseSettings):
     agent_security_scan_timeout: int = 60  # 1 minute
     agent_security_add_pending_tag: bool = True
     a2a_scanner_llm_api_key: str = ""  # Optional Azure OpenAI API key for LLM-based analysis
+
+    # A2A reverse-proxy mode (opt-in)
+    a2a_reverse_proxy_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable A2A agent reverse-proxy generation. When true, each enabled agent "
+            "gets nginx location blocks that proxy its A2A traffic (agent card + "
+            "JSON-RPC) through the gateway for centralized auth and metrics, instead of "
+            "clients connecting directly to the agent backend. When false (default), no "
+            "agent proxy blocks are emitted and /agent/* paths fall through to the "
+            "existing behavior."
+        ),
+    )
 
     # Skill security scanning settings (AI Agent Skills)
     skill_security_scan_enabled: bool = True
@@ -733,6 +827,27 @@ class Settings(BaseSettings):
         default="",
         description="Microsoft Entra ID admin group ID",
     )
+    entra_scope_format: str = Field(
+        default="v2",
+        description=(
+            "Entra scope-advertisement form for the PRM `scopes_supported` array: "
+            "`v1` or `v2` (default `v2`). Entra v1 requires custom resource scopes "
+            "to be requested on /authorize as `api://<app-id-or-uri>/<scope>` "
+            "(the bare form is rejected with AADSTS650053); v2 accepts the bare "
+            "fragment. Standard OIDC scopes (openid/profile/email/offline_access) "
+            "are always advertised bare regardless of this setting. Set to `v1` "
+            "only if your Entra app registration exposes v1 (api://) scopes."
+        ),
+    )
+    entra_application_id_uri: str = Field(
+        default="",
+        description=(
+            "Application ID URI registered on the Entra app (e.g. "
+            "`api://<app-id>` or a custom `api://<uri>`). Used verbatim as the "
+            "v1 scope prefix in the PRM and accepted as a token audience. "
+            "Defaults to the app's `api://<client-id>` form when unset."
+        ),
+    )
 
     # IdP Group Filtering (applies to all identity providers)
     idp_group_filter_prefix: str = Field(
@@ -906,6 +1021,18 @@ class Settings(BaseSettings):
     audit_log_mongodb_enabled: bool = True  # Enable/disable MongoDB storage for audit logs
     audit_log_mongodb_ttl_days: int = 7  # Days to retain audit events in MongoDB (default 7 days)
 
+    # Audit durability guard. When audit logging is enabled, the audit trail is
+    # only tamper-resistant and queryable if it lands in a durable store
+    # (MongoDB/DocumentDB). Best-effort JSON log lines are NOT a durable audit
+    # trail: they can be lost on container restart, are not queryable for
+    # forensics, and are trivially rotated away. When this guard is True
+    # (default) the application FAILS CLOSED at startup if audit logging is
+    # enabled but no durable sink is available, rather than silently degrading to
+    # non-durable log lines. Set to False ONLY in local/dev environments where a
+    # non-durable audit trail is acceptable; doing so emits a loud startup
+    # warning. See threat-model repudiation hardening.
+    audit_log_require_durable: bool = True
+
     # Deployment Mode Configuration
     deployment_mode: DeploymentMode = Field(
         default=DeploymentMode.WITH_GATEWAY,
@@ -1003,6 +1130,28 @@ class Settings(BaseSettings):
         ),
     )
 
+    @field_validator("ide_connect_scope", mode="before")
+    @classmethod
+    def _validate_ide_connect_scope(cls, v: str | None) -> str:
+        # Constrain to Claude Code's known scopes so the value can never inject
+        # arbitrary tokens into the displayed `claude mcp add` snippet. Anything
+        # else (including a typo) is dropped back to "" -> flag omitted.
+        if v is None:
+            return ""
+        v_lower = str(v).strip().lower()
+        if v_lower == "":
+            return ""
+        if v_lower not in {"local", "project", "user"}:
+            import logging as _logging
+
+            display = v_lower[:16] + ("..." if len(v_lower) > 16 else "")
+            _logging.getLogger(__name__).warning(
+                f"IDE_CONNECT_SCOPE={display!r} is not a valid Claude Code scope "
+                "(local|project|user); ignoring"
+            )
+            return ""
+        return v_lower
+
     @field_validator("mcp_cloud_provider")
     @classmethod
     def _validate_cloud_provider(cls, v: str | None) -> str | None:
@@ -1018,6 +1167,38 @@ class Settings(BaseSettings):
             )
             return None
         return v_lower
+
+    @field_validator("mcp_token_default_ttl_hours", "mcp_token_max_ttl_hours")
+    @classmethod
+    def _bound_mcp_token_ttl_hours(
+        cls,
+        v: int,
+    ) -> int:
+        """Bound an MCP-token TTL setting to a safe range (fail closed).
+
+        Floors any value at 1 hour and caps it at the hardcoded absolute ceiling
+        MCP_TOKEN_ABSOLUTE_MAX_TTL_HOURS (168h / 7 days). Applies to both the
+        default and the max TTL settings so a misconfiguration can never grant an
+        unbounded or non-positive token lifetime. A clamp is logged so the
+        operator sees that their value was adjusted. Issue #1477.
+
+        Args:
+            v: The configured TTL in hours.
+
+        Returns:
+            The value clamped to [1, MCP_TOKEN_ABSOLUTE_MAX_TTL_HOURS].
+        """
+        import logging as _logging
+
+        bounded = min(max(v, 1), MCP_TOKEN_ABSOLUTE_MAX_TTL_HOURS)
+        if bounded != v:
+            _logging.getLogger(__name__).warning(
+                "MCP token TTL setting %s clamped to %s (allowed range 1..%s hours)",
+                v,
+                bounded,
+                MCP_TOKEN_ABSOLUTE_MAX_TTL_HOURS,
+            )
+        return bounded
 
     # Demo server configuration
     disable_ai_registry_tools_server: bool = Field(
@@ -1081,6 +1262,19 @@ class Settings(BaseSettings):
     def nginx_updates_enabled(self) -> bool:
         """Check if nginx updates should be performed."""
         return self.deployment_mode == DeploymentMode.WITH_GATEWAY
+
+    @property
+    def a2a_reverse_proxy_effective(self) -> bool:
+        """Whether A2A reverse-proxy routing is ACTUALLY active.
+
+        The A2A_REVERSE_PROXY_ENABLED flag only takes effect in with-gateway
+        mode: registry-only mode has no gateway to proxy through, so agent
+        routing is force-disabled there even when the flag is set. This is the
+        single source of truth every A2A path must consult (nginx block
+        generation, the registration url/proxy_pass_url rewrite) so behavior
+        cannot drift between them.
+        """
+        return self.a2a_reverse_proxy_enabled and self.nginx_updates_enabled
 
     # UI Title Configuration
     ui_title: str | None = Field(
@@ -1412,6 +1606,56 @@ class Settings(BaseSettings):
 
     # DocumentDB Namespace (for multi-tenancy support)
     documentdb_namespace: str = "default"
+
+    # Rate limiting (issue #295). Application-level, identity/group/target-aware
+    # limits enforced at the auth-server /validate hop. Mirrored here for the
+    # registry-side admin API and the System Config page. Enforcement itself
+    # reads these from the auth-server module-level constants.
+    rate_limiting_enabled: bool = Field(
+        default=False,
+        description="Master switch for application-level rate limiting.",
+    )
+    rate_limit_backend: str = Field(
+        default="documentdb",
+        description="Rate-limit counter backend (only 'documentdb' is implemented in v1).",
+    )
+    rate_limit_fail_open: bool = Field(
+        default=True,
+        description="Global fail-open on rate-limit backend error (per-limit fail_closed overrides).",
+    )
+    rate_limit_quarantine_fail_closed: bool = Field(
+        default=False,
+        description=(
+            "Deny (fail closed) on a backend error reading quarantine membership, "
+            "instead of the default fail-open. Best-effort quarantine, not breach "
+            "containment; pair with IdP credential revocation."
+        ),
+    )
+    rate_limit_definitions_cache_ttl_seconds: int = Field(
+        default=30,
+        ge=1,
+        description="In-process cache TTL (seconds) for rate-limit definition reads.",
+    )
+    rate_limit_backend_timeout_ms: int = Field(
+        default=250,
+        ge=1,
+        description="Hard per-op timeout (ms) for each rate-limit counter operation.",
+    )
+    # Lockout safeguard: minimum per-minute limit a GROUP definition may set for a
+    # human user / an agent, enforced at config time on short windows (<= 60s). A
+    # group definition below its caller-type floor is REJECTED. Config-only (no API
+    # to read/reset), so an operator cannot accidentally throttle interactive users
+    # into a lockout. A group that wants a tighter cap must set exactly the floor.
+    rate_limit_user_floor_per_min: int = Field(
+        default=20,
+        ge=1,
+        description="Minimum per-minute user limit a group may set (short windows). Config-only.",
+    )
+    rate_limit_agent_floor_per_min: int = Field(
+        default=10,
+        ge=1,
+        description="Minimum per-minute agent limit a group may set (short windows). Config-only.",
+    )
 
     # Agent batch API (issue #956)
     batch_max_operations_per_job: int = Field(
@@ -1900,6 +2144,35 @@ Skills do not require gateway integration.
 Auto-converting to:
   DEPLOYMENT_MODE={corrected_deployment.value}
   REGISTRY_MODE={corrected_registry.value}
+================================================================================
+"""
+    logger.warning(banner)
+    print(banner)
+
+
+def print_a2a_reverse_proxy_mode_banner(s: Settings) -> None:
+    """Loudly warn when A2A reverse-proxy is enabled but force-disabled by mode.
+
+    In registry-only mode there is no gateway to proxy through, so agent routing
+    is disabled even when A2A_REVERSE_PROXY_ENABLED=true. Operators who set the
+    flag expecting routing must be told plainly that it is inert here (and that
+    agent url == proxy_pass_url, i.e. no gateway rewrite).
+    """
+    if not s.a2a_reverse_proxy_enabled:
+        return
+    if s.a2a_reverse_proxy_effective:
+        return
+    banner = f"""
+================================================================================
+WARNING: A2A_REVERSE_PROXY_ENABLED=true but DEPLOYMENT_MODE={s.deployment_mode.value}.
+
+A2A agent reverse-proxy routing requires with-gateway mode. In registry-only
+mode there is no gateway to proxy through, so agent routing is DISABLED:
+  - no /agent/* nginx location blocks are generated
+  - registered agents keep url == proxy_pass_url (no gateway rewrite)
+  - /agent/* paths return the registry-only 503
+
+Set DEPLOYMENT_MODE=with-gateway to actually enable A2A reverse-proxy routing.
 ================================================================================
 """
     logger.warning(banner)

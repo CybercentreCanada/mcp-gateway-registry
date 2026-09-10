@@ -15,18 +15,18 @@ from ..schemas.registry_card import RegistryCard
 try:
     from ..schemas.skill_models import SkillCard
 except ImportError:
-    SkillCard = None
+    SkillCard = None  # type: ignore[assignment,misc]  # fallback when module unavailable
 
 try:
     from ..schemas.virtual_server_models import VirtualServerConfig
 except ImportError:
-    VirtualServerConfig = None
+    VirtualServerConfig = None  # type: ignore[assignment,misc]  # fallback when module unavailable
 
 try:
     from ..schemas.custom_entity_models import CustomEntityRecord, CustomTypeDescriptor
 except ImportError:
-    CustomEntityRecord = None
-    CustomTypeDescriptor = None
+    CustomEntityRecord = None  # type: ignore[assignment,misc]  # fallback when module unavailable
+    CustomTypeDescriptor = None  # type: ignore[assignment,misc]  # fallback when module unavailable
 
 
 class ServerRepositoryBase(ABC):
@@ -203,6 +203,15 @@ class ServerRepositoryBase(ABC):
         pass
 
     @abstractmethod
+    async def count_tools(self) -> int:
+        """Get the total number of tools exposed across all servers.
+
+        Returns:
+            Total number of tools across all current (non-version) servers.
+        """
+        pass
+
+    @abstractmethod
     async def update_field(
         self,
         path: str,
@@ -270,6 +279,29 @@ class ServerRepositoryBase(ABC):
             if not candidate_url:
                 continue
             if normalize_identity_url(candidate_url, ENTITY_TYPE_SERVER) == identity_url:
+                doc = dict(server_info)
+                doc["path"] = path
+                return doc
+        return None
+
+    async def find_by_id(
+        self,
+        asset_id: str,
+    ) -> dict[str, Any] | None:
+        """Find a server whose ``id`` equals ``asset_id`` (#1276).
+
+        Used by the registration id pre-check to return a precise 409 on
+        id collision. Default scans ``list_all()``; DocumentDB overrides
+        with an indexed ``find_one({"id": asset_id})``.
+
+        Returns:
+            The full document with ``path`` populated, or None.
+        """
+        if not asset_id:
+            return None
+        all_servers = await self.list_all()
+        for path, server_info in all_servers.items():
+            if server_info.get("id") == asset_id:
                 doc = dict(server_info)
                 doc["path"] = path
                 return doc
@@ -441,6 +473,29 @@ class AgentRepositoryBase(ABC):
             if not candidate_url:
                 continue
             if normalize_identity_url(candidate_url, ENTITY_TYPE_AGENT) == identity_url:
+                doc = agent.model_dump(mode="json") if hasattr(agent, "model_dump") else dict(agent)
+                doc["path"] = getattr(agent, "path", doc.get("path"))
+                return doc
+        return None
+
+    async def find_by_id(
+        self,
+        asset_id: str,
+    ) -> dict[str, Any] | None:
+        """Find an agent whose ``id`` equals ``asset_id`` (#1276).
+
+        Used by the registration id pre-check to return a precise 409 on
+        id collision. Default scans ``list_all()``; DocumentDB overrides
+        with an indexed ``find_one({"id": asset_id})``.
+
+        Returns:
+            A dict with the agent document fields plus ``path``, or None.
+        """
+        if not asset_id:
+            return None
+        agents = await self.list_all()
+        for agent in agents:
+            if getattr(agent, "id", None) == asset_id:
                 doc = agent.model_dump(mode="json") if hasattr(agent, "model_dump") else dict(agent)
                 doc["path"] = getattr(agent, "path", doc.get("path"))
                 return doc
@@ -802,6 +857,69 @@ class ScopeRepositoryBase(ABC):
         pass
 
     @abstractmethod
+    async def merge_ui_permissions(
+        self,
+        group_name: str,
+        ui_permissions: dict[str, list[str]],
+    ) -> bool:
+        """
+        Merge a set of ui_permission keys into a group's ui_permissions.
+
+        Targeted read-modify-write of individual permission keys, used to grant
+        a group per-type custom-entity scopes on type-create without
+        round-tripping the whole group document through import_group. Existing
+        keys are overwritten with the provided value; keys not present are added.
+
+        Args:
+            group_name: Name of the group to update.
+            ui_permissions: Mapping of permission name -> allowed resources to
+                merge into the group's ui_permissions.
+
+        Returns:
+            True if the group existed and was updated, False otherwise.
+        """
+        pass
+
+    @abstractmethod
+    async def remove_ui_permission_keys(
+        self,
+        group_name: str,
+        permission_keys: list[str],
+    ) -> bool:
+        """
+        Remove a set of ui_permission keys from a group's ui_permissions.
+
+        Used to clean up per-type custom-entity scopes on type-delete.
+
+        Args:
+            group_name: Name of the group to update.
+            permission_keys: Permission names to unset from ui_permissions.
+
+        Returns:
+            True if the group existed and was updated, False otherwise.
+        """
+        pass
+
+    @abstractmethod
+    async def remove_ui_permission_keys_from_all_groups(
+        self,
+        permission_keys: list[str],
+    ) -> int:
+        """
+        Remove a set of ui_permission keys from EVERY group that holds them.
+
+        Sweeps all groups so a granted non-admin does not keep a dangling
+        per-type scope after its type is deleted.
+
+        Args:
+            permission_keys: Permission names to unset from every group.
+
+        Returns:
+            The number of group documents modified.
+        """
+        pass
+
+    @abstractmethod
     async def add_group_mapping(
         self,
         group_name: str,
@@ -928,6 +1046,37 @@ class ScopeRepositoryBase(ABC):
         Note:
             This is used during server deletion to clean up all
             scope references to the server.
+        """
+        pass
+
+    @abstractmethod
+    async def import_group(
+        self,
+        group_name: str,
+        description: str = "",
+        server_access: list | None = None,
+        group_mappings: list | None = None,
+        ui_permissions: dict | None = None,
+        agent_access: list | None = None,
+        is_idp_managed: bool = True,
+        allow_privileged: bool = False,
+    ) -> bool:
+        """
+        Import a complete group definition.
+
+        Args:
+            group_name: Name of the group
+            description: Description of the group
+            server_access: List of server access definitions
+            group_mappings: List of group names this group maps to
+            ui_permissions: Dictionary of UI permissions
+            agent_access: List of agent paths this group can access
+            is_idp_managed: Whether PATCH/DELETE should call the upstream IdP.
+            allow_privileged: Whether to permit writing admin-conferring
+                ui_permissions.
+
+        Returns:
+            True if imported successfully.
         """
         pass
 
@@ -1508,6 +1657,7 @@ class SkillRepositoryBase(ABC):
         tag: str | None = None,
         visibility: str | None = None,
         registry_name: str | None = None,
+        limit: int | None = None,
     ) -> list[SkillCard]:
         """List skills with database-level filtering."""
         pass
@@ -1610,6 +1760,29 @@ class SkillRepositoryBase(ABC):
             if not candidate_url:
                 continue
             if normalize_identity_url(candidate_url, ENTITY_TYPE_SKILL) == identity_url:
+                doc = skill.model_dump(mode="json") if hasattr(skill, "model_dump") else dict(skill)
+                doc["path"] = getattr(skill, "path", doc.get("path"))
+                return doc
+        return None
+
+    async def find_by_id(
+        self,
+        asset_id: str,
+    ) -> dict[str, Any] | None:
+        """Find a skill whose ``id`` equals ``asset_id`` (#1276).
+
+        Used by the registration id pre-check to return a precise 409 on
+        id collision. Default scans ``list_all()``; DocumentDB overrides
+        with an indexed ``find_one({"id": asset_id})``.
+
+        Returns:
+            A dict with the skill document fields plus ``path``, or None.
+        """
+        if not asset_id:
+            return None
+        skills = await self.list_all()
+        for skill in skills:
+            if getattr(skill, "id", None) == asset_id:
                 doc = skill.model_dump(mode="json") if hasattr(skill, "model_dump") else dict(skill)
                 doc["path"] = getattr(skill, "path", doc.get("path"))
                 return doc
@@ -1850,6 +2023,40 @@ class VirtualServerRepositoryBase(ABC):
         """
         pass
 
+    @abstractmethod
+    async def update_rating(
+        self,
+        path: str,
+        num_stars: float,
+        rating_details: list[dict[str, Any]],
+    ) -> bool:
+        """Update virtual server rating.
+
+        Args:
+            path: Virtual server path
+            num_stars: Calculated average star rating
+            rating_details: List of rating entries with user and rating
+
+        Returns:
+            True if update succeeded, False if server not found
+        """
+        pass
+
+    @abstractmethod
+    async def get_rating(
+        self,
+        path: str,
+    ) -> dict[str, Any] | None:
+        """Get virtual server rating info.
+
+        Args:
+            path: Virtual server path
+
+        Returns:
+            Dict with rating info, or None if not found
+        """
+        pass
+
 
 class RegistryCardRepositoryBase(ABC):
     """Interface for Registry Card persistence."""
@@ -1926,6 +2133,11 @@ class CustomTypeRepositoryBase(ABC):
         ``name``/``fields`` are never touched. Returns the updated descriptor,
         or None if no type with this name exists.
         """
+        pass
+
+    @abstractmethod
+    async def count_types(self) -> int:
+        """Count defined custom types (used by the metrics scrape gauge)."""
         pass
 
 
@@ -2005,4 +2217,13 @@ class CustomEntityRepositoryBase(ABC):
         visibility_filter: dict[str, Any] | None = None,
     ) -> int:
         """Count records of a type, applying the SAME optional filter as list."""
+        pass
+
+    @abstractmethod
+    async def count_all(self) -> int:
+        """Count custom entity records across every type in one query.
+
+        Returns:
+            Total number of custom entity records, all types combined.
+        """
         pass

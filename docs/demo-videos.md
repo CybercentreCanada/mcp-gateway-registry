@@ -17,7 +17,7 @@ All links verified working as of 2026-06-04.
 |----------------|------------|:--------:|:-------------:|-----|
 | **~1 minute** (the 60-second tour) | [Registry Overview](https://github.com/user-attachments/assets/97c640db-f78b-4a6c-9662-894f975f66e2) | 0m 59s | 2026-04-06 | The fastest "what is this" — MCP servers, A2A agents, and external registries working together for dynamic tool discovery. **Start here.** |
 | **~5 minutes** (a few focused demos) | [MCP Registry CLI Demo](https://github.com/user-attachments/assets/98200866-e8bd-4ac3-bad6-c6d42b261dbe) then [Dynamic Tool Discovery](https://github.com/user-attachments/assets/cee25b31-61e4-4089-918c-c3757f84518c) | 1m 12s + 5m 13s | 2025-10-28 / 2025-08-22 | See the CLI in action, then watch an agent discover and invoke tools at runtime. |
-| **~15 minutes** (the guided walkthrough) | [OAuth 3-Legged Authentication](https://github.com/user-attachments/assets/3c3a570b-29e6-4dd3-b213-4175884396cc) + [Dynamic Tool Discovery](https://github.com/user-attachments/assets/cee25b31-61e4-4089-918c-c3757f84518c) + a couple of feature clips below | ~12-15m total | 2025-08-22 | Covers auth, tool discovery, and your pick of feature demos (each under 1 min). |
+| **~15 minutes** (the guided walkthrough) | [OAuth 3-Legged Authentication](https://github.com/user-attachments/assets/3585d258-66a1-458a-bc86-450f917f7cfd) + [Dynamic Tool Discovery](https://github.com/user-attachments/assets/cee25b31-61e4-4089-918c-c3757f84518c) + a couple of feature clips below | ~12-15m total | 2025-08-22 | Covers auth, tool discovery, and your pick of feature demos (each under 1 min). |
 | **Deep dive / Q&A** (sit down with coffee) | [Full End-to-End Functionality](https://github.com/user-attachments/assets/5ffd8e81-8885-4412-a4d4-3339bbdba4fb) and the [AWS Show & Tell talk](https://www.youtube.com/watch?v=dk0qVukHLGU) | ~20m + full talk | 2025-08-22 / 2026-03-17 | The complete end-to-end demo, plus the AWS Show & Tell session covering deployment, architecture, and live Q&A. |
 
 ---
@@ -32,7 +32,7 @@ All links verified working as of 2026-06-04.
 | **CLI** | MCP Registry CLI Demo | 1m 12s | 2025-10-28 | Amit Arora | [Watch](https://github.com/user-attachments/assets/98200866-e8bd-4ac3-bad6-c6d42b261dbe) |
 | **Tool Discovery** | Dynamic Tool Discovery & Invocation | 5m 13s | 2025-08-22 | Amit Arora | [Watch](https://github.com/user-attachments/assets/cee25b31-61e4-4089-918c-c3757f84518c) |
 | **Tool Discovery** | Agent integration in action (short clip) | 0m 47s | 2025-06-15 | Amit Arora | [Watch](https://github.com/user-attachments/assets/cee1847d-ecc1-406b-a83e-ebc80768430d) |
-| **Authentication** | OAuth 3-Legged Authentication (3LO) | 5m 07s | 2025-08-22 | Amit Arora | [Watch](https://github.com/user-attachments/assets/3c3a570b-29e6-4dd3-b213-4175884396cc) |
+| **Authentication** | OAuth 3-Legged Authentication (3LO) | 5m 07s | 2026-07-14 | Amit Arora | [Watch](https://github.com/user-attachments/assets/3585d258-66a1-458a-bc86-450f917f7cfd) |
 | **Authentication / Trust** | Agent Name Service (ANS) Integration Walkthrough | ~few min | 2026-03-26 | Amit Arora | [Watch](https://app.vidcast.io/share/c2240a78-8899-46ad-9375-6fb0cc1345f3?playerMode=vidcast) |
 | **Security** | Security Scanning Demo | 0m 35s | 2026-01-08 | Amit Arora | [Watch](https://github.com/user-attachments/assets/9450f027-ef7f-4ed7-a55c-ce970bf26fd8) |
 | **Agent Skills** | Agent Skills | 0m 28s | 2026-02-07 | Amit Arora | [Watch](https://github.com/user-attachments/assets/5d1f227a-25f8-480d-9ff9-acba2498844b) |

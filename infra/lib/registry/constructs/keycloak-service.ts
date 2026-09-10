@@ -26,6 +26,8 @@ import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import { RegistryConfig } from '../registry-config';
 import { putSecureSsmParam } from './_lib';
+import { CloudFrontOriginDistribution } from './cloudfront-distribution';
+import { WafRules } from './waf-rules';
 
 // ---------------------------------------------------------------------------
 // Construct props
@@ -447,14 +449,19 @@ export class KeycloakService extends Construct {
     const container = taskDef.addContainer('keycloak', {
       containerName: 'keycloak',
       image: containerImage,
-      command: [
-        'start-dev',
-        '--spi-realm-default-ssl-required=NONE',
-      ],
+      // `start` matches TF (production mode). `start-dev` used to be here with
+      // `--spi-realm-default-ssl-required=NONE` — that combo forces new realms
+      // to sslRequired=NONE which contradicts the CloudFront-fronted HTTPS
+      // security posture. KC_HOSTNAME + KC_PROXY_HEADERS=xforwarded already
+      // make Keycloak recognize inbound HTTPS through CloudFront/ALB.
+      command: ['start'],
       essential: true,
       environment: {
         AWS_REGION: region,
         KC_DB: 'mysql',
+        // Enable token-exchange for M2M flows. Baked into the TF custom image
+        // via `kc.sh build`; the public quay.io image requires runtime enable.
+        KC_FEATURES: 'token-exchange',
         KC_PROXY_HEADERS: 'xforwarded',
         KC_HOSTNAME: this.keycloakUrl,
         KC_HOSTNAME_ADMIN: this.keycloakUrl,
@@ -540,9 +547,10 @@ export class KeycloakService extends Construct {
       stickinessCookieDuration: cdk.Duration.seconds(86400),
     });
 
-    // DNS and HTTPS resources (conditional on enable_route53_dns)
+    // DNS and HTTPS resources
+    let hostedZone: route53.IHostedZone | undefined;
     if (config.enableRoute53Dns) {
-      const hostedZone = route53.HostedZone.fromLookup(this, 'HostedZone', {
+      hostedZone = route53.HostedZone.fromLookup(this, 'HostedZone', {
         domainName: hostedZoneDomain,
       });
 
@@ -561,9 +569,8 @@ export class KeycloakService extends Construct {
         defaultTargetGroups: [targetGroup],
       });
 
-      // HTTP listener behavior depends on whether CloudFront is also enabled
+      // HTTP listener: Mode 2 redirects, Mode 3 forwards (CloudFront terminates TLS)
       if (!config.cloudfront.enabled) {
-        // Mode 2: Route53 without CloudFront - redirect HTTP to HTTPS
         this.alb.addListener('HttpListener', {
           port: 80,
           protocol: elbv2.ApplicationProtocol.HTTP,
@@ -574,25 +581,12 @@ export class KeycloakService extends Construct {
           }),
         });
       } else {
-        // Mode 3: Route53 with CloudFront - forward HTTP (CloudFront handles TLS)
         this.alb.addListener('HttpListener', {
           port: 80,
           protocol: elbv2.ApplicationProtocol.HTTP,
           defaultTargetGroups: [targetGroup],
         });
       }
-
-      // Route53 A record aliased to ALB (or CloudFront when both enabled)
-      // When CloudFront is also enabled the alias target would be CloudFront,
-      // but since CloudFront is managed in a separate stack, we point to ALB here.
-      // The CloudFront stack can override this record if needed.
-      new route53.ARecord(this, 'AliasRecord', {
-        zone: hostedZone,
-        recordName: this.keycloakDomain,
-        target: route53.RecordTarget.fromAlias(
-          new route53targets.LoadBalancerTarget(this.alb),
-        ),
-      });
     } else {
       // No Route53: HTTP listener forwards directly (CloudFront or plain HTTP)
       this.alb.addListener('HttpListener', {
@@ -600,17 +594,63 @@ export class KeycloakService extends Construct {
         protocol: elbv2.ApplicationProtocol.HTTP,
         defaultTargetGroups: [targetGroup],
       });
-
-      // Without Route53, the keycloakDomain is unreachable via DNS.
-      // Fall back to the ALB DNS name so downstream services can connect.
+      // Without Route53, the configured keycloakDomain is unreachable via DNS.
+      // Fall back to the ALB DNS so downstream services can connect (Mode 1
+      // will overwrite this again with the CloudFront domain below).
       this.keycloakDomain = this.alb.loadBalancerDnsName;
     }
 
-    // Now that the ALB exists, resolve the Keycloak URL.
+    // CloudFront distribution fronting the Keycloak ALB (Mode 1 & 3). Created
+    // in-stack so KC_HOSTNAME can reference the distribution domain without a
+    // cross-stack lookup that would produce a cyclic dependency.
+    let cfDistribution: CloudFrontOriginDistribution | undefined;
+    if (config.cloudfront.enabled) {
+      cfDistribution = new CloudFrontOriginDistribution(this, 'CloudFront', {
+        config,
+        albDns: this.alb.loadBalancerDnsName,
+        customDomain: config.enableRoute53Dns ? this.keycloakDomain : '',
+        hostedZone,
+        comment: `${config.name} Keycloak CloudFront Distribution`,
+        logsPrefix: 'keycloak/',
+        emitCloudFrontForwardedProtoHeader: false,
+      });
+
+      // Optional WAFv2 Web ACL — mirrors terraform/aws-ecs/waf.tf
+      new WafRules(this, 'Waf', {
+        config,
+        mcpGatewayAlbArn: '',
+        keycloakAlbArn: this.alb.loadBalancerArn,
+      });
+    }
+
+    // Route53 A-record — target depends on mode:
+    //   Mode 2 (Route53, no CloudFront): alias → ALB
+    //   Mode 3 (Route53 + CloudFront):    alias → CloudFront distribution
+    if (config.enableRoute53Dns && hostedZone) {
+      const target = config.cloudfront.enabled && cfDistribution?.distribution
+        ? route53.RecordTarget.fromAlias(new route53targets.CloudFrontTarget(cfDistribution.distribution))
+        : route53.RecordTarget.fromAlias(new route53targets.LoadBalancerTarget(this.alb));
+      new route53.ARecord(this, 'AliasRecord', {
+        zone: hostedZone,
+        recordName: this.keycloakDomain,
+        target,
+      });
+    }
+
+    // Resolve the Keycloak public URL. KC_HOSTNAME must reflect the public
+    // HTTPS scheme; otherwise Keycloak returns "HTTPS required" on OIDC
+    // endpoints even with KC_PROXY_HEADERS=xforwarded.
     if (config.enableRoute53Dns) {
       resolvedKeycloakUrl = `https://${this.keycloakDomain}`;
+    } else if (cfDistribution) {
+      resolvedKeycloakUrl = cfDistribution.url;
+      this.keycloakDomain = cfDistribution.distributionDomainName;
     } else {
-      resolvedKeycloakUrl = `http://${this.alb.loadBalancerDnsName}`;
+      throw new Error(
+        'Keycloak public URL cannot be resolved: enable either enableRoute53Dns ' +
+        'or cloudfront.enabled. Plain-HTTP ALB is not supported because ' +
+        'sslRequired=external blocks admin API operations over HTTP.',
+      );
     }
 
     // ------------------------------------------------------------------

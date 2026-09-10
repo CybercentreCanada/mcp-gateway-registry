@@ -27,6 +27,16 @@ ingress_cidr_blocks = [
   "YOUR.EC2.INSTANCE.IP/32",   # Your EC2 instance or NAT Gateway IP
 ]
 
+# WAFv2 Web ACLs on the ALBs (AWS managed rule sets + WAF-level rate rules) as
+# optional defense-in-depth. NOT required for per-client-IP rate limiting: the
+# container nginx already rate-limits the auth-validation fan-out, and behind an
+# ALB you get true per-client-IP limiting out of the box because trusted_real_ip_cidrs
+# defaults to the VPC CIDR (nginx's realip module then rewrites the rate-limit key
+# from the ALB's IP to the real client). WAF is OFF by default as a cost decision (WAFv2 has a
+# per-Web-ACL and per-request cost and needs wafv2:* IAM permissions). Turn it on
+# for an extra managed-rules layer on internet-facing deployments:
+# enable_waf = true
+
 # ============================================================================
 # DOMAIN CONFIGURATION
 # ============================================================================
@@ -94,6 +104,15 @@ keycloak_admin_password = "CHANGE-ME-SECURE-PASSWORD"
 # Keycloak database credentials
 keycloak_database_username = "keycloak"
 keycloak_database_password = "CHANGE-ME-DB-PASSWORD"
+
+# Password character policy (issue #1354). By default keycloak_database_password
+# and documentdb_admin_password may NOT contain / @ " ' + : ? # & ! = % or
+# spaces -- they break RDS/DocumentDB, connection-string/URI parsing, or curl
+# form-encoding. Leave this false and pick a compliant password for new installs.
+# Set true ONLY for an existing install whose databases were already created with
+# such a password, to avoid rotating a live master password. Prints a loud
+# warning at plan/apply when enabled.
+# allow_unsafe_password_chars = false
 
 # ============================================================================
 # CONTAINER IMAGES (Optional - pre-built public ECR images used by default)
@@ -255,11 +274,37 @@ session_cookie_secure = true
 # Default: Empty (cookie scoped to exact host only - safest option)
 session_cookie_domain = ""
 
+# Exact-match allowlist of OAuth login/logout redirect URIs (open-redirect hardening).
+# Comma-separated list of the FULL absolute callback/success/logout URLs the
+# deployment legitimately redirects to after login/logout. When set, an absolute
+# redirect_uri is accepted ONLY if it exactly matches an entry; relative paths are
+# always allowed as same-origin. When empty (default), the auth server falls back
+# to the weaker cookie-domain heuristic, which admits any host within
+# session_cookie_domain (including an attacker-controlled subdomain). Configuring
+# this list is the hardened path and is recommended for production.
+#
+#   Example:
+#     oauth2_allowed_redirect_uris = "https://registry.mycorp.click/,https://registry.mycorp.click/login"
+#
+# Default: Empty (falls back to cookie-domain heuristic)
+oauth2_allowed_redirect_uris = ""
+
 # Number of trusted reverse-proxy hops in front of the app. The audit client IP
 # is taken from the Nth-from-the-right X-Forwarded-For entry (never the
 # client-controlled left-most one). On ECS behind an ALB (+ optional CloudFront),
 # raise this to match the number of trusted proxies. Default 1.
 # trusted_proxy_hops = 2
+
+# Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front
+# of the bundled nginx. nginx's realip module recovers the real client IP from
+# X-Forwarded-For for peers in these ranges. This does double duty: the audited
+# client IP becomes the end user (not the ALB), AND the inbound rate-limit zones —
+# which key on the connection peer — then throttle per real client IP instead of
+# collapsing to a single global bucket at the ALB's IP. LEAVE EMPTY (default): ECS
+# is always behind an ALB, so the module auto-populates this with your VPC CIDR.
+# Override only for a stacked proxy (CloudFront in front of an ALB: list the VPC
+# CIDR AND CloudFront's origin ranges) or to narrow the trusted range.
+# trusted_real_ip_cidrs = "10.0.0.0/16"
 
 # ADDITIONAL hostnames (optionally host:port) trusted in the inbound Host header
 # when building OAuth external URLs. Your primary domain is ALREADY covered — the
@@ -298,6 +343,21 @@ session_cookie_domain = ""
 # embeddings_aws_region       = "us-east-1"
 # embeddings_api_key          = ""  # Empty for Bedrock (uses IAM)
 
+# Option 4: Use an IdP-gated OpenAI-compatible endpoint (Keycloak, Entra, Okta, etc.)
+# The registry fetches a short-lived token from the IdP and injects it per embedding call.
+# embeddings_provider              = "litellm"
+# embeddings_model_name            = "openai/text-embedding-3-small"
+# embeddings_model_dimensions      = 1536
+# embeddings_api_base              = "https://embeddings.example.com/v1"
+# embeddings_auth_mode             = "idp"
+# embeddings_idp_token_endpoint    = "https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token"
+# embeddings_idp_client_id         = "YOUR_CLIENT_ID"
+# embeddings_idp_client_secret     = "YOUR_CLIENT_SECRET"  # pragma: allowlist secret
+# embeddings_idp_scope             = "api://<app-id>/.default"
+# embeddings_idp_timeout_seconds   = 30
+# embeddings_idp_allow_insecure    = false  # local dev only: permit http:// loopback token endpoint
+# embeddings_response_format       = "openai"  # default; use "raw_array" only if your endpoint returns a bare [[float]] array instead of the OpenAI envelope
+
 # ============================================================================
 # REGISTRATION DEDUPLICATION
 # ============================================================================
@@ -334,11 +394,11 @@ storage_backend = "documentdb"
 # DocumentDB Elastic Cluster credentials (REQUIRED)
 # RECOMMENDED: Set via environment variables instead of tfvars for security:
 #   export TF_VAR_documentdb_admin_username="docdbadmin"
-#   export TF_VAR_documentdb_admin_password="YourSecurePassword123!"
+#   export TF_VAR_documentdb_admin_password="YourSecurePassword123"
 #
 # Alternatively, uncomment below (less secure - credentials in file):
 # documentdb_admin_username = "docdbadmin"
-# documentdb_admin_password = "CHANGE-ME-DocumentDB-Password123!"
+# documentdb_admin_password = "CHANGE-ME-DocumentDB-Password123"
 
 # DocumentDB Elastic Cluster capacity configuration (OPTIONAL)
 # Uncomment to override defaults
@@ -372,6 +432,30 @@ storage_backend = "documentdb"
 #   mongodb_connection_string_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:mongodb-atlas-uri-XXXXXX"
 # mongodb_connection_string            = ""
 # mongodb_connection_string_secret_arn = ""
+
+# ----------------------------------------------------------------------------
+# Frontend RUM snippet (feature #1471)
+# ----------------------------------------------------------------------------
+# Optional base64-encoded HTML snippet served as /rum.js for Real User
+# Monitoring. Empty disables RUM. Prefer registry_rum_snippet_secret_arn when
+# the snippet contains a vendor token (the plain-text variable value lands in
+# Terraform state). The operator supplies the ARN of their own secret.
+#
+# Produce the base64 value from a snippet file:
+#   base64 -w0 my-rum-snippet.html            # Linux
+#   base64 my-rum-snippet.html | tr -d '\n'   # macOS
+#
+# Examples:
+#   registry_rum_snippet_b64        = "PHNjcmlwdD4vLyBydW08L3NjcmlwdD4="
+#   registry_rum_snippet_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rum-snippet-XXXXXX" # pragma: allowlist secret
+# registry_rum_snippet_b64        = ""
+# registry_rum_snippet_secret_arn = ""
+#
+# Optional comma-separated host allowlist for the RUM snippet. When set, a
+# snippet referencing any host not on the list is rejected at startup (fail
+# closed). Empty disables the check.
+#   registry_rum_allowed_hosts = "cdn.signalfx.com,rum-ingest.us0.signalfx.com"
+# registry_rum_allowed_hosts = ""
 
 # ============================================================================
 # EXTERNAL MONGODB (Atlas, self-managed) - issue #955
@@ -429,6 +513,14 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # Default: 100
 # max_tokens_per_user_per_hour = 100
 
+# Default TTL (hours) for minted MCP tokens when the caller does not request one
+# Default: 8
+# mcp_token_default_ttl_hours = 8
+
+# Maximum TTL (hours) a caller may request for a minted MCP token
+# Default: 24
+# mcp_token_max_ttl_hours = 24
+
 # ============================================================================
 # REGISTRATION WEBHOOK (Issue #742)
 # ============================================================================
@@ -485,6 +577,16 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 
 # Interval at which the worker renews the lease. Should be below TTL. Default: 15
 # batch_worker_lease_heartbeat_seconds = 15
+
+# ============================================================================
+# CALLER-SUPPLIED ASSET ID (Issue #1276)
+# ============================================================================
+
+# Allow callers to supply their own asset id on the public server/agent/skill
+# registration routes (UUID, ARN, URN, ...). Fail-closed: OFF by default, so a
+# supplied id is rejected (422) and ids auto-generate. Federation is not
+# affected (peer ids are governed by the peer allowlist). Default: false
+# allow_caller_supplied_asset_id = false
 
 # ============================================================================
 # REGISTRATION GATE / ADMISSION CONTROL (Issue #809)
@@ -632,6 +734,14 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # Common values: 7 (dev), 30 (standard), 90 (compliance)
 # Default: 7
 # audit_log_ttl_days = 7
+
+# Require a durable audit sink (fail closed)
+# When true (default), the registry refuses to start if audit logging is enabled
+# but no durable store (DocumentDB/MongoDB) is available, instead of silently
+# degrading to non-durable JSON log lines that can be lost on restart and are not
+# queryable for forensics. Set to false only where a non-durable trail is acceptable.
+# Default: true
+# audit_log_require_durable = true
 
 # ============================================================================
 # APPLICATION LOG CONFIGURATION
@@ -974,6 +1084,22 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # Default: "full" (uncomment to change)
 # registry_mode = "full"
 
+# A2A reverse-proxy gateway (opt-in; default false). When true, each enabled A2A
+# agent gets nginx location blocks proxying its card + JSON-RPC through the
+# gateway for centralized auth and metrics. Requires deployment_mode =
+# "with-gateway".
+# a2a_reverse_proxy_enabled = false
+
+# SSRF guard allowlist for internal MCP-server / A2A-agent upstreams. The health
+# checker and proxy validate every upstream URL through an SSRF guard that blocks
+# private/loopback/metadata addresses by default, so internal upstreams (private
+# IPs / service-discovery hostnames) are marked unhealthy unless listed here. The
+# cloud metadata address (169.254.169.254) is never permitted by either.
+#   ssrf_allowed_hosts: comma-separated exact hostnames or IPs (least privilege).
+#   ssrf_allowed_cidrs: comma-separated CIDR ranges for whole internal subnets.
+# ssrf_allowed_hosts = "flight-booking-agent.mcp-gateway-v2.local"
+# ssrf_allowed_cidrs = ""
+
 # Internal/workshop deployment classification (telemetry labels only; issue #1216).
 # Tags a deployment as one of our own internal/workshop installs so it can be
 # distinguished from community installs in telemetry. Does NOT change access control.
@@ -1030,6 +1156,12 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # the public client and set the same port here so the Connect dialog emits
 # --callback-port. 0 (default) lets the IDE pick a port (correct for Keycloak).
 # ide_oauth_callback_port = 56789
+
+# Optional install scope for the Claude Code Connect snippet: local | project | user.
+# When set, the generated `claude mcp add` command emits `--scope <value>` (e.g.
+# "user" installs the server for every project, not just the current directory).
+# Empty (default) omits the flag. Display-only; no gateway behaviour change.
+# ide_connect_scope = "user"
 
 # Container image URIs for observability services (required when enable_observability = true)
 # metrics_service_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-metrics-service:latest"
@@ -1107,6 +1239,19 @@ grafana_admin_password = "CHANGE-ME-SET-STRONG-PASSWORD"
 # Registry IDs, region, sync settings are managed via /api/federation/config API.
 aws_registry_federation_enabled = true
 
+# Cross-account AgentCore federation role ARNs the registry task may assume.
+# Leave empty (the default) for same-account federation only -- the
+# sts:AssumeRole grant is then omitted entirely (fail closed, no cross-account
+# trust). Populate with the exact per-registry role ARNs to opt in; each entry
+# must be a full IAM role ARN (validated at plan time), never "*".
+#
+# Note: the same-account read policy pins the deploying account id but
+# wildcards the region (arn:...:bedrock-agentcore:*:<account>:registry/*), so
+# per-registry region overrides keep working without a tfvars change.
+# aws_registry_federation_assume_role_arns = [
+#   "arn:aws:iam::111122223333:role/agentcore-federation-reader",
+# ]
+
 # ============================================================================
 # DEMO SERVER CONFIGURATION (Issue #764)
 # ============================================================================
@@ -1136,6 +1281,23 @@ aws_registry_federation_enabled = true
 # GitHub Enterprise Server support
 # github_extra_hosts  = "github.mycompany.com,raw.github.mycompany.com"
 # github_api_base_url = "https://github.mycompany.com/api/v3"
+
+# ============================================================================
+# RATE LIMITING (Issue #295)
+# ============================================================================
+# Application-level, identity/group/target-aware rate limiting enforced at the
+# auth-server /validate hop (complementary to the coarse per-IP nginx edge
+# limiting). Off by default; definitions are managed via the admin API/CLI.
+# rate_limiting_enabled                    = false
+# rate_limit_backend                       = "documentdb"
+# rate_limit_fail_open                     = true
+# rate_limit_quarantine_fail_closed        = false  # deny on quarantine-read error (default fail-open)
+# rate_limit_definitions_cache_ttl_seconds = 30
+# rate_limit_backend_timeout_ms            = 250
+# Lockout-safeguard floors (registry validates group definitions at config time;
+# on windows <= 60s a group's user/agent limit must be >= its floor).
+# rate_limit_user_floor_per_min            = 20
+# rate_limit_agent_floor_per_min           = 10
 
 # ============================================================================
 # EXTRA ENVIRONMENT VARIABLES (Issue #1000)

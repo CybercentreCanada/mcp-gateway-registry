@@ -118,6 +118,20 @@ spec:
               value: {{ .Values.app.codingAssistants | default "" | quote }}
             - name: UI_TITLE
               value: {{ .Values.app.uiTitle | default "" | quote }}
+            # Frontend RUM (feature #1471): base64 HTML snippet served as /rum.js.
+            # Rendered only when the plain value is set. For token-bearing
+            # snippets leave rumSnippetB64 empty and inject RUM_SNIPPET_B64 from
+            # a Secret via extraEnvFrom (see values.yaml). Rendering
+            # conditionally keeps that secret source from being shadowed.
+            {{- if .Values.rumSnippetB64 }}
+            - name: RUM_SNIPPET_B64
+              value: {{ .Values.rumSnippetB64 | quote }}
+            {{- end }}
+            # RUM host allowlist (fail-closed when set). Rendered only when set.
+            {{- if .Values.rumAllowedHosts }}
+            - name: RUM_ALLOWED_HOSTS
+              value: {{ .Values.rumAllowedHosts | quote }}
+            {{- end }}
             # Tool-level access control (issue #1026)
             - name: MCP_TOOLS_LIST_FILTER_ENABLED
               value: {{ .Values.app.mcpToolsListFilterEnabled | toString | quote }}
@@ -137,11 +151,18 @@ spec:
               value: {{ .Values.app.ssrfAllowedHosts | default "" | quote }}
             - name: SSRF_ALLOWED_CIDRS
               value: {{ .Values.app.ssrfAllowedCidrs | default "" | quote }}
+            # A2A reverse-proxy gateway (opt-in; default off). When true, each
+            # enabled A2A agent gets nginx location blocks proxying its card +
+            # JSON-RPC through the gateway for centralized auth and metrics.
+            - name: A2A_REVERSE_PROXY_ENABLED
+              value: {{ .Values.app.a2aReverseProxyEnabled | default false | toString | quote }}
             # IDE OAuth login (PR #1224): public client_id + fixed callback port
             - name: IDE_OAUTH_CLIENT_ID
               value: {{ .Values.app.ideOauthClientId | default "" | quote }}
             - name: IDE_OAUTH_CALLBACK_PORT
               value: {{ .Values.app.ideOauthCallbackPort | default 0 | toString | quote }}
+            - name: IDE_CONNECT_SCOPE
+              value: {{ .Values.app.ideConnectScope | default "" | quote }}
             # Custom entity types (admin-defined, schema-driven catalog types)
             - name: CUSTOM_ENTITY_TYPES_ENABLED
               value: {{ .Values.app.customEntityTypesEnabled | default false | toString | quote }}
@@ -275,6 +296,38 @@ spec:
               value: {{ .Values.app.updateCheck.enabled | default true | toString | quote }}
             - name: UPDATE_CHECK_INTERVAL_HOURS
               value: {{ .Values.app.updateCheck.intervalHours | default 24 | toString | quote }}
+            # Audit durability guard (fail closed). When true (default), the
+            # registry refuses to start if audit logging is enabled but no
+            # durable sink (DocumentDB/MongoDB) is available, instead of silently
+            # degrading to non-durable JSON log lines. Set to false only where a
+            # non-durable audit trail is acceptable.
+            - name: AUDIT_LOG_REQUIRE_DURABLE
+              value: {{ .Values.app.auditLogRequireDurable | default true | toString | quote }}
+            # Rate Limiting (issue #295). Off by default; the registry hosts the
+            # admin CRUD API for definitions.
+            - name: RATE_LIMITING_ENABLED
+              value: {{ .Values.app.rateLimiting.enabled | default false | toString | quote }}
+            - name: RATE_LIMIT_BACKEND
+              value: {{ .Values.app.rateLimiting.backend | default "documentdb" | quote }}
+            - name: RATE_LIMIT_FAIL_OPEN
+              value: {{ .Values.app.rateLimiting.failOpen | default true | toString | quote }}
+            - name: RATE_LIMIT_QUARANTINE_FAIL_CLOSED
+              value: {{ .Values.app.rateLimiting.quarantineFailClosed | default false | toString | quote }}
+            - name: RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS
+              value: {{ .Values.app.rateLimiting.definitionsCacheTtlSeconds | default 30 | toString | quote }}
+            - name: RATE_LIMIT_BACKEND_TIMEOUT_MS
+              value: {{ .Values.app.rateLimiting.backendTimeoutMs | default 250 | toString | quote }}
+            - name: RATE_LIMIT_USER_FLOOR_PER_MIN
+              value: {{ .Values.app.rateLimiting.userFloorPerMin | default 20 | toString | quote }}
+            - name: RATE_LIMIT_AGENT_FLOOR_PER_MIN
+              value: {{ .Values.app.rateLimiting.agentFloorPerMin | default 10 | toString | quote }}
+            # MCP token TTL configuration. Read by the registry (TTL validation
+            # in server_routes.py) and the auth-server (token minting). Both
+            # containers receive the same values.
+            - name: MCP_TOKEN_DEFAULT_TTL_HOURS
+              value: {{ .Values.app.mcpTokenDefaultTtlHours | default "8" | toString | quote }}
+            - name: MCP_TOKEN_MAX_TTL_HOURS
+              value: {{ .Values.app.mcpTokenMaxTtlHours | default "24" | toString | quote }}
             {{- if .Values.app.registryApiKeysExistingSecret }}
             - name: REGISTRY_API_KEYS
               valueFrom:
@@ -295,6 +348,62 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.ans.apiSecretExistingSecret }}
                   key: {{ .Values.ans.apiSecretExistingSecretKey }}
+            {{- end }}
+            # Prevent AWS SDKs from falling back to EC2 IMDS. The registry uses
+            # boto3 (Secrets Manager, DocumentDB IAM, Cognito, AgentCore).
+            #
+            # NOT redundant with the url_guard egress SSRF check: boto3 uses its
+            # own urllib3 stack and never passes through GuardedTransport.
+            # url_guard blocks the app being tricked into fetching a URL that
+            # redirects to IMDS; this closes boto3's own IMDS credential
+            # provider, a vector url_guard structurally cannot see.
+            #
+            # REQUIRES IRSA or EKS Pod Identity (both deliver pod credentials
+            # out-of-band, unaffected by this). A cluster that gives pods
+            # credentials ONLY via the worker-node instance profile (reachable
+            # only through IMDS) is NOT supported with this on. Chart-managed and
+            # reserved so extraEnv cannot override it; if you must run on
+            # node-role credentials, set app.disableEc2ImdsFallback=false.
+            #
+            # Gate renders UNLESS the flag is explicitly false, so a missing key
+            # (e.g. a fork that strips it from values.yaml) still renders — fails
+            # toward secure. Do NOT rewrite as `| default true`: sprig's default
+            # treats boolean false as empty, so `false | default true` -> true
+            # and the escape hatch would silently stop working.
+            {{- if not (eq .Values.app.disableEc2ImdsFallback false) }}
+            - name: AWS_EC2_METADATA_DISABLED
+              value: "true"
+            {{- end }}
+            # Embeddings IdP auth (issue #1415). Rendered only when authMode is set,
+            # so default deployments are unchanged. EMBEDDINGS_IDP_CLIENT_SECRET is
+            # sourced from a pre-created Secret (embeddings.idpClientSecretExistingSecret).
+            {{- if .Values.embeddings.authMode }}
+            - name: EMBEDDINGS_AUTH_MODE
+              value: {{ .Values.embeddings.authMode | quote }}
+            - name: EMBEDDINGS_IDP_TOKEN_ENDPOINT
+              value: {{ .Values.embeddings.idpTokenEndpoint | default "" | quote }}
+            - name: EMBEDDINGS_IDP_CLIENT_ID
+              value: {{ .Values.embeddings.idpClientId | default "" | quote }}
+            - name: EMBEDDINGS_IDP_SCOPE
+              value: {{ .Values.embeddings.idpScope | default "" | quote }}
+            - name: EMBEDDINGS_IDP_TIMEOUT_SECONDS
+              value: {{ .Values.embeddings.idpTimeoutSeconds | default 30 | toString | quote }}
+            - name: EMBEDDINGS_IDP_ALLOW_INSECURE
+              value: {{ .Values.embeddings.idpAllowInsecure | default false | toString | quote }}
+            {{- if .Values.embeddings.idpClientSecretExistingSecret }}
+            - name: EMBEDDINGS_IDP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.embeddings.idpClientSecretExistingSecret }}
+                  key: {{ .Values.embeddings.idpClientSecretExistingSecretKey | default "EMBEDDINGS_IDP_CLIENT_SECRET" }}
+            {{- end }}
+            {{- end }}
+            # Embeddings response shape. Rendered only when set (default "openai" is
+            # the code default). Independent of authMode: raw_array works with a
+            # static key too.
+            {{- if .Values.embeddings.responseFormat }}
+            - name: EMBEDDINGS_RESPONSE_FORMAT
+              value: {{ .Values.embeddings.responseFormat | quote }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}

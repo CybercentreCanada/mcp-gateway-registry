@@ -1,127 +1,276 @@
 # Agent-to-Agent (A2A) Protocol Support
 
-The MCP Gateway & Registry now supports **Agent-to-Agent (A2A) communication**, enabling AI agents to securely register themselves and discover other agents within a centralized registry. This creates a self-managed agent ecosystem where agents can autonomously find, connect to, and communicate with other agents while maintaining security and access control features.
+The MCP Gateway & Registry supports **Agent-to-Agent (A2A) communication**: AI agents register themselves, discover other agents they are allowed to see, and (optionally) call each other through the gateway. This creates a self-managed agent ecosystem with authentication and fine-grained access control.
 
-## Overview
+This is the single guide for A2A. It covers the two operating modes, how to register and manage agents (CRUD via CLI or `curl`), how invoke access is granted, and how reverse-proxy routing works internally (with sequence diagrams). For the deep implementation reference, see the [A2A Protocol Integration design doc](design/a2a-protocol-integration.md).
 
-### What is A2A?
+## Two Modes: Registry-Only vs. Reverse-Proxy
 
-Agent-to-Agent (A2A) communication allows autonomous AI agents to:
+A2A runs in one of two modes. Both share the same registration, discovery, and access-control machinery; they differ only in whether the gateway sits in the agent-to-agent **data path**.
 
-1. **Self-Register** - Agents register their capabilities, skills, and metadata with the central registry
-2. **Discover Other Agents** - Agents can discover and list other agents they have permission to access
-3. **Secure Communication** - All agent-to-agent communication is authenticated and authorized via Keycloak
-4. **Access Control** - Fine-grained permissions ensure agents only access agents they're authorized for
+### Mode 1 — Registry-only discovery (default)
 
-### Why A2A Matters
+The registry is a discovery and validation service only:
 
-Instead of having a central orchestrator manage all agent communication:
+- Agents register their capabilities and metadata.
+- Agents discover other agents they have permission to see.
+- Agents then talk to each other **directly**, using the URL returned by discovery.
+- **The registry is not in the data path** — once two agents find each other, the registry is done.
 
-```
-❌ OLD: Orchestrator ←→ Agent A, Agent B, Agent C
-         (bottleneck, single point of failure, limited scalability)
+This is the default and needs no extra configuration.
 
-✅ NEW: Agent A ←→ Registry ←→ Agent B
-        Agent C discovers both via registry
-        (decentralized, scalable, autonomous)
-```
+### Mode 2 — Reverse-proxy routing (opt-in)
 
-A2A enables:
-- **Autonomous agent networks** - Agents operate independently
-- **Dynamic discovery** - New agents join without reconfiguration
-- **Enterprise security** - Keycloak-based access control
-- **Audit trails** - Complete visibility into agent interactions
+The gateway sits in the data path and proxies A2A traffic the same way it proxies MCP servers:
 
-## Architecture
+- Each **enabled** agent gets authenticated nginx routes under `/agent/{path}`.
+- The agent's real backend stays private; discovery advertises the gateway URL instead.
+- Every call is authenticated and gated **per-agent** before it reaches the backend.
 
-### A2A Agent Flow
+Turn it on with `A2A_REVERSE_PROXY_ENABLED=true` (requires `with-gateway` deployment mode). See [Reverse-Proxy Mode](#reverse-proxy-mode-routing-a2a-traffic-through-the-gateway) below for the full setup and how it works.
 
-```
-Agent Application (AI Code)
-    ↓ M2M Token (Keycloak Service Account)
-┌─────────────────────────────────────┐
-│  Agent Registry API (/api/agents)   │
-│  - POST /api/agents/register        │
-│  - GET /api/agents                  │
-│  - GET /api/agents/{path}           │
-│  - PUT /api/agents/{path}           │
-│  - DELETE /api/agents/{path}        │
-│  - POST /api/agents/{path}/toggle   │
-└─────────────────────────────────────┘
-    ↓
-┌─────────────────────────────────────┐
-│  Agent State Management             │
-│  - registry/agents/agent_state.json │
-│  - registry/agents/{name}.json      │
-└─────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph CP["Control plane (both modes)"]
+        A[Agent] -->|register / discover| R[(Registry)]
+    end
+    subgraph M1["Mode 1 data plane: registry-only"]
+        A1[Agent A] -->|direct call to backend URL| A2[Agent B]
+    end
+    subgraph M2["Mode 2 data plane: reverse-proxy"]
+        C[Agent A] -->|/agent/path| G[Gateway<br/>auth + invoke gate] --> B[Agent B backend]
+    end
 ```
 
-### Three-Tier Access Control
+---
 
-The A2A implementation uses **three-tier access control** to ensure agents only access agents they're authorized for:
+## Getting Started
 
-1. **UI-Scopes** - What agents each group can see/access
-   - `list_agents` - List agents visible to this group
-   - `get_agent` - Get details of specific agents
-   - `publish_agent` - Register new agents
-   - `modify_agent` - Update agent metadata
-   - `delete_agent` - Remove agents
+### The token
 
-2. **Group Mappings** - Maps Keycloak groups to scope names
-   - `mcp-registry-admin` - Full access to all agents
-   - `registry-users-lob1` - Limited to LOB1 agents
-   - `registry-users-lob2` - Limited to LOB2 agents
+All A2A operations are authenticated with a JWT. **This guide assumes you already have a token** (from the registry UI's "Get JWT Token" button, an M2M service account, or your IdP). Save it to a file named `.token` in your working directory:
 
-3. **Individual Agent Scopes** - Detailed access per group
-   - Specific agents each group can access
-   - Methods each group can call on agents
+```json
+{ "access_token": "<your-jwt>" }
+```
 
-## Getting Started with A2A
+Both the CLI and `curl` examples below use that file. The token carries your IdP groups, which map to scopes that decide what you can do (see [Access Control](#access-control)).
 
-### Quick Start: Register an Agent
+### Register an agent with the CLI
 
 ```bash
-# 1. Ensure credentials are generated
-./credentials-provider/generate_creds.sh
+# Register from a JSON card (see cli/examples/ for templates)
+uv run python cli/agent_mgmt.py --token-file .token register cli/examples/code_reviewer_agent.json
 
-# 2. Register an agent
-uv run python cli/agent_mgmt.py register cli/examples/code_reviewer_agent.json
+# Enable it (agents register disabled by default)
+uv run python cli/agent_mgmt.py --token-file .token toggle /code-reviewer true
 
-# 3. Verify registration
-curl -H "Authorization: Bearer $(jq -r '.access_token' .oauth-tokens/admin-bot-token.json)" \
-  http://localhost/api/agents | jq .
+# List agents visible to you
+uv run python cli/agent_mgmt.py --token-file .token list
 ```
 
-### Complete Agent Lifecycle
+### Register an agent with curl
+
+Everything the CLI does is a plain REST call to `/api/agents/*` through the gateway (port 80 / your registry URL):
 
 ```bash
-# Register agent
-uv run python cli/agent_mgmt.py register agent-config.json
+TOKEN=$(jq -r .access_token .token)
 
-# List agents (filtered by permissions)
-uv run python cli/agent_mgmt.py list
-
-# Get agent details
-uv run python cli/agent_mgmt.py get /code-reviewer
-
-# Update agent
-uv run python cli/agent_mgmt.py update /code-reviewer agent-config.json
-
-# Disable agent (without deleting)
-uv run python cli/agent_mgmt.py toggle /code-reviewer
-
-# Re-enable agent
-uv run python cli/agent_mgmt.py toggle /code-reviewer
-
-# Delete agent
-uv run python cli/agent_mgmt.py delete /code-reviewer
+curl -X POST "$REGISTRY_URL/api/agents/register" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @cli/examples/code_reviewer_agent.json
 ```
 
-See [A2A Agent Management](a2a-agent-management.md) for complete CLI guide.
+---
 
-## Agent Configuration
+## CRUD and Discovery APIs
 
-### Agent Metadata Example
+All endpoints are under `/api/agents` and require a `Bearer` token. Results are filtered by your permissions.
+
+| Operation | Method + Path | CLI command |
+|-----------|---------------|-------------|
+| Register | `POST /api/agents/register` | `register <file.json>` |
+| List | `GET /api/agents` | `list` |
+| Get one | `GET /api/agents/{path}` | `get /path` |
+| Update | `PUT /api/agents/{path}` | `update /path <file.json>` |
+| Delete | `DELETE /api/agents/{path}` | `delete /path` |
+| Enable/disable | `POST /api/agents/{path}/toggle` | `toggle /path true\|false` |
+| Test reachability | `POST /api/agents/{path}/health` | `test /path` |
+| Semantic discovery | `POST /api/agents/discover/semantic` | `search "<query>"` |
+
+**CLI examples:**
+
+```bash
+CLI="uv run python cli/agent_mgmt.py --token-file .token"
+
+$CLI get /code-reviewer
+$CLI update /code-reviewer cli/examples/code_reviewer_agent.json
+$CLI toggle /code-reviewer false        # disable without deleting
+$CLI search "agent that reviews python for security issues"
+$CLI delete /code-reviewer
+```
+
+**curl examples:**
+
+```bash
+TOKEN=$(jq -r .access_token .token)
+
+# Get one agent
+curl -H "Authorization: Bearer $TOKEN" "$REGISTRY_URL/api/agents/code-reviewer"
+
+# Semantic discovery
+curl -X POST "$REGISTRY_URL/api/agents/discover/semantic?query=code+review&max_results=5" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Delete
+curl -X DELETE "$REGISTRY_URL/api/agents/code-reviewer" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+See [cli/examples/](../cli/examples/) for agent-card templates and [A2A Protocol Integration](design/a2a-protocol-integration.md#the-agent-card-machine-readable-profile) for the full agent-card field reference.
+
+---
+
+## Access Control
+
+Access is driven by **scopes** attached to your IdP groups. Each scope has a `server_access` array holding both MCP-server rules and agent rules; an agent rule is `{"agent": "<path|*>", "actions": [...]}` — the `agent` key is the resource identifier and `actions` is the allowed-verb list.
+
+Agent actions:
+
+- `list_agents`, `get_agent` — see agents in listings / read a card
+- `publish_agent`, `modify_agent`, `delete_agent` — CRUD
+- `invoke_agent` — call the agent through the gateway (reverse-proxy mode only)
+
+The scope files are the source of truth. Do not hand-edit shapes in this doc; refer to the JSON:
+
+- **Admin (all agents):** [`scripts/registry-admins.json`](../scripts/registry-admins.json) grants `{"agent": "*", "actions": ["list_agents", "get_agent", "publish_agent", "modify_agent", "delete_agent", "invoke_agent"]}`.
+- **Least privilege (specific agents):** [`cli/examples/public-mcp-users.json`](../cli/examples/public-mcp-users.json) grants per-agent rules such as `{"agent": "/flight-booking", "actions": ["list_agents", "get_agent", "invoke_agent"]}`.
+
+A caller may invoke an agent only if one of its scopes has an `agent` rule that matches the path (exact, or `*`/`all`) **and** whose `actions` include `invoke_agent` (or an `all`/`*` wildcard). For the full rule format see [Scopes Management](scopes-mgmt.md#agent-rule); for complete scope examples see [Authentication](auth.md#scope-configuration).
+
+Agents also honor **visibility** (`public`, `private`, `group-restricted`) as a second filter on top of scopes.
+
+---
+
+## Reverse-Proxy Mode: Routing A2A Traffic Through the Gateway
+
+In the default mode the registry hands a discovering agent the target's *direct* URL and steps aside. **Reverse-proxy mode** instead puts the gateway in the data path, so every agent-card fetch and JSON-RPC call flows through the gateway with authentication and per-agent access control, and the agent's real backend stays private.
+
+### What changes when it is on
+
+- Each **enabled** agent gets two `auth_request`-guarded nginx locations: an exact-match agent-card route (`/agent/{path}/.well-known/agent-card.json`) and a prefix JSON-RPC/SSE route (`/agent/{path}/`).
+- At registration the registry stores your real backend in **`proxy_pass_url`** and rewrites the advertised **`url`** to the gateway (`{REGISTRY_URL}/agent/{path}/`). This mirrors the MCP-server backend/advertised split. The backend is **redacted from non-admin reads**, so discovering agents only ever get the gateway URL.
+- Invocation is gated per agent at `/validate`: the caller needs an `invoke_agent` grant for that agent path.
+- The caller's gateway token travels in **`X-Authorization`** (stripped at egress); the target agent's own credential travels in **`Authorization`** (forwarded end to end). The gateway never brokers credentials to the backend.
+
+### Prerequisites
+
+- **`with-gateway` deployment mode.** Reverse-proxy mode needs a gateway to proxy through, so it is force-disabled in `registry-only` deployments (the registry logs a startup banner, generates no `/agent/*` blocks, and stores `url == proxy_pass_url`).
+- **Network reachability + SSRF allowlist.** The gateway must reach each agent backend. Backends usually live on internal networks (Docker service names, ECS Service Connect names, in-cluster ClusterIPs), which the SSRF guard blocks by default. Allow them with `SSRF_ALLOWED_HOSTS` (preferred, least privilege) and/or `SSRF_ALLOWED_CIDRS`. Without this, backends are marked unhealthy and proxying fails.
+
+### Enabling it on each surface
+
+The same three settings exist on all three deployment surfaces; the enable flag defaults to `false` everywhere. All are indexed in the [Unified Parameter Reference](unified-parameter-reference.md#group-31--a2a-reverse-proxy-mode).
+
+**Docker Compose (`.env`):**
+
+```bash
+A2A_REVERSE_PROXY_ENABLED=true
+SSRF_ALLOWED_HOSTS=flight-booking-agent,travel-assistant-agent
+SSRF_ALLOWED_CIDRS=172.18.0.0/16
+```
+
+**Terraform / ECS (`terraform.tfvars`):**
+
+```hcl
+a2a_reverse_proxy_enabled = true
+ssrf_allowed_hosts = "flight-booking-agent.mcp-gateway-v2.local"
+ssrf_allowed_cidrs = ""
+```
+
+**Helm / EKS (`values.yaml`, stack chart uses `registry.app.*`):**
+
+```yaml
+registry:
+  app:
+    a2aReverseProxyEnabled: true
+    ssrfAllowedHosts: ""
+    ssrfAllowedCidrs: "10.100.0.0/16"
+```
+
+### How discovery works (card rewrite)
+
+When a client fetches an agent card through the gateway, the gateway validates access, proxies to the private backend, and rewrites the card's URLs to point back at itself so the client's follow-up JSON-RPC calls also route through the gateway.
+
+```mermaid
+sequenceDiagram
+    participant C as A2A Client
+    participant GW as Gateway (nginx)
+    participant AS as Auth Server (/validate)
+    participant B as Agent Backend (proxy_pass_url)
+
+    C->>GW: GET /agent/{path}/.well-known/agent-card.json<br/>X-Authorization: Bearer <gateway JWT>
+    GW->>AS: auth_request /validate (X-Original-URL)
+    AS->>AS: resolve /{path}, check agent access
+    AS-->>GW: 200 + X-Scopes  (else 401 / 403)
+    GW->>B: proxy to backend (X-Authorization + Cookie stripped)
+    B-->>GW: card { url: backend, ... }
+    GW->>GW: rewrite url + interface URLs -> gateway
+    GW-->>C: card advertising https://<gateway>/agent/{path}/
+```
+
+The rewrite (a Lua `body_filter`) preserves empty-array card fields and honors `X-Cloudfront-Forwarded-Proto` so the advertised scheme is correct (`https`) even when CloudFront/ALB terminate TLS and forward over plain HTTP.
+
+### How invocation works (per-agent FGAC)
+
+When a client calls the agent through the gateway, the gateway enforces the `invoke_agent` grant, strips the gateway token, forwards the target-agent credential, and proxies to the backend.
+
+```mermaid
+sequenceDiagram
+    participant C as A2A Client / calling agent
+    participant GW as Gateway (nginx)
+    participant AS as Auth Server (/validate)
+    participant B as Agent Backend (proxy_pass_url)
+
+    C->>GW: POST /agent/{path}/ (message/send)<br/>X-Authorization: Bearer <gateway JWT><br/>Authorization: Bearer <target-agent cred>
+    GW->>AS: auth_request /validate (X-Original-URL)
+    AS->>AS: any scope grant invoke_agent on /{path}?
+    alt authorized
+        AS-->>GW: 200 + X-Scopes
+        GW->>B: proxy to backend<br/>(X-Authorization + Cookie stripped,<br/>Authorization forwarded, SSE-safe)
+        B-->>C: JSON-RPC result
+    else denied
+        AS-->>GW: 403
+        GW-->>C: 403
+    end
+```
+
+**Egress trust model:** the gateway is a policy gate, never a credential broker. `X-Authorization` carries the caller's gateway token (authenticated, then stripped so it never reaches the registrant-controlled backend); `Authorization` carries the target agent's own credential (forwarded untouched). As defense-in-depth, `/validate` rejects a request whose `Authorization` duplicates the `X-Authorization` value.
+
+### Verifying it works
+
+```bash
+CLI="uv run python cli/agent_mgmt.py --token-file .token"
+TOKEN=$(jq -r .access_token .token)
+
+# 1. Register + enable an agent (its url is rewritten to the gateway).
+$CLI register cli/examples/flight_booking_agent_card.json
+$CLI toggle /flight-booking true
+
+# 2. As an admin, confirm the advertised url is the gateway and proxy_pass_url is the backend.
+$CLI get /flight-booking | jq '{url, proxy_pass_url}'
+
+# 3. Fetch the agent card THROUGH the gateway (card url should point back at the gateway).
+curl -H "X-Authorization: Bearer $TOKEN" \
+  "$REGISTRY_URL/agent/flight-booking/.well-known/agent-card.json" | jq .url
+```
+
+---
+
+## Agent Card and Metadata
+
+An agent card is the JSON document you register. Minimal example:
 
 ```json
 {
@@ -134,232 +283,33 @@ See [A2A Agent Management](a2a-agent-management.md) for complete CLI guide.
     {
       "id": "review-python",
       "name": "Python Code Review",
-      "description": "Reviews Python code for style and correctness",
-      "parameters": {
-        "code_snippet": {"type": "string"},
-        "max_issues": {"type": "integer", "default": 10}
-      }
+      "description": "Reviews Python code for style and correctness"
     }
   ],
-  "security": ["bearer"],
+  "security_schemes": {"bearer": {"type": "http", "scheme": "bearer"}},
   "tags": ["code-review", "qa"],
   "visibility": "public",
-  "trust_level": "verified",
-  "metadata": {
-    "team": "qa-platform",
-    "owner": "alice@example.com",
-    "cost_center": "engineering",
-    "deployment_region": "us-east-1"
-  }
+  "trust_level": "community"
 }
 ```
 
-### Custom Metadata
-
-Agents support optional custom metadata for organization, compliance, and integration purposes. All metadata is fully searchable via semantic search.
-
-**Common Use Cases:**
-
-```json
-{
-  "metadata": {
-    "team": "data-science",
-    "owner": "bob@example.com",
-    "compliance_level": "HIPAA",
-    "cost_center": "analytics-dept",
-    "deployment_region": "us-east-1",
-    "environment": "production",
-    "version": "3.2.1",
-    "jira_ticket": "AI-456"
-  }
-}
-```
-
-**Search by Metadata:**
-- `"team:data-science agents"` - Find agents by team
-- `"HIPAA compliant agents"` - Find by compliance level
-- `"alice@example.com owned"` - Find by owner
-- `"us-east-1 deployed"` - Find by region
-
-**Key Features:**
-- Flexible JSON schema (any serializable data)
-- Fully searchable via semantic search
-- Optional field (backward compatible)
-- Type-safe validation
-
-See [A2A Agent Management Guide](a2a-agent-management.md#custom-metadata) for detailed examples.
-
-## Testing A2A Features
-
-### Agent CRUD Test Script
-
-Simple script to test all agent operations:
+Agents support an optional `metadata` object (any JSON-serializable data) for organization, compliance, and integration tracking. Metadata is included in semantic search, so you can query by team, owner, cost center, region, and so on:
 
 ```bash
-# Generate fresh credentials
-./credentials-provider/generate_creds.sh
-
-# Run CRUD tests
-bash tests/agent_crud_test.sh
-
-# With custom token
-bash tests/agent_crud_test.sh /path/to/token.json
-
-# With environment variable
-TOKEN_FILE=/path/to/token.json bash tests/agent_crud_test.sh
+uv run python cli/agent_mgmt.py --token-file .token search "team:data-science agents"
 ```
 
-Tests all 9 CRUD operations:
-1. CREATE - Register new agent
-2. READ - Retrieve agent details
-3. UPDATE - Modify agent metadata
-4. LIST - List all agents
-5. TOGGLE - Disable agent
-6. TOGGLE - Re-enable agent
-7. DELETE - Remove agent
-8. VERIFY - Confirm deletion
-9. RE-CREATE - Restore agent
+See [cli/examples/](../cli/examples/) for full templates and [A2A Protocol Integration](design/a2a-protocol-integration.md#the-agent-card-machine-readable-profile) for every field.
 
+---
 
-### Access Control Testing
+## Related Documentation
 
-Test that agents only access agents they're authorized for:
-
-```bash
-# Generate tokens for all bots
-./keycloak/setup/generate-agent-token.sh admin-bot
-./keycloak/setup/generate-agent-token.sh lob1-bot
-./keycloak/setup/generate-agent-token.sh lob2-bot
-
-# Run 14 comprehensive access control tests
-bash tests/run-lob-bot-tests.sh
-```
-
-Tests include:
-- **MCP Service Access** (Tests 1-6) - Verify service permissions
-- **Agent Registry API** (Tests 7-14) - Verify agent visibility and access
-
-
-## Implementation Details
-
-### Core Components
-
-**CLI Module** (`cli/agent_mgmt.py`)
-- Agent registration and lifecycle management
-- CRUD operations on agent metadata
-- Argument validation and error handling
-- Structured logging and status reporting
-
-**API Routes** (`registry/api/agent_routes.py`)
-- Implements Agent Registry REST API endpoints
-- Access control enforcement via scopes
-- Token validation and authentication
-- Agent state persistence and management
-
-**Data Models** (`registry/models/`)
-- Agent schema validation
-- Skill/capability definitions
-- Security configuration models
-- State tracking models
-
-**Services** (`registry/services/agent_service.py`)
-- Agent business logic
-- State file management
-- Permission checking
-- Validation
-
-### Key Features
-
-- **JWT Token Validation** - 5-minute token TTL with expiration checks
-- **Base64 Padding** - Proper JWT payload decoding
-- **HTTP Status Codes** - Correct semantics (200, 201, 204, 400, 403, 404)
-- **Error Messages** - Comprehensive debugging information
-- **File-Based Persistence** - Simple, reliable agent state storage
-- **Keycloak Integration** - Enterprise authentication and authorization
-
-### Token Management
-
-All A2A operations use **machine-to-machine (M2M) authentication**:
-
-```bash
-# Tokens expire in 5 minutes and must be regenerated
-./credentials-provider/generate_creds.sh
-
-# Generate specific bot tokens for testing
-./keycloak/setup/generate-agent-token.sh admin-bot
-./keycloak/setup/generate-agent-token.sh lob1-bot
-./keycloak/setup/generate-agent-token.sh lob2-bot
-```
-
-Token validation includes:
-- JWT payload decoding with base64 padding
-- Expiration time checking
-- Bearer token authentication
-- Group-based access control
-
-## Use Cases
-
-### Multi-Agent System Coordination
-
-Multiple specialized agents register themselves and discover each other:
-
-```
-Code Analyzer Agent ──┐
-                      │
-Data Processor Agent ─├──→ Agent Registry
-                      │
-Report Generator Agent└──→ All agents can discover and coordinate
-```
-
-### Team Isolation with A2A
-
-Different teams' agents only see their team's agents:
-
-```
-LOB1 Agents (Code Reviewer, Test Automation)
-  ↓
-  Registry (with access control)
-  ↓
-LOB1 agents can discover each other, but not LOB2 agents
-
-LOB2 Agents (Data Analysis, Security Analyzer)
-  ↓
-  Registry (with access control)
-  ↓
-LOB2 agents can discover each other, but not LOB1 agents
-```
-
-### Autonomous Tool Discovery
-
-Agents can discover other agents providing specialized tools:
-
-```
-General Agent needs to perform code review
-  ↓
-Queries registry for agents with "code-review" capability
-  ↓
-Discovers Code Reviewer Agent, requests review
-  ↓
-Continues with confidence in code quality
-```
-
-## Documentation
-
-- **[A2A Agent Management](a2a-agent-management.md)** - Complete CLI guide and examples
-- **Agent CRUD Test** - Testing CRUD operations
-- **LOB Bot Access Control Testing** - Testing access control
-- **[Scopes Configuration](scopes.md)** - Permission definitions (stored in the `mcp_scopes` collection in DocumentDB)
-- **[LLM Navigation Guide](llms.txt#section-45)** - For AI systems understanding implementation
-
-## Support
-
-For issues or questions:
-
-1. **Review Documentation** - Check [A2A Agent Management](a2a-agent-management.md)
-2. **Run Tests** - Verify setup with `bash tests/agent_crud_test.sh`
-3. **Check Access Control** - Run `bash tests/run-lob-bot-tests.sh`
-4. **Review Logs** - Check `/tmp/*_*.log` for error details
-5. **Create Issue** - Include test output and logs
+- **[A2A Protocol Integration (Design)](design/a2a-protocol-integration.md)** — full data-path design, agent-card reference, and reverse-proxy internals
+- **[Scopes Management](scopes-mgmt.md)** — scope file format, including the agent rule
+- **[Authentication](auth.md)** — how tokens, groups, and scopes fit together
+- **[Unified Parameter Reference](unified-parameter-reference.md#group-31--a2a-reverse-proxy-mode)** — reverse-proxy config on every deployment surface
+- **[CLI Reference](cli.md)** — the full command-line interface
 
 ---
 

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from ..audit import set_audit_action
+from ..auth.asset_permissions import user_has_asset_permission
 from ..auth.dependencies import nginx_proxied_auth
 from ..auth.tool_filter import filter_tools_for_user, tool_allowed_for_user
 from ..constants import DeploymentType
@@ -16,6 +17,8 @@ from ..core.config import DeploymentMode, RegistryMode, settings
 from ..repositories.factory import get_search_repository
 from ..repositories.interfaces import SearchRepositoryBase
 from ..services.agent_service import agent_service
+from ..services.custom_entity_scopes import entity_scope as _entity_scope
+from ..services.custom_entity_scopes import resolve_list_grant as _resolve_list_grant
 from ..services.server_service import server_service
 from ..services.virtual_server_service import get_virtual_server_service
 
@@ -364,6 +367,7 @@ async def _get_tool_schema_for_virtual_server(
 # original underscore-prefixed names so existing callers in this module
 # don't have to change.
 from ..services.visibility import (
+    redact_agent_backend_fields,
     should_redact_backend_urls,
 )
 from ..services.visibility import (
@@ -689,6 +693,13 @@ async def semantic_search(
             agent_card_obj.model_dump() if agent_card_obj else agent.get("agent_card", {})
         )
 
+        # Non-admins in with-gateway mode must never receive the internal backend
+        # (proxy_pass_url); strip it so search returns only the gateway-facing url.
+        # Mirrors the server-branch redaction above and the /api/agents/discover/
+        # semantic fix. Uses the same redact_backend decision computed once above.
+        if redact_backend and agent_card_dict:
+            redact_agent_backend_fields(agent_card_dict)
+
         # Ensure agent_card has the path for consistency
         if agent_card_dict and "path" not in agent_card_dict:
             agent_card_dict["path"] = agent_path
@@ -711,6 +722,14 @@ async def semantic_search(
     for skill in raw_results.get("skills", []):
         skill_path = skill.get("path", "")
         if not skill_path:
+            continue
+
+        skill_name = skill.get("skill_name", skill_path.strip("/"))
+
+        # Discovery gate FIRST (list_skills, parity with list_service and the
+        # custom-entity type gate): a caller with no list_skills grant sees no
+        # skills -- not even public ones -- before the per-record visibility check.
+        if not user_has_asset_permission("skill", "list", skill_name, user_context):
             continue
 
         visibility = skill.get("visibility", "public")
@@ -769,7 +788,7 @@ async def semantic_search(
         )
         # Build matching tools with schema lookup from backend servers
         # Only include tools that matched the search query
-        matching_tools: list[MatchingToolResult] = []
+        matching_tools = []
         for tool in allowed_vs_matching:
             tool_name = tool.get("tool_name") or tool.get("name", "")
             # Look up the tool schema from the backend server
@@ -840,9 +859,34 @@ async def semantic_search(
     # agreement: off = feature invisible, existing records dormant.
     custom_results = raw_results.get("custom", []) if settings.custom_entity_types_enabled else []
     filtered_custom: list[CustomEntitySearchResult] = []
+    # Discovery check first (per-record aware): the list_<type>_entity grant may
+    # open the whole type ("all"/type name) or only specific record paths. Resolve
+    # the grant ONCE per type into (whole, paths) — the grant is constant per type,
+    # so this avoids re-reading ui_permissions and re-extracting paths on every
+    # hit. Each hit then passes discovery iff the type is whole-open OR its own
+    # path is in the granted set (so granting one record surfaces only that
+    # record, never every public record of the type). Runs before the per-record
+    # visibility check.
+    is_admin = bool(user_context.get("is_admin", False))
+    ui_permissions = user_context.get("ui_permissions") or {}
+    # entity_type -> (whole_type_open, granted_record_paths). resolve_list_grant
+    # is the shared tier resolver used by user_can_list_custom_entity_type too, so
+    # the two enforcement sites can never disagree; admin bypass is applied here.
+    discovery_cache: dict[str, tuple[bool, set[str]]] = {}
     for record in custom_results:
         record_path = record.get("path", "")
         if not record_path:
+            continue
+
+        entity_type = record.get("entity_type", "")
+        decision = discovery_cache.get(entity_type)
+        if decision is None:
+            granted = ui_permissions.get(_entity_scope("list", entity_type)) or []
+            whole, paths = _resolve_list_grant(entity_type, granted)
+            decision = (is_admin or whole, paths)
+            discovery_cache[entity_type] = decision
+        whole_open, granted_paths = decision
+        if not whole_open and record_path not in granted_paths:
             continue
 
         visibility = record.get("visibility", "private")

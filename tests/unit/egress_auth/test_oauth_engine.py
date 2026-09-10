@@ -6,6 +6,8 @@ no real provider is contacted.
 
 import base64
 import hashlib
+import json
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -128,6 +130,146 @@ class TestExchangeAndRefresh:
             )
 
 
+def _make_jwt(exp: int | None) -> str:
+    """Minimal unsigned JWT (header.payload.sig) carrying an optional ``exp`` claim."""
+
+    def seg(obj: dict) -> str:
+        raw = json.dumps(obj).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    claims: dict = {"iss": "https://example.my.salesforce.com"}
+    if exp is not None:
+        claims["exp"] = exp
+    return f"{seg({'alg': 'RS256', 'typ': 'JWT'})}.{seg(claims)}.sig"
+
+
+@pytest.mark.unit
+class TestExpiresAtFallback:
+    """Providers that omit ``expires_in`` (e.g. Salesforce) still bound the access
+    token via the JWT ``exp`` claim. Cover both token-endpoint call sites, since
+    exchange and refresh both funnel through ``_to_stored_token``."""
+
+    def test_expires_in_takes_precedence_over_jwt_exp(self):
+        # Stale JWT exp must not override an explicit, fresher expires_in.
+        past = int(datetime.now(UTC).timestamp()) - 3600
+        at = oauth_engine._expires_at(3600, _make_jwt(past))
+        assert at is not None
+        assert datetime.fromisoformat(at) > datetime.now(UTC)
+
+    def test_jwt_exp_used_when_expires_in_missing(self):
+        exp = int(datetime.now(UTC).timestamp()) + 7200
+        at = oauth_engine._expires_at(None, _make_jwt(exp))
+        assert at is not None
+        assert datetime.fromisoformat(at) == datetime.fromtimestamp(exp, tz=UTC)
+
+    def test_none_for_opaque_token_without_expires_in(self):
+        assert oauth_engine._expires_at(None, "opaque-not-a-jwt") is None
+
+    def test_none_for_jwt_without_exp_claim(self):
+        assert oauth_engine._expires_at(None, _make_jwt(None)) is None
+
+    def test_none_for_malformed_jwt(self):
+        assert oauth_engine._expires_at(None, "a.!!!notb64!!!.c") is None
+
+    async def test_exchange_sets_expires_at_from_jwt(self, monkeypatch):
+        exp = int(datetime.now(UTC).timestamp()) + 14400  # Salesforce ~4h JWT
+
+        async def fake_post(cfg, data, headers):
+            # No expires_in, JWT access token -- the Salesforce shape.
+            return {"access_token": _make_jwt(exp), "refresh_token": "rt", "scope": "mcp_api"}
+
+        monkeypatch.setattr(oauth_engine, "_post_token", fake_post)
+        tok = await oauth_engine.exchange_code(
+            PROVIDER_REGISTRY["github"], "cid", "secret", "c", "https://gw/cb", "v"
+        )
+        assert tok.expires_at is not None
+        assert datetime.fromisoformat(tok.expires_at) == datetime.fromtimestamp(exp, tz=UTC)
+
+    async def test_refresh_sets_expires_at_from_jwt(self, monkeypatch):
+        exp = int(datetime.now(UTC).timestamp()) + 14400
+
+        async def fake_post(cfg, data, headers):
+            return {"access_token": _make_jwt(exp)}
+
+        monkeypatch.setattr(oauth_engine, "_post_token", fake_post)
+        tok = await oauth_engine.refresh_token(PROVIDER_REGISTRY["google"], "cid", "secret", "rt")
+        assert tok.expires_at is not None
+        assert datetime.fromisoformat(tok.expires_at) == datetime.fromtimestamp(exp, tz=UTC)
+
+
+@pytest.mark.unit
+class TestResourceIndicator:
+    """RFC 8707 resource indicator threads through authorize + exchange + refresh.
+
+    A resource server that mints per-resource tokens (e.g. Atlassian's Rovo MCP)
+    requires the ``resource`` param on the authorize request AND both token
+    grants, or it rejects the flow ('Invalid context provided'). A provider
+    without a resource (every built-in) must never emit the param.
+    """
+
+    _RES = "https://mcp.atlassian.com/v1/mcp/authv2"
+
+    def _custom_cfg_with_resource(self):
+        return resolve_provider(
+            {
+                "provider": "custom",
+                "custom_authorize_url": "https://auth.atlassian.com/authorize",
+                "custom_token_url": "https://auth.atlassian.com/oauth/token",
+                "custom_resource": self._RES,
+            }
+        )
+
+    def test_authorize_url_includes_resource(self):
+        cfg = self._custom_cfg_with_resource()
+        url = oauth_engine.build_authorize_url(
+            cfg, "cid", "https://gw/cb", ["read:jira-work"], "S", "CHAL"
+        )
+        assert parse_qs(urlparse(url).query)["resource"] == [self._RES]
+
+    def test_authorize_url_omits_resource_when_unset(self):
+        url = oauth_engine.build_authorize_url(
+            PROVIDER_REGISTRY["github"], "cid", "https://gw/cb", ["repo"], "S", "CHAL"
+        )
+        assert "resource" not in parse_qs(urlparse(url).query)
+
+    async def test_exchange_sends_resource(self, monkeypatch):
+        captured: dict = {}
+
+        async def fake_post(cfg, data, headers):
+            captured.update(data)
+            return {"access_token": "at", "expires_in": 3600}
+
+        monkeypatch.setattr(oauth_engine, "_post_token", fake_post)
+        await oauth_engine.exchange_code(
+            self._custom_cfg_with_resource(), "cid", "sec", "code", "https://gw/cb", "verif"
+        )
+        assert captured["resource"] == self._RES
+
+    async def test_refresh_sends_resource(self, monkeypatch):
+        captured: dict = {}
+
+        async def fake_post(cfg, data, headers):
+            captured.update(data)
+            return {"access_token": "at2", "expires_in": 3600}
+
+        monkeypatch.setattr(oauth_engine, "_post_token", fake_post)
+        await oauth_engine.refresh_token(self._custom_cfg_with_resource(), "cid", "sec", "rt")
+        assert captured["resource"] == self._RES
+
+    async def test_exchange_omits_resource_when_unset(self, monkeypatch):
+        captured: dict = {}
+
+        async def fake_post(cfg, data, headers):
+            captured.update(data)
+            return {"access_token": "at", "expires_in": 3600}
+
+        monkeypatch.setattr(oauth_engine, "_post_token", fake_post)
+        await oauth_engine.exchange_code(
+            PROVIDER_REGISTRY["github"], "cid", "sec", "code", "https://gw/cb", "verif"
+        )
+        assert "resource" not in captured
+
+
 @pytest.mark.unit
 class TestQuirkParsers:
     def test_slack_nested_lifts_user_token(self):
@@ -214,7 +356,7 @@ class TestPostTokenSsrfGuard:
         data, headers = oauth_engine._build_token_request(
             cfg, "cid", "supersecret", {"grant_type": "x"}
         )
-        with pytest.raises(oauth_engine.OAuthEngineError, match="SSRF guard"):
+        with pytest.raises(oauth_engine.OAuthEngineError, match="blocked by security policy"):
             await oauth_engine._post_token(cfg, data, headers)
 
     async def test_token_url_to_loopback_fails_closed(self):
@@ -222,7 +364,7 @@ class TestPostTokenSsrfGuard:
         data, headers = oauth_engine._build_token_request(
             cfg, "cid", "supersecret", {"grant_type": "x"}
         )
-        with pytest.raises(oauth_engine.OAuthEngineError, match="SSRF guard"):
+        with pytest.raises(oauth_engine.OAuthEngineError, match="blocked by security policy"):
             await oauth_engine._post_token(cfg, data, headers)
 
     async def test_token_url_to_rfc1918_fails_closed(self):
@@ -230,5 +372,87 @@ class TestPostTokenSsrfGuard:
         data, headers = oauth_engine._build_token_request(
             cfg, "cid", "supersecret", {"grant_type": "x"}
         )
-        with pytest.raises(oauth_engine.OAuthEngineError, match="SSRF guard"):
+        with pytest.raises(oauth_engine.OAuthEngineError, match="blocked by security policy"):
             await oauth_engine._post_token(cfg, data, headers)
+
+
+@pytest.mark.unit
+class TestCredentialedOAuthTransportProfile:
+    async def test_post_uses_https_only_empty_allowlist_profile(self, monkeypatch):
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock, MagicMock
+
+        captured = {}
+
+        @asynccontextmanager
+        async def fake_client(*, profile, timeout):
+            captured["profile"] = profile
+            response = MagicMock(status_code=200)
+            response.json.return_value = {"access_token": "ok"}
+            client = MagicMock()
+            client.post = AsyncMock(return_value=response)
+            yield client
+
+        monkeypatch.setattr(oauth_engine, "guarded_async_client", fake_client)
+        cfg = OAuthProviderConfig(
+            name="custom",
+            display_name="Custom",
+            authorize_url="https://tokens.example/authorize",
+            token_url="https://tokens.example/oauth/token",
+        )
+        await oauth_engine._post_token(cfg, {"client_secret": "secret"}, {})
+        assert captured["profile"] is oauth_engine.CREDENTIALED_OAUTH_PROFILE
+        assert captured["profile"].allowlist_factory().hosts == frozenset()
+
+    async def test_guard_error_detail_is_not_propagated(self, monkeypatch):
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def blocked_client(*, profile, timeout):
+            del profile, timeout
+            raise oauth_engine.UrlValidationError(
+                "https://tokens.example/token?api_key=query-secret",
+                "raw-exception-secret",
+            )
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(oauth_engine, "guarded_async_client", blocked_client)
+        cfg = OAuthProviderConfig(
+            name="custom",
+            display_name="Custom",
+            authorize_url="https://tokens.example/authorize",
+            token_url="https://tokens.example/oauth/token",
+        )
+
+        with pytest.raises(oauth_engine.OAuthEngineError) as exc_info:
+            await oauth_engine._post_token(cfg, {"client_secret": "secret"}, {})
+
+        assert str(exc_info.value) == "token endpoint blocked by security policy"
+        assert "query-secret" not in str(exc_info.value)
+
+    async def test_transport_error_detail_is_not_propagated(self, monkeypatch):
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock, MagicMock
+
+        @asynccontextmanager
+        async def failing_client(*, profile, timeout):
+            del profile, timeout
+            client = MagicMock()
+            client.post = AsyncMock(
+                side_effect=oauth_engine.httpx.ConnectError("raw-exception-secret")
+            )
+            yield client
+
+        monkeypatch.setattr(oauth_engine, "guarded_async_client", failing_client)
+        cfg = OAuthProviderConfig(
+            name="custom",
+            display_name="Custom",
+            authorize_url="https://tokens.example/authorize",
+            token_url="https://tokens.example/oauth/token",
+        )
+
+        with pytest.raises(oauth_engine.OAuthEngineError) as exc_info:
+            await oauth_engine._post_token(cfg, {"client_secret": "secret"}, {})
+
+        assert str(exc_info.value) == "token endpoint unreachable"
+        assert "raw-exception-secret" not in str(exc_info.value)

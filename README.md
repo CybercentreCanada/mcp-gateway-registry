@@ -127,7 +127,7 @@ Across all of them you get semantic + lexical search, UI, REST, and MCP-native i
 - **Single authenticated gateway**: one entry point; OAuth against your existing IdP (Keycloak, Entra ID, Okta, Auth0, Cognito, PingFederate) with fine-grained [scopes](docs/scopes.md).
 - **Dynamic tool discovery**: agents and coding assistants find tools at runtime by natural-language [semantic search](docs/dynamic-tool-discovery.md), not hard-coded config.
 - **[Virtual MCP servers](docs/design/virtual-mcp-server.md)**: aggregate tools from many backends behind one endpoint, with per-tool access control.
-- **[Per-user egress auth (3LO)](docs/design/egress-auth-design.md)**: the gateway brokers third-party SaaS credentials so tokens never live on a user's laptop.
+- **[Per-user egress auth (3LO / OBO / PAT)](docs/design/egress-auth-design.md)**: the gateway brokers third-party SaaS credentials so tokens never live on a user's laptop.
 - **Security scanning + [fail-closed admission gate](docs/registration-webhooks.md)**: every registered server, agent, and skill is scanned; unsafe items are held for review.
 - **[External-registry federation](docs/federation.md)**: pull in Anthropic's MCP Registry, AWS Agent Registry, and peer registries for one unified surface.
 - **[Audit logging](docs/audit-logging.md)**: a full, attributable audit trail of access and admin events, with credential masking, for compliance and incident review.
@@ -135,21 +135,22 @@ Across all of them you get semantic + lexical search, UI, REST, and MCP-native i
 
 ## What's New
 
-<!-- Exactly the 3 most-recent highlights. Older entries live in docs/overview/feature-release-highlights.md; the release-notes skill rotates this list. Do not grow it. -->
+<!-- Exactly the 5 most-recent highlights. Older entries live in docs/overview/feature-release-highlights.md; the release-notes skill rotates this list. Do not grow it. -->
 
+- **Reusable Egress Hardening & IdP-Authenticated Embeddings** - One consolidated fail-closed SSRF/egress guard now governs every outbound fetch, with decrypted credentials bound to the exact validated destination, uniformly token-free response projection across the whole entity family, and `AWS_EC2_METADATA_DISABLED=true` closing boto3's IMDS credential fallback on the auth-server and registry tasks. Semantic-search embeddings can be served by an OpenAI-compatible endpoint (e.g. LiteLLM) protected by your IdP: set `EMBEDDINGS_AUTH_MODE=idp` and the registry fetches and caches an OAuth2 client-credentials token per call, with a `raw_array` adapter for non-envelope endpoints, plus Microsoft Entra v1 `api://` scope pass-through. See the [1.29.0 release notes](docs/release-notes/1.29.0.md).
+- **Configurable MCP Access-Token TTL** - MCP access-token lifetimes are no longer hardcoded to 8 hours. Operators set a default via `MCP_TOKEN_DEFAULT_TTL_HOURS` and a hard ceiling via `MCP_TOKEN_MAX_TTL_HOURS`; a per-registration `expires_in_hours` is honored and clamped to the ceiling. The UI mint flows and the API both use the configured default, wired across Docker (including podman and prebuilt-image compose variants), Terraform/ECS, and Helm/EKS. See the [1.28.0 release notes](docs/release-notes/1.28.0.md).
+- **Application-Level Rate Limiting** - Identity/group/target-aware request limits enforced at the auth-server `/validate` hop, complementary to the coarse per-IP nginx edge limiting. Cap a caller (user or agent, by group membership), a target (MCP server / A2A agent), or **each caller independently per target** (the `caller_target` axis), each per time window, with config-time lockout-safeguard floors and a fail-open availability guardrail. A **server group** target applies the same cap to a named set of servers, each with its own independent bucket (per-member uniform, not pooled) so one definition covers many servers and members can be added or removed without new definitions. Includes **quarantine** (a kill switch): move a user, agent, or MCP server into an auto-seeded reserved group to drop all of its data-plane traffic instantly (a plain 403, not a throttle) — admin-only, from the Users / M2M rows and the Rate Limits panel, and admin-group users can never be quarantined (enforced server-side, fail-closed). Off by default; limits and quarantine are managed at runtime via the admin API / CLI / UI. [Rate Limiting Design](docs/design/rate-limiting.md) · [FAQ: Quarantine a caller or target](docs/faq/quarantine-a-caller-or-target.md).
+- **A2A Reverse-Proxy Mode** - Opt in to route agent-to-agent traffic through the gateway the same way MCP servers are proxied: each enabled agent gets authenticated `/agent/{path}` routes, its real backend stays private (`proxy_pass_url`), discovery advertises the gateway URL, and every call is gated per-agent with `invoke_agent`. [A2A Guide](docs/a2a.md#reverse-proxy-mode-routing-a2a-traffic-through-the-gateway) · [Design](docs/design/a2a-protocol-integration.md#reverse-proxy-mode-proxying-a2a-traffic).
 - **Security Hardening Pass (1.26.0)** - A broad security-hardening release across the auth, proxy, data, and frontend layers: MongoDB authenticated by default with loopback-bound ports in local Docker Compose, a weak-secret preflight, internal/user token separation, SSRF and CSRF protections, and access-control fixes. See the [1.26.0 release notes](docs/release-notes/1.26.0.md).
-- **Per-User Egress Auth for Third-Party SaaS MCP Servers (3LO)** - Users connect their own GitHub / Slack / Atlassian accounts once; the gateway runs the OAuth flow out of band, vaults the per-user token, and injects it on egress, so third-party tokens never live on the user's laptop. [How it works](docs/design/egress-auth-design.md).
-- **Agentic Resource Discovery (ARD), full spec support** - The registry implements the ARD v1.0 spec end to end as a Publisher, a Registry, and a federating peer, so any ARD-aware client can discover and cross-reference its assets. [ARD Guide](docs/ard.md).
-
 **Older highlights → [Feature & Release Highlights](docs/overview/feature-release-highlights.md)** · full per-version detail in the [release notes](docs/release-notes/) and on the [GitHub Releases page](https://github.com/agentic-community/mcp-gateway-registry/releases).
 
 ## Roadmap
 
-The roadmap is best tracked on the [GitHub Milestones](https://github.com/agentic-community/mcp-gateway-registry/milestones) page. At a high level, as of July-August 2026 the big features we're working on are:
+The roadmap is best tracked on the [GitHub Milestones](https://github.com/agentic-community/mcp-gateway-registry/milestones) page. Per-user egress auth (3LO and OBO) and A2A traffic routing shipped in [1.27.0](docs/release-notes/1.27.0.md); at a high level, the big features we're working on next are:
 
-- **3LO, OBO, and CIMD for coding assistants**: richer per-user auth flows so coding assistants connect with the least friction across identity providers.
-- **Generic routing to any HTTP endpoint**: so the gateway can proxy A2A traffic between agents (and skills, and REST endpoints in future) through the same single ingress.
-- **Registry Copilot**: an embedded agent-builder experience for discovering assets and composing agents from inside the registry.
+- **Reusable egress hardening and IdP-authenticated embeddings ([1.29.0](https://github.com/agentic-community/mcp-gateway-registry/milestones))**: a consolidated fail-closed SSRF/egress guard for all outbound fetches, OAuth2 client-credentials auth for embedding endpoints (plus a raw-array response adapter), Microsoft Entra v1 scope pass-through, and auth/infra follow-ups.
+- **CIMD and ID-JAG for coding assistants ([1.30.0](https://github.com/agentic-community/mcp-gateway-registry/milestones))**: Client ID Metadata Documents and RFC 8693 token exchange so coding assistants connect with the least friction across identity providers.
+- **Registry Copilot ([1.31.0](https://github.com/agentic-community/mcp-gateway-registry/milestones))**: an embedded chat + agent-builder experience for discovering assets and composing agents from inside the registry.
 
 Have a feature request? Please [open a GitHub issue](https://github.com/agentic-community/mcp-gateway-registry/issues/new), we build in the open.
 
@@ -168,6 +169,9 @@ High-traffic pages by audience:
 **Architecture & development**
 - [Architecture Diagrams](docs/architecture-diagrams.md) · [API Reference](docs/registry_api.md) · [AI Coding Assistant Integration](docs/ai-coding-assistants-setup.md) · [MCP Registry CLI](docs/mcp-registry-cli.md)
 
+**Design decisions**
+- [Architecture Decision Records (ADRs)](docs/adr/) · [ADR 0001: No server-side DCR](docs/adr/0001-no-server-side-dcr.md)
+
 ## Telemetry
 
 The registry collects **anonymous, non-sensitive** usage telemetry (version, OS, cloud provider, aggregate asset counts) to understand adoption. It is opt-out and on by default; no PII, credentials, endpoints, or model names are ever sent. Disable everything with `MCP_TELEMETRY_DISABLED=1`. Full schema and privacy guarantees: [Telemetry Documentation](docs/TELEMETRY.md).
@@ -179,7 +183,13 @@ The registry collects **anonymous, non-sensitive** usage telemetry (version, OS,
 - [Roadmap (GitHub Milestones)](https://github.com/agentic-community/mcp-gateway-registry/milestones), upcoming releases and their issues
 - [Contributing Guide](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Security Policy](SECURITY.md)
 
-[![Star History Chart](https://api.star-history.com/svg?repos=agentic-community/mcp-gateway-registry&type=Date)](https://star-history.com/#agentic-community/mcp-gateway-registry&Date)
+### Star History
+
+[![Stars](https://img.shields.io/github/stars/agentic-community/mcp-gateway-registry?style=flat&logo=github)](https://github.com/agentic-community/mcp-gateway-registry/stargazers)
+[![Forks](https://img.shields.io/github/forks/agentic-community/mcp-gateway-registry?style=flat&logo=github)](https://github.com/agentic-community/mcp-gateway-registry/network/members)
+[![Contributors](https://img.shields.io/github/contributors/agentic-community/mcp-gateway-registry?style=flat&logo=github)](https://github.com/agentic-community/mcp-gateway-registry/graphs/contributors)
+
+View the full interactive star-growth chart at [star-history.com](https://star-history.com/#agentic-community/mcp-gateway-registry&Date).
 
 ## License
 

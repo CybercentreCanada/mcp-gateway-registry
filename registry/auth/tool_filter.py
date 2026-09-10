@@ -17,7 +17,6 @@ from typing import Any
 
 from ..core.config import settings
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -96,9 +95,7 @@ def _emit_tool_filter_audit(
         from ..audit.events import ToolFilterAuditEvent
         from ..audit.sink import emit_audit_event
 
-        pruned_names = sorted(
-            {_tool_identity(t) or "" for t in pruned if _tool_identity(t)}
-        )
+        pruned_names = sorted({_tool_identity(t) or "" for t in pruned if _tool_identity(t)})
         event = ToolFilterAuditEvent(
             username=user_context.get("username", ""),
             endpoint=endpoint or "unknown",  # type: ignore[arg-type]
@@ -208,7 +205,7 @@ def filter_tools_for_user(
             endpoint,
             reason,
         )
-        pruned = [t for t in tools if isinstance(t, dict)]
+        pruned: list[dict[str, Any]] = [t for t in tools if isinstance(t, dict)]
         _emit_tool_filter_audit(
             user_context=user_context,
             endpoint=endpoint,
@@ -222,7 +219,7 @@ def filter_tools_for_user(
         return tools
 
     kept: list[dict[str, Any]] = []
-    pruned: list[dict[str, Any]] = []
+    pruned = []
     for tool in tools:
         if not isinstance(tool, dict):
             continue

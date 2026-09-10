@@ -3,7 +3,7 @@ global:
   image:
     # Container registry (host + optional namespace). Shared default across subcharts.
     registry: public.ecr.aws/p3v1o3c6
-    tag: 1.26.0
+    tag: 1.28.0
     pullPolicy: IfNotPresent
 # Per-service image configuration
 # Any field left empty falls back to the corresponding global.image.* value.
@@ -36,6 +36,15 @@ app:
   # to scope the cookie tighter, or to a different parent
   # (".team.example.com") if this stack lives under a subdomain.
   sessionCookieDomain: ""
+  # Exact-match allowlist of OAuth login/logout redirect URIs (open-redirect
+  # hardening). Comma-separated list of the FULL absolute callback/success/logout
+  # URLs the deployment legitimately redirects to. When set, an absolute
+  # redirect_uri is accepted only if it exactly matches an entry (relative paths
+  # are always allowed as same-origin). When empty (default), the auth server
+  # falls back to the weaker cookie-domain heuristic. Configuring this is the
+  # hardened path and is recommended for production.
+  # Example: "https://registry.example.com/,https://registry.example.com/login"
+  oauth2AllowedRedirectUris: ""
   # Number of trusted reverse-proxy hops in front of the app. The audit client IP
   # is taken from the Nth-from-the-right X-Forwarded-For entry, never the
   # client-controlled left-most one. Default 1 (the bundled nginx). Raise it when
@@ -57,6 +66,9 @@ app:
   registryApiToken: "" # Static API key value (required when registryStaticTokenAuthEnabled is true)
   # Rate limiting
   maxTokensPerUserPerHour: "100" # Max token generations per user per hour
+  # MCP token TTL configuration
+  mcpTokenDefaultTtlHours: "8" # Default TTL (hours) for minted MCP tokens
+  mcpTokenMaxTtlHours: "24" # Maximum TTL (hours) a caller may request
   # Federation configuration
   federationStaticTokenAuthEnabled: false #If not provided, defaults to false
   federationStaticToken: # If not provided, a random token is auto-generated
@@ -82,6 +94,33 @@ app:
   toolFilterAuditLogLevel: "INFO" # Audit log level for tool-prune events (DEBUG, INFO, WARNING)
   internalTokenTtlSeconds: "30" # Token lifetime (seconds); the replay-window cap (min 5)
   internalTokenLeewaySeconds: "5" # Clock-skew leeway (seconds) on token exp/iat
+  # Audit durability guard (fail closed). The auth-server owns the token-mint
+  # audit trail (who was issued which scoped token, when). When true (default),
+  # the auth-server refuses to start if audit logging is enabled but no durable
+  # sink (DocumentDB/MongoDB) is available, instead of silently degrading to
+  # non-durable JSON log lines. Set to false only where a non-durable audit
+  # trail is acceptable.
+  auditLogRequireDurable: true
+  # Disable the AWS SDK's EC2 IMDS credential/region fallback (sets
+  # AWS_EC2_METADATA_DISABLED=true). Secure-by-default; independent of the
+  # url_guard egress SSRF check (boto3 does not pass through that guard). Safe
+  # with ECS task roles, EKS IRSA, and EKS Pod Identity. Set to false ONLY for
+  # clusters that hand pods credentials via the worker node instance profile
+  # (reachable only through IMDS).
+  disableEc2ImdsFallback: true
+  # Rate Limiting (issue #295). Application-level, identity/group/target-aware
+  # limits enforced here in the /validate hop (complementary to the coarse
+  # per-IP nginx edge limiting). Off by default. These must match the registry
+  # chart's app.rateLimiting values so both services agree.
+  rateLimiting:
+    enabled: false
+    backend: documentdb
+    failOpen: true
+    # When true, a backend error reading quarantine membership DENIES (fails
+    # closed) instead of the default fail-open. Best-effort quarantine.
+    quarantineFailClosed: false
+    definitionsCacheTtlSeconds: 30
+    backendTimeoutMs: 250
 # Authentication Provider Configuration
 # Choose ONE provider: keycloak, entra, okta, auth0, cognito, or pingfederate
 authProvider:
@@ -102,6 +141,8 @@ entra:
   tenantId: ""
   loginBaseUrl: "" # Custom Entra login base URL for sovereign/national clouds (default: https://login.microsoftonline.com)
   graphBaseUrl: "" # Optional override for Microsoft Graph base URL. Leave unset on standard deployments — auto-inferred from loginBaseUrl. Set only for proxied or air-gapped deployments.
+  scopeFormat: "" # Entra PRM scope form: "v1" (api://<app-id>/<scope>) or "v2" (bare, default). Set "v1" only if your app exposes v1-style api:// scopes (issue #990).
+  applicationIdUri: "" # Application ID URI (e.g. api://<app-id>). Used as the v1 scope prefix and accepted as a token audience. Defaults to api://<clientId>.
 # Okta integration (used when authProvider.type = "okta")
 okta:
   domain: "" # e.g., dev-123456.okta.com
@@ -143,6 +184,10 @@ cognito:
   clientSecret: ""
   domain: "" # Optional: custom Cognito domain
   region: "us-east-1" # AWS region for the User Pool
+  # Optional comma/space-separated allowlist of Cognito app-client ids that mint
+  # machine (client_credentials) access tokens the gateway should accept. Empty =
+  # fail closed (no M2M client accepted).
+  m2mClientIds: ""
 # Per-user egress credential vault (third-party OBO support).
 # The auth-server only needs the feature flag + the internal vend URL (it calls
 # the registry's /_egress_internal vend endpoint) + the nginx marker secret; it

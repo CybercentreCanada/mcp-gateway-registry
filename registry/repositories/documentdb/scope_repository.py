@@ -11,6 +11,7 @@ from ...auth.privileged_constants import (
     ADMIN_ACTION_PREFIXES,
     PRIVILEGED_GRANTS,
     PRIVILEGED_SCOPE_NAMES,
+    is_admin_conferring_action,
 )
 from ..interfaces import ScopeRepositoryBase
 from .client import get_collection_name, get_documentdb_client
@@ -20,6 +21,17 @@ logger = logging.getLogger(__name__)
 _GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
+
+# Last-line-of-defense reject set for server-scope writes. A server_path that
+# normalizes to one of these collides with the cross-server wildcard sentinel
+# and would grant access to every server. The registration guard
+# registry.utils.validate_server_path already rejects these paths; this mirror
+# ensures a caller that bypasses that guard still cannot inject a wildcard row.
+#
+# MUST stay in sync with registry.utils.url_guard._RESERVED_SERVER_PATH_NAMES
+# and registry.auth.access_resolver._WILDCARD_VALUES. Mirrored locally rather
+# than imported to keep this repository layer independent of the util layer.
+_RESERVED_SERVER_PATH_NAMES: frozenset[str] = frozenset({"all", "*"})
 
 
 def _looks_like_guid(
@@ -48,10 +60,14 @@ def _grants_admin(
 ) -> bool:
     """Return True if ui_permissions would confer admin privileges.
 
-    Admin is conferred by any mutating UI action (see
-    _PRIVILEGED_ACTION_PREFIXES) granted with "all" access. This is the same
-    rule _user_is_admin uses to derive admin status per request, so a group
-    carrying such permissions promotes its members to admin.
+    Admin is conferred by any mutating UI action granted with "all" access,
+    EXCEPT per-type custom-entity scopes (create_/modify_/delete_<type>_entity)
+    and skill-management scopes (publish_/modify_/delete_/toggle_skill), which
+    is_admin_conferring_action excludes. This is the same rule _user_is_admin
+    uses to derive admin status per request (both defer to the shared
+    is_admin_conferring_action so the write guard and the admin check cannot
+    drift), so a group carrying genuinely-admin permissions promotes its members
+    to admin.
 
     Args:
         ui_permissions: Dict mapping UI actions to lists of allowed resources.
@@ -62,9 +78,7 @@ def _grants_admin(
     if not ui_permissions:
         return False
     for action, resources in ui_permissions.items():
-        if action.startswith(_PRIVILEGED_ACTION_PREFIXES) and (
-            _PRIVILEGED_GRANTS & set(resources or [])
-        ):
+        if is_admin_conferring_action(action) and (_PRIVILEGED_GRANTS & set(resources or [])):
             return True
     return False
 
@@ -106,13 +120,17 @@ def _flatten_server_access(
 ) -> list[dict[str, Any]]:
     """Flatten a scope document's ``server_access`` into a flat rule list.
 
-    Handles two on-disk formats:
-    1. New format: ``{"scope_name": "...", "access_rules": [...]}``
-    2. Old/direct format: ``{"server": "...", "methods": [...], "tools": [...]}``
+    Handles three on-disk formats:
+    1. Grouped format: ``{"scope_name": "...", "access_rules": [...]}`` (the inner
+       rules are spliced in as-is; they may be server or agent rules).
+    2. Direct server rule: ``{"server": "...", "methods": [...], "tools": [...]}``.
+    3. Direct agent rule: ``{"agent": "...", "actions": [...]}`` -- the per-agent
+       shape mirrors the server rule (``agent`` is the identifier, ``actions`` its
+       siblings), consumed by ``validate_a2a_agent_access``.
 
-    Entries that are neither (e.g. agent-permission blocks) are skipped.
-    Shared by ``get_server_scopes`` and ``get_server_scopes_bulk`` so the
-    single and batch paths produce byte-identical rule lists.
+    An entry that matches none of these is skipped. Shared by
+    ``get_server_scopes`` and ``get_server_scopes_bulk`` so the single and batch
+    paths produce byte-identical rule lists.
     """
     all_rules: list[dict[str, Any]] = []
     for scope_entry in server_access:
@@ -120,7 +138,52 @@ def _flatten_server_access(
             all_rules.extend(scope_entry.get("access_rules", []))
         elif "server" in scope_entry:
             all_rules.append(scope_entry)
+        elif "agent" in scope_entry:
+            all_rules.append(scope_entry)
     return all_rules
+
+
+def _server_access_has_invalid_server_rule(
+    server_access: list[dict[str, Any]] | None,
+) -> bool:
+    """Return True if any server rule has a reserved-wildcard or empty ``server``.
+
+    ``import_group`` writes ``server_access`` straight to the collection with
+    ``replace_one`` and never routes through :meth:`add_server_scope`, so its
+    sink guard does not apply. This scans the imported rules (in both the
+    grouped ``access_rules`` shape and the direct ``server`` rule shape) so a
+    group import cannot inject a degenerate server rule that
+    :func:`registry.utils.validate_server_path` would have rejected at
+    registration. Two cases are refused, mirroring that guard:
+
+    1. ``server: "all"`` / ``server: "*"`` -- the resolver promotes these to a
+       cross-server wildcard, granting access to every server.
+    2. ``server: ""`` (or slashes-only) -- grants no access in the resolver, but
+       the same path renders as a gateway-wide ``location /`` nginx block
+       (issue #1501); reject it so this mirror stays in sync with the guard.
+
+    The compare normalizes the same way the resolver's write path does
+    (``lstrip("/")`` + trailing-slash strip + case-fold). Only rules that
+    actually carry a ``server`` key are inspected; agent rules (which have an
+    ``agent`` key and no ``server`` key) are left alone.
+
+    Args:
+        server_access: The ``server_access`` list from a group import.
+
+    Returns:
+        True if any server rule is a reserved wildcard or empty/slashes-only.
+    """
+    for rule in _flatten_server_access(server_access or []):
+        if not isinstance(rule, dict) or "server" not in rule:
+            continue
+        # Coerce with str() exactly as the resolver does
+        # (access_resolver.py: `str(server_name) in _WILDCARD_VALUES`) so the
+        # scan cannot be blind to a non-string value the resolver would still
+        # promote to a wildcard.
+        normalized = str(rule.get("server") or "").strip("/").lower()
+        if not normalized or normalized in _RESERVED_SERVER_PATH_NAMES:
+            return True
+    return False
 
 
 def _backfill_is_idp_managed(
@@ -417,6 +480,35 @@ class DocumentDBScopeRepository(ScopeRepositoryBase):
             collection = await self._get_collection()
             server_name = server_path.lstrip("/")
 
+            # Last line of defense against writing a degenerate server path, even
+            # if a caller bypassed validate_server_path. Fail closed (return
+            # False + log, per this method's error convention).
+            #
+            # An empty/slashes-only server name is rejected too: it grants no
+            # access in the resolver (falsy), but the same path renders as a
+            # gateway-wide `location /` nginx block (issue #1501), so the
+            # registration guard now rejects it and this mirror stays in sync.
+            if not server_name.strip("/"):
+                logger.error(
+                    "Refusing to add server scope for empty/slashes-only server "
+                    "name (from path '%s'): degenerate path, rejected at "
+                    "registration",
+                    server_path,
+                )
+                return False
+
+            # Refuse to write a scope row whose server name collides with the
+            # cross-server wildcard sentinel: it would grant access to every
+            # server in the registry.
+            if server_name.rstrip("/").lower() in _RESERVED_SERVER_PATH_NAMES:
+                logger.error(
+                    "Refusing to add server scope for reserved wildcard name "
+                    "'%s' (from path '%s'): would grant cross-server access",
+                    server_name,
+                    server_path,
+                )
+                return False
+
             server_entry = {"server": server_name, "methods": methods, "tools": tools}
 
             result = await collection.update_one(
@@ -704,6 +796,126 @@ class DocumentDBScopeRepository(ScopeRepositoryBase):
             )
             return False
 
+    async def merge_ui_permissions(
+        self,
+        group_name: str,
+        ui_permissions: dict[str, list[str]],
+    ) -> bool:
+        """Merge ui_permission keys into a group's ui_permissions ($set per key)."""
+        if not ui_permissions:
+            return False
+        try:
+            collection = await self._get_collection()
+
+            set_fields: dict[str, Any] = {
+                f"ui_permissions.{key}": value for key, value in ui_permissions.items()
+            }
+            set_fields["updated_at"] = datetime.utcnow()
+
+            result = await collection.update_one(
+                {"_id": group_name},
+                {"$set": set_fields},
+            )
+
+            if result.matched_count == 0:
+                logger.error(f"Group '{group_name}' not found")
+                return False
+
+            # Keep the in-memory cache aligned so a subsequent read reflects the merge.
+            cached = self._scopes_cache.setdefault("UI-Scopes", {}).setdefault(group_name, {})
+            cached.update(ui_permissions)
+
+            logger.info(
+                "Merged %d ui_permission key(s) into group '%s': %s",
+                len(ui_permissions),
+                group_name,
+                sorted(ui_permissions.keys()),
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to merge ui_permissions in DocumentDB: {e}", exc_info=True)
+            return False
+
+    async def remove_ui_permission_keys(
+        self,
+        group_name: str,
+        permission_keys: list[str],
+    ) -> bool:
+        """Unset ui_permission keys from a single group."""
+        if not permission_keys:
+            return False
+        try:
+            collection = await self._get_collection()
+
+            unset_fields = {f"ui_permissions.{key}": "" for key in permission_keys}
+            result = await collection.update_one(
+                {"_id": group_name},
+                {
+                    "$unset": unset_fields,
+                    "$set": {"updated_at": datetime.utcnow()},
+                },
+            )
+
+            if result.matched_count == 0:
+                logger.error(f"Group '{group_name}' not found")
+                return False
+
+            cached = self._scopes_cache.get("UI-Scopes", {}).get(group_name)
+            if isinstance(cached, dict):
+                for key in permission_keys:
+                    cached.pop(key, None)
+
+            logger.info(
+                "Removed %d ui_permission key(s) from group '%s': %s",
+                len(permission_keys),
+                group_name,
+                sorted(permission_keys),
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to remove ui_permission keys in DocumentDB: {e}", exc_info=True)
+            return False
+
+    async def remove_ui_permission_keys_from_all_groups(
+        self,
+        permission_keys: list[str],
+    ) -> int:
+        """Unset ui_permission keys from every group that holds any of them."""
+        if not permission_keys:
+            return 0
+        try:
+            collection = await self._get_collection()
+
+            unset_fields = {f"ui_permissions.{key}": "" for key in permission_keys}
+            # Only touch groups that actually carry at least one of the keys.
+            match_filter = {
+                "$or": [{f"ui_permissions.{key}": {"$exists": True}} for key in permission_keys]
+            }
+            result = await collection.update_many(
+                match_filter,
+                {
+                    "$unset": unset_fields,
+                    "$set": {"updated_at": datetime.utcnow()},
+                },
+            )
+
+            ui_cache = self._scopes_cache.get("UI-Scopes", {})
+            for cached in ui_cache.values():
+                if isinstance(cached, dict):
+                    for key in permission_keys:
+                        cached.pop(key, None)
+
+            logger.info(
+                "Swept %d ui_permission key(s) from %d group(s): %s",
+                len(permission_keys),
+                result.modified_count,
+                sorted(permission_keys),
+            )
+            return result.modified_count
+        except Exception as e:
+            logger.error(f"Failed to sweep ui_permission keys in DocumentDB: {e}", exc_info=True)
+            return 0
+
     async def add_group_mapping(
         self,
         group_name: str,
@@ -886,6 +1098,20 @@ class DocumentDBScopeRepository(ScopeRepositoryBase):
                 logger.error(
                     f"Refusing to import privileged group '{group_name}' "
                     f"without allow_privileged=True (mappings={group_mappings})"
+                )
+                return False
+
+            # Degenerate-server-rule sink guard for the import path. Unlike
+            # add_server_scope, import_group writes server_access directly, so
+            # it needs its own check. A server rule named "all"/"*" (cross-server
+            # wildcard) or "" (renders as a gateway-wide `location /`, issue
+            # #1501) is never legitimate, so this is refused unconditionally --
+            # an admin cannot opt into it either. Fail closed (return False + log).
+            if _server_access_has_invalid_server_rule(server_access):
+                logger.error(
+                    f"Refusing to import group '{group_name}': server_access "
+                    "contains a reserved wildcard ('all'/'*') or empty server "
+                    "name that would grant cross-server access or hijack the gateway"
                 )
                 return False
 

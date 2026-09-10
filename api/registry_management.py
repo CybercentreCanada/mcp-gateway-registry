@@ -431,7 +431,9 @@ def _get_jwt_token(aws_region: str | None = None, keycloak_url: str | None = Non
             cmd.extend(["--keycloak-url", keycloak_url])
         cmd.append(client_name)
 
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(  # nosec B603 - hardcoded internal script path; args are validated flags
+            cmd, capture_output=True, text=True, check=True, timeout=60
+        )
 
         token = result.stdout.strip()
 
@@ -854,6 +856,7 @@ def cmd_register(args: argparse.Namespace) -> int:
         # Handle both old and new config formats
         registration = InternalServiceRegistration(
             service_path=config.get("path") or config.get("service_path"),
+            id=config.get("id"),  # caller-supplied asset id (#1276), optional
             name=config.get("server_name") or config.get("name"),
             description=config.get("description"),
             proxy_pass_url=config.get("proxy_pass_url"),
@@ -1088,6 +1091,198 @@ def cmd_config(args: argparse.Namespace) -> int:
 
     except Exception as e:
         logger.error(f"Failed to get config: {e}")
+        return 1
+
+
+def cmd_rate_limit_set(args: argparse.Namespace) -> int:
+    """Create or update a rate-limit definition.
+
+    Caller (group) axis uses --user-max-requests / --agent-max-requests (at least
+    one). Target axis uses --max-requests. A server_group target entity also takes
+    --members (comma-separated server paths); each member gets its own bucket.
+    """
+    try:
+        client = _create_client(args)
+        members = None
+        if getattr(args, "members", None):
+            members = [m.strip() for m in args.members.split(",") if m.strip()]
+        result = client.set_rate_limit(
+            axis=args.axis,
+            entity_type=args.entity_type,
+            name=args.name,
+            max_requests=args.max_requests,
+            user_max_requests=args.user_max_requests,
+            agent_max_requests=args.agent_max_requests,
+            window_seconds=args.window_seconds,
+            fail_closed=args.fail_closed,
+            enabled=not args.disabled,
+            members=members,
+        )
+        logger.info("Rate-limit definition stored")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to set rate limit: {e}")
+        return 1
+
+
+def cmd_rate_limit_list(args: argparse.Namespace) -> int:
+    """List all rate-limit definitions."""
+    try:
+        client = _create_client(args)
+        result = client.list_rate_limits()
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to list rate limits: {e}")
+        return 1
+
+
+def cmd_rate_limit_delete(args: argparse.Namespace) -> int:
+    """Delete a rate-limit definition by id."""
+    try:
+        client = _create_client(args)
+        result = client.delete_rate_limit(args.id)
+        logger.info(f"Deleted rate-limit definition {args.id}")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to delete rate limit: {e}")
+        return 1
+
+
+def cmd_rate_limit_get(args: argparse.Namespace) -> int:
+    """Read a single rate-limit definition by id."""
+    try:
+        client = _create_client(args)
+        result = client.get_rate_limit(args.id)
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to get rate limit: {e}")
+        return 1
+
+
+def cmd_rate_limit_enable(args: argparse.Namespace) -> int:
+    """Enable a rate-limit definition in place."""
+    try:
+        client = _create_client(args)
+        result = client.set_rate_limit_enabled(args.id, enabled=True)
+        logger.info(f"Enabled rate-limit definition {args.id}")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to enable rate limit: {e}")
+        return 1
+
+
+def cmd_rate_limit_disable(args: argparse.Namespace) -> int:
+    """Disable a rate-limit definition in place (without deleting it)."""
+    try:
+        client = _create_client(args)
+        result = client.set_rate_limit_enabled(args.id, enabled=False)
+        logger.info(f"Disabled rate-limit definition {args.id}")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to disable rate limit: {e}")
+        return 1
+
+
+def cmd_rate_limit_status(args: argparse.Namespace) -> int:
+    """Introspect rate-limit definitions for a caller and/or target."""
+    try:
+        client = _create_client(args)
+        result = client.rate_limit_status(
+            identity=args.identity,
+            entity_type=args.entity_type,
+            name=args.name,
+        )
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to get rate-limit status: {e}")
+        return 1
+
+
+def cmd_rate_limit_member_set(args: argparse.Namespace) -> int:
+    """Map a user or agent (client_id) to rate-limit group(s)."""
+    try:
+        client = _create_client(args)
+        groups = [g.strip() for g in args.groups.split(",") if g.strip()]
+        result = client.set_rate_limit_membership(
+            subject_type=args.subject_type,
+            subject=args.subject,
+            groups=groups,
+        )
+        logger.info(f"Set rate-limit membership {args.subject_type}:{args.subject}")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to set rate-limit membership: {e}")
+        return 1
+
+
+def cmd_rate_limit_member_list(args: argparse.Namespace) -> int:
+    """List all rate-limit memberships."""
+    try:
+        client = _create_client(args)
+        result = client.list_rate_limit_memberships()
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to list rate-limit memberships: {e}")
+        return 1
+
+
+def cmd_rate_limit_member_delete(args: argparse.Namespace) -> int:
+    """Delete a rate-limit membership by id ('<subject_type>:<subject>')."""
+    try:
+        client = _create_client(args)
+        result = client.delete_rate_limit_membership(args.id)
+        logger.info(f"Deleted rate-limit membership {args.id}")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to delete rate-limit membership: {e}")
+        return 1
+
+
+def cmd_rate_limit_quarantine_add(args: argparse.Namespace) -> int:
+    """Quarantine a caller or target (drops ALL its data-plane traffic)."""
+    try:
+        client = _create_client(args)
+        result = client.quarantine_add(args.subject_type, args.subject)
+        logger.info(f"Quarantined {args.subject_type}:{args.subject}")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to quarantine: {e}")
+        return 1
+
+
+def cmd_rate_limit_quarantine_remove(args: argparse.Namespace) -> int:
+    """Remove a caller or target from quarantine."""
+    try:
+        client = _create_client(args)
+        result = client.quarantine_remove(args.subject_type, args.subject)
+        logger.info(f"Removed quarantine for {args.subject_type}:{args.subject}")
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to remove quarantine: {e}")
+        return 1
+
+
+def cmd_rate_limit_quarantine_list(args: argparse.Namespace) -> int:
+    """List everything currently quarantined (callers + targets)."""
+    try:
+        client = _create_client(args)
+        result = client.quarantine_list()
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to list quarantine: {e}")
         return 1
 
 
@@ -1805,6 +2000,156 @@ def cmd_server_connect_config(args: argparse.Namespace) -> int:
         return 1
 
 
+def _parse_scopes(raw: str | None) -> list[str] | None:
+    """Turn a comma-separated --scopes value into a list of scope strings.
+
+    Args:
+        raw: Comma-separated scopes, or None.
+
+    Returns:
+        List of non-empty scope strings, or None when nothing was provided.
+    """
+    if not raw:
+        return None
+    scopes = [s.strip() for s in raw.split(",") if s.strip()]
+    return scopes or None
+
+
+def cmd_egress_configure(args: argparse.Namespace) -> int:
+    """
+    Configure per-user egress auth on a server (admin only).
+
+    Args:
+        args: Command arguments with path, mode, and mode-specific options.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    try:
+        client = _create_client(args)
+        response = client.configure_egress_auth(
+            server_path=args.path,
+            mode=args.mode,
+            provider=args.provider,
+            client_id=args.client_id,
+            client_secret=args.client_secret,
+            scopes=_parse_scopes(args.scopes),
+            target_audience=args.target_audience,
+            custom_authorize_url=args.custom_authorize_url,
+            custom_token_url=args.custom_token_url,
+            custom_scope_separator=args.custom_scope_separator,
+            custom_token_auth_style=args.custom_token_auth_style,
+            custom_resource=args.custom_resource,
+        )
+        print(json.dumps(response, indent=2, default=str))
+        return 0
+
+    except Exception as e:
+        logger.error(f"Failed to configure egress auth: {e}")
+        return 1
+
+
+def cmd_egress_config_get(args: argparse.Namespace) -> int:
+    """
+    Fetch the (non-secret) egress auth config for a server.
+
+    Args:
+        args: Command arguments with path.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    try:
+        client = _create_client(args)
+        response = client.get_egress_auth_config(server_path=args.path)
+        print(json.dumps(response, indent=2, default=str))
+        return 0
+
+    except Exception as e:
+        logger.error(f"Failed to fetch egress auth config: {e}")
+        return 1
+
+
+def cmd_egress_pat_set(args: argparse.Namespace) -> int:
+    """
+    Submit (or replace) a per-user PAT for a server (write-only).
+
+    The secret value is never logged. The server enforces admin-gating of
+    ``--sub``; a non-admin supplying it is rejected 403. An admin using ``--sub``
+    must also pass ``--auth-method`` (the target's ingress auth method).
+
+    Args:
+        args: Command arguments with path, secret, ttl-value, ttl-unit, sub,
+            auth-method.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    try:
+        client = _create_client(args)
+        response = client.set_egress_pat(
+            server_path=args.path,
+            secret=args.secret,
+            ttl_value=args.ttl_value,
+            ttl_unit=args.ttl_unit,
+            sub=args.sub,
+            auth_method=args.auth_method,
+        )
+        # The response never contains the secret; safe to print as-is.
+        print(json.dumps(response, indent=2, default=str))
+        return 0
+
+    except Exception as e:
+        logger.error(f"Failed to submit egress PAT: {e}")
+        return 1
+
+
+def cmd_egress_pat_status(args: argparse.Namespace) -> int:
+    """
+    Report whether a per-user PAT is stored and when it expires.
+
+    Args:
+        args: Command arguments with path and optional sub / auth-method.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    try:
+        client = _create_client(args)
+        response = client.get_egress_pat_status(
+            server_path=args.path, sub=args.sub, auth_method=args.auth_method
+        )
+        print(json.dumps(response, indent=2, default=str))
+        return 0
+
+    except Exception as e:
+        logger.error(f"Failed to fetch egress PAT status: {e}")
+        return 1
+
+
+def cmd_egress_pat_delete(args: argparse.Namespace) -> int:
+    """
+    Delete a stored per-user PAT (idempotent).
+
+    Args:
+        args: Command arguments with path and optional sub / auth-method.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    try:
+        client = _create_client(args)
+        response = client.delete_egress_pat(
+            server_path=args.path, sub=args.sub, auth_method=args.auth_method
+        )
+        print(json.dumps(response, indent=2, default=str))
+        return 0
+
+    except Exception as e:
+        logger.error(f"Failed to delete egress PAT: {e}")
+        return 1
+
+
 def _parse_ard_filter(pairs: list[str] | None) -> dict[str, Any] | None:
     """Turn repeated ``key=value`` CLI filters into an ARD query.filter dict."""
     if not pairs:
@@ -2278,6 +2623,7 @@ def cmd_agent_register(args: argparse.Namespace) -> int:
             "description",
             "path",
             "url",
+            "id",  # caller-supplied asset id (#1276)
             "version",
             "capabilities",
             "metadata",
@@ -2776,14 +3122,12 @@ def cmd_agent_pull_card(args: argparse.Namespace) -> int:
         else:
             for change in response.changes:
                 logger.info(f"\n  Field: {change.field}")
-                logger.info(
-                    f"    current: {json.dumps(change.current_value, default=str)[:200]}"
-                )
-                logger.info(
-                    f"    remote:  {json.dumps(change.remote_value, default=str)[:200]}"
-                )
+                logger.info(f"    current: {json.dumps(change.current_value, default=str)[:200]}")
+                logger.info(f"    remote:  {json.dumps(change.remote_value, default=str)[:200]}")
             if dry_run:
-                logger.info("\n  Dry-run: no A2A-spec writes performed. Re-run with --apply to persist.")
+                logger.info(
+                    "\n  Dry-run: no A2A-spec writes performed. Re-run with --apply to persist."
+                )
             elif response.applied:
                 logger.info(f"\n  Applied {len(response.changes)} change(s).")
             else:
@@ -3127,6 +3471,7 @@ def cmd_skill_register(args: argparse.Namespace) -> int:
         request = SkillRegistrationRequest(
             name=args.name,
             skill_md_url=args.url,
+            id=args.id if hasattr(args, "id") and args.id else None,
             description=args.description if hasattr(args, "description") else None,
             version=args.version if hasattr(args, "version") else None,
             tags=args.tags.split(",") if hasattr(args, "tags") and args.tags else [],
@@ -5951,9 +6296,7 @@ Examples:
     custom_record_list_parser = subparsers.add_parser(
         "custom-record-list", help="List records of a custom type"
     )
-    custom_record_list_parser.add_argument(
-        "--type", required=True, help="Custom type name"
-    )
+    custom_record_list_parser.add_argument("--type", required=True, help="Custom type name")
     custom_record_list_parser.add_argument(
         "--json", action="store_true", help="Print raw JSON response"
     )
@@ -5987,6 +6330,178 @@ Examples:
     )
     config_parser.add_argument(
         "--json", action="store_true", help="Output raw JSON instead of formatted text"
+    )
+
+    # Rate limit commands (issue #295)
+    rate_limit_set_parser = subparsers.add_parser(
+        "rate-limit-set", help="Create or update a rate-limit definition (admin)"
+    )
+    rate_limit_set_parser.add_argument(
+        "--axis",
+        required=True,
+        choices=["caller", "target", "caller_target"],
+        help="Which side: 'caller', 'target', or 'caller_target' (per-caller-per-target)",
+    )
+    rate_limit_set_parser.add_argument(
+        "--entity-type",
+        required=True,
+        dest="entity_type",
+        help="caller: 'group'; target: 'mcp_server' | 'a2a_agent' | 'server_group'",
+    )
+    rate_limit_set_parser.add_argument(
+        "--name", required=True, help="Group name, server path, agent path, or server-group name"
+    )
+    rate_limit_set_parser.add_argument(
+        "--max-requests",
+        type=int,
+        dest="max_requests",
+        help=(
+            "TARGET axis: max requests per window across all callers. For a "
+            "server_group, applies to EACH member server individually."
+        ),
+    )
+    rate_limit_set_parser.add_argument(
+        "--members",
+        dest="members",
+        help=(
+            "server_group target entity only: comma-separated server paths. Each "
+            "listed server gets its own independent max-requests/window bucket "
+            "(per-member uniform, not a shared pool)."
+        ),
+    )
+    rate_limit_set_parser.add_argument(
+        "--user-max-requests",
+        type=int,
+        dest="user_max_requests",
+        help="CALLER/group axis: max requests per window for a human user (>= user floor)",
+    )
+    rate_limit_set_parser.add_argument(
+        "--agent-max-requests",
+        type=int,
+        dest="agent_max_requests",
+        help="CALLER/group axis: max requests per window for an agent/client (>= agent floor)",
+    )
+    rate_limit_set_parser.add_argument(
+        "--window-seconds",
+        type=int,
+        default=60,
+        dest="window_seconds",
+        help="Window length in seconds (default 60; up to 86400)",
+    )
+    rate_limit_set_parser.add_argument(
+        "--fail-closed",
+        action="store_true",
+        dest="fail_closed",
+        help="Deny on backend error (security-critical limits only)",
+    )
+    rate_limit_set_parser.add_argument(
+        "--disabled", action="store_true", help="Store the definition disabled"
+    )
+
+    rate_limit_list_parser = subparsers.add_parser(
+        "rate-limit-list", help="List all rate-limit definitions (admin)"
+    )
+
+    rate_limit_delete_parser = subparsers.add_parser(
+        "rate-limit-delete", help="Delete a rate-limit definition by id (admin)"
+    )
+    rate_limit_delete_parser.add_argument(
+        "--id",
+        required=True,
+        help="Definition id, e.g. 'caller:group:developers:60'",
+    )
+
+    rate_limit_get_parser = subparsers.add_parser(
+        "rate-limit-get", help="Read a single rate-limit definition by id (admin)"
+    )
+    rate_limit_get_parser.add_argument(
+        "--id",
+        required=True,
+        help="Definition id, e.g. 'caller:group:developers:60'",
+    )
+
+    rate_limit_enable_parser = subparsers.add_parser(
+        "rate-limit-enable", help="Enable a rate-limit definition in place (admin)"
+    )
+    rate_limit_enable_parser.add_argument("--id", required=True, help="Definition id")
+
+    rate_limit_disable_parser = subparsers.add_parser(
+        "rate-limit-disable", help="Disable a rate-limit definition without deleting it (admin)"
+    )
+    rate_limit_disable_parser.add_argument("--id", required=True, help="Definition id")
+
+    rate_limit_status_parser = subparsers.add_parser(
+        "rate-limit-status", help="Introspect rate-limit definitions (admin)"
+    )
+    rate_limit_status_parser.add_argument("--identity", help="Caller group name to introspect")
+    rate_limit_status_parser.add_argument(
+        "--entity-type", dest="entity_type", help="Target entity type (e.g. mcp_server)"
+    )
+    rate_limit_status_parser.add_argument("--name", help="Target name")
+
+    # Rate-limit membership commands: map a user/agent to rate-limit group(s).
+    rate_limit_member_set_parser = subparsers.add_parser(
+        "rate-limit-member-set",
+        help="Map a user or agent (client_id) to rate-limit group(s) (admin)",
+    )
+    rate_limit_member_set_parser.add_argument(
+        "--subject-type",
+        required=True,
+        choices=["user", "client"],
+        dest="subject_type",
+        help="'user' (subject = username) or 'client' (subject = client_id)",
+    )
+    rate_limit_member_set_parser.add_argument(
+        "--subject", required=True, help="The username or client_id"
+    )
+    rate_limit_member_set_parser.add_argument(
+        "--groups", required=True, help="Comma-separated rate-limit group names"
+    )
+
+    rate_limit_member_list_parser = subparsers.add_parser(
+        "rate-limit-member-list", help="List all rate-limit memberships (admin)"
+    )
+
+    rate_limit_member_delete_parser = subparsers.add_parser(
+        "rate-limit-member-delete", help="Delete a rate-limit membership by id (admin)"
+    )
+    rate_limit_member_delete_parser.add_argument(
+        "--id", required=True, help="Membership id, e.g. 'user:alice' or 'client:my-agent-id'"
+    )
+
+    # Quarantine (kill-switch) commands: drop ALL data-plane traffic from a caller
+    # or to a target. The server picks the reserved group from the subject type.
+    rate_limit_quarantine_add_parser = subparsers.add_parser(
+        "rate-limit-quarantine-add",
+        help="Quarantine a caller or target: drops ALL its data-plane traffic (admin)",
+    )
+    rate_limit_quarantine_add_parser.add_argument(
+        "--subject-type",
+        required=True,
+        choices=["user", "client", "server", "agent"],
+        dest="subject_type",
+        help="'user'/'client' (caller) or 'server'/'agent' (target)",
+    )
+    rate_limit_quarantine_add_parser.add_argument(
+        "--subject", required=True, help="username / client_id / server name / agent path"
+    )
+
+    rate_limit_quarantine_remove_parser = subparsers.add_parser(
+        "rate-limit-quarantine-remove", help="Remove a caller or target from quarantine (admin)"
+    )
+    rate_limit_quarantine_remove_parser.add_argument(
+        "--subject-type",
+        required=True,
+        choices=["user", "client", "server", "agent"],
+        dest="subject_type",
+        help="'user'/'client' (caller) or 'server'/'agent' (target)",
+    )
+    rate_limit_quarantine_remove_parser.add_argument(
+        "--subject", required=True, help="username / client_id / server name / agent path"
+    )
+
+    subparsers.add_parser(
+        "rate-limit-quarantine-list", help="List everything currently quarantined (admin)"
     )
 
     # Add to groups command
@@ -6192,6 +6707,120 @@ Examples:
     )
     server_connect_config_parser.add_argument("--json", action="store_true", help="Output raw JSON")
 
+    # Egress Auth Commands (per-user egress credential vault)
+
+    # Configure egress auth command
+    egress_configure_parser = subparsers.add_parser(
+        "egress-configure", help="Configure per-user egress auth on a server (admin only)"
+    )
+    egress_configure_parser.add_argument(
+        "--path", required=True, help="Server path (e.g., /github)"
+    )
+    egress_configure_parser.add_argument(
+        "--mode",
+        required=True,
+        choices=["none", "oauth_user", "obo_exchange", "pat"],
+        help="Egress auth mode",
+    )
+    egress_configure_parser.add_argument(
+        "--provider", help="Provider slug/name (required for oauth_user and pat)"
+    )
+    egress_configure_parser.add_argument("--client-id", help="OAuth client id (oauth_user only)")
+    egress_configure_parser.add_argument(
+        "--client-secret", help="OAuth client secret (oauth_user only, write-only)"
+    )
+    egress_configure_parser.add_argument(
+        "--scopes", help="Comma-separated OAuth scopes (e.g., repo,read:org)"
+    )
+    egress_configure_parser.add_argument(
+        "--target-audience", help="Target audience (obo_exchange only)"
+    )
+    # Custom-OIDC provider overrides. --provider custom is unusable without the
+    # two URLs: the server's resolve_provider() rejects the config with
+    # "custom requires custom_authorize_url and custom_token_url".
+    egress_configure_parser.add_argument(
+        "--custom-authorize-url",
+        help="Authorize endpoint (REQUIRED with --provider custom)",
+    )
+    egress_configure_parser.add_argument(
+        "--custom-token-url",
+        help="Token endpoint (REQUIRED with --provider custom)",
+    )
+    egress_configure_parser.add_argument(
+        "--custom-scope-separator",
+        help="Scope delimiter when the provider does not use a space (custom only)",
+    )
+    egress_configure_parser.add_argument(
+        "--custom-token-auth-style",
+        choices=["post_body", "basic_header"],
+        help="Where the client secret goes on the token request (custom only, default post_body)",
+    )
+    egress_configure_parser.add_argument(
+        "--custom-resource",
+        help="RFC 8707 resource indicator, sent on authorize and token requests (custom only)",
+    )
+
+    # Get egress config command
+    egress_config_get_parser = subparsers.add_parser(
+        "egress-config-get", help="Fetch the (non-secret) egress auth config for a server"
+    )
+    egress_config_get_parser.add_argument(
+        "--path", required=True, help="Server path (e.g., /github)"
+    )
+
+    # Submit egress PAT command
+    egress_pat_set_parser = subparsers.add_parser(
+        "egress-pat-set", help="Submit (or replace) a per-user PAT for a server (write-only)"
+    )
+    egress_pat_set_parser.add_argument("--path", required=True, help="Server path (e.g., /github)")
+    egress_pat_set_parser.add_argument(
+        "--secret", required=True, help="The PAT / API key to store (never logged)"
+    )
+    egress_pat_set_parser.add_argument(
+        "--ttl-value",
+        required=True,
+        type=int,
+        help="Positive integer validity amount (capped at 30 days)",
+    )
+    egress_pat_set_parser.add_argument(
+        "--ttl-unit",
+        required=True,
+        choices=["minutes", "hours", "days"],
+        help="Validity unit",
+    )
+    egress_pat_set_parser.add_argument("--sub", help="Admin-only: submit on another user's behalf")
+    egress_pat_set_parser.add_argument(
+        "--auth-method",
+        help="Admin-only (required with --sub): the target's ingress auth method "
+        "(e.g. oauth2), the vault partition the target vends from",
+    )
+
+    # Egress PAT status command
+    egress_pat_status_parser = subparsers.add_parser(
+        "egress-pat-status", help="Report whether a per-user PAT is stored and when it expires"
+    )
+    egress_pat_status_parser.add_argument(
+        "--path", required=True, help="Server path (e.g., /github)"
+    )
+    egress_pat_status_parser.add_argument("--sub", help="Admin-only: query another user's status")
+    egress_pat_status_parser.add_argument(
+        "--auth-method",
+        help="Admin-only (required with --sub): the target's ingress auth method (e.g. oauth2)",
+    )
+
+    # Egress PAT delete command
+    egress_pat_delete_parser = subparsers.add_parser(
+        "egress-pat-delete", help="Delete a stored per-user PAT (idempotent)"
+    )
+    egress_pat_delete_parser.add_argument(
+        "--path", required=True, help="Server path (e.g., /github)"
+    )
+    egress_pat_delete_parser.add_argument("--sub", help="Admin-only: delete another user's PAT")
+    egress_pat_delete_parser.add_argument(
+        "--auth-method",
+        help="Admin-only (required with --sub): the target's ingress auth method (e.g. oauth2)",
+    )
+
     # Server search command
     server_search_parser = subparsers.add_parser(
         "server-search",
@@ -6216,14 +6845,20 @@ Examples:
     )
     ard_search_parser.add_argument("--query", required=True, help="Natural-language query")
     ard_search_parser.add_argument(
-        "--filter", action="append", default=None,
+        "--filter",
+        action="append",
+        default=None,
         help="ARD filter key=value (repeatable), e.g. --filter type=mcp_server --filter tags=finance",
     )
     ard_search_parser.add_argument(
-        "--federation", default="auto", choices=["auto", "referrals", "none"],
+        "--federation",
+        default="auto",
+        choices=["auto", "referrals", "none"],
         help="Federation mode (default: auto)",
     )
-    ard_search_parser.add_argument("--page-size", type=int, default=10, help="Results per page (1-100)")
+    ard_search_parser.add_argument(
+        "--page-size", type=int, default=10, help="Results per page (1-100)"
+    )
     ard_search_parser.add_argument("--page-token", default=None, help="Opaque pagination cursor")
     ard_search_parser.add_argument("--json", action="store_true", help="Output raw ARD JSON")
 
@@ -6231,14 +6866,20 @@ Examples:
         "ard-agents", help="ARD Registry browse over all asset types (GET /api/ard/agents)"
     )
     ard_agents_parser.add_argument(
-        "--filter", action="append", default=None,
+        "--filter",
+        action="append",
+        default=None,
         help="ARD filter key=value (repeatable), e.g. --filter type=a2a_agent",
     )
     ard_agents_parser.add_argument(
-        "--order-by", default="identifier", choices=["identifier", "displayName", "updatedAt"],
+        "--order-by",
+        default="identifier",
+        choices=["identifier", "displayName", "updatedAt"],
         help="Sort field (default: identifier)",
     )
-    ard_agents_parser.add_argument("--page-size", type=int, default=20, help="Items per page (1-100)")
+    ard_agents_parser.add_argument(
+        "--page-size", type=int, default=20, help="Items per page (1-100)"
+    )
     ard_agents_parser.add_argument("--page-token", default=None, help="Opaque pagination cursor")
     ard_agents_parser.add_argument("--json", action="store_true", help="Output raw ARD JSON")
 
@@ -6530,6 +7171,11 @@ Examples:
         "--name", required=True, help="Skill name (lowercase alphanumeric with hyphens)"
     )
     skill_register_parser.add_argument("--url", required=True, help="URL to SKILL.md file")
+    skill_register_parser.add_argument(
+        "--id",
+        help="Optional caller-supplied id (UUID, ARN, ...). Auto-generated if omitted. "
+        "Honored only when the registry enables ALLOW_CALLER_SUPPLIED_ASSET_ID.",
+    )
     skill_register_parser.add_argument("--description", help="Skill description")
     skill_register_parser.add_argument("--version", help="Skill version (e.g., 1.0.0)")
     skill_register_parser.add_argument("--tags", help="Comma-separated tags")
@@ -6815,9 +7461,7 @@ Examples:
     user_group_list_parser.add_argument(
         "--provider", help="Filter by provider (e.g. manual, pingfederate)"
     )
-    user_group_list_parser.add_argument(
-        "--q", help="Substring filter on username/email"
-    )
+    user_group_list_parser.add_argument("--q", help="Substring filter on username/email")
     user_group_list_parser.add_argument(
         "--json", action="store_true", help="Output raw JSON instead of formatted text"
     )
@@ -6826,9 +7470,7 @@ Examples:
         "user-group-get",
         help="Get a single user-group record by username",
     )
-    user_group_get_parser.add_argument(
-        "--username", required=True, help="IdP username to look up"
-    )
+    user_group_get_parser.add_argument("--username", required=True, help="IdP username to look up")
     user_group_get_parser.add_argument(
         "--json", action="store_true", help="Output raw JSON instead of formatted text"
     )
@@ -6844,9 +7486,7 @@ Examples:
         "--groups",
         help="Comma-separated new groups list; empty string clears groups; omit to leave unchanged",
     )
-    user_group_update_parser.add_argument(
-        "--email", help="New email (omit to leave unchanged)"
-    )
+    user_group_update_parser.add_argument("--email", help="New email (omit to leave unchanged)")
     user_group_update_enabled = user_group_update_parser.add_mutually_exclusive_group()
     user_group_update_enabled.add_argument(
         "--enabled", action="store_true", help="Set enabled=True"
@@ -7337,6 +7977,19 @@ Examples:
         "remove": cmd_remove,
         "healthcheck": cmd_healthcheck,
         "config": cmd_config,
+        "rate-limit-set": cmd_rate_limit_set,
+        "rate-limit-list": cmd_rate_limit_list,
+        "rate-limit-get": cmd_rate_limit_get,
+        "rate-limit-delete": cmd_rate_limit_delete,
+        "rate-limit-enable": cmd_rate_limit_enable,
+        "rate-limit-disable": cmd_rate_limit_disable,
+        "rate-limit-status": cmd_rate_limit_status,
+        "rate-limit-member-set": cmd_rate_limit_member_set,
+        "rate-limit-member-list": cmd_rate_limit_member_list,
+        "rate-limit-member-delete": cmd_rate_limit_member_delete,
+        "rate-limit-quarantine-add": cmd_rate_limit_quarantine_add,
+        "rate-limit-quarantine-remove": cmd_rate_limit_quarantine_remove,
+        "rate-limit-quarantine-list": cmd_rate_limit_quarantine_list,
         "add-to-groups": cmd_add_to_groups,
         "remove-from-groups": cmd_remove_from_groups,
         "create-group": cmd_create_group,
@@ -7353,6 +8006,11 @@ Examples:
         "rescan": cmd_rescan,
         "server-update-credential": cmd_server_update_credential,
         "server-connect-config": cmd_server_connect_config,
+        "egress-configure": cmd_egress_configure,
+        "egress-config-get": cmd_egress_config_get,
+        "egress-pat-set": cmd_egress_pat_set,
+        "egress-pat-status": cmd_egress_pat_status,
+        "egress-pat-delete": cmd_egress_pat_delete,
         "server-search": cmd_server_search,
         "ard-search": cmd_ard_search,
         "ard-agents": cmd_ard_agents,

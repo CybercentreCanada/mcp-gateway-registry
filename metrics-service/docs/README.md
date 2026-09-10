@@ -22,7 +22,7 @@ The MCP Metrics Collection Service is a centralized, high-performance metrics co
 The metrics service serves as the central hub for collecting, validating, and storing performance and usage metrics from all MCP Gateway Registry components including:
 
 - Authentication servers
-- Registry services  
+- Registry services
 - MCP servers and tools
 - Client applications
 
@@ -392,7 +392,7 @@ Raw metrics: 90 days
 ├── discovery_metrics (tool discovery operations)
 └── tool_metrics (individual tool usage)
 
-Aggregated metrics: 1-3 years  
+Aggregated metrics: 1-3 years
 ├── metrics_hourly (365 days)
 └── metrics_daily (1095 days)
 
@@ -670,7 +670,7 @@ Recommended alerts:
 # High error rate
 - alert: MetricsHighErrorRate
   expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
-  
+
 # Rate limit exhaustion
 - alert: RateLimitExhausted
   expr: rate_limit_available_tokens < 10

@@ -16,6 +16,7 @@ Tests cover:
 """
 
 import pytest
+from pydantic import ValidationError
 
 from registry.schemas.federation_schema import (
     AgentCoreFederationConfig,
@@ -75,7 +76,7 @@ class TestAgentCoreRegistryConfig:
 
     def test_missing_registry_id_raises_error(self):
         """Creating without registry_id should raise a validation error."""
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             AgentCoreRegistryConfig()
 
     def test_default_aws_account_id_is_none(self):

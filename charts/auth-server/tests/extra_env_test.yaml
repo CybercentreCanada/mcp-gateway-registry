@@ -48,8 +48,16 @@ tests:
       #   env[2] = OTEL_METRIC_EXPORT_INTERVAL_MS  (Issue #1122)
       #   env[3] = OTEL_EXPORTER_PROMETHEUS_HOST   (Issue #1122)
       #   env[4] = OTEL_EXPORTER_PROMETHEUS_PORT   (Issue #1122)
-      #   env[5] = MY_FLAG       (extraEnv[0])
-      #   env[6] = MY_SECRET_VAR (extraEnv[1])
+      #   env[5]  = AUDIT_LOG_REQUIRE_DURABLE (always rendered)
+      #   env[6]  = RATE_LIMITING_ENABLED (issue #295, always rendered)
+      #   env[7]  = RATE_LIMIT_BACKEND
+      #   env[8]  = RATE_LIMIT_FAIL_OPEN
+      #   env[9]  = RATE_LIMIT_QUARANTINE_FAIL_CLOSED (issue #1504)
+      #   env[10] = RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS
+      #   env[11] = RATE_LIMIT_BACKEND_TIMEOUT_MS
+      #   env[12] = AWS_EC2_METADATA_DISABLED (chart-managed security constant)
+      #   env[13] = MY_FLAG       (extraEnv[0])
+      #   env[14] = MY_SECRET_VAR (extraEnv[1])
       - equal:
           path: spec.template.spec.containers[0].env[0].name
           value: ENTRA_CLIENT_SECRET
@@ -58,9 +66,21 @@ tests:
           value: METRICS_LEGACY_HTTP_POST
       - equal:
           path: spec.template.spec.containers[0].env[5].name
-          value: MY_FLAG
+          value: AUDIT_LOG_REQUIRE_DURABLE
       - equal:
           path: spec.template.spec.containers[0].env[6].name
+          value: RATE_LIMITING_ENABLED
+      - equal:
+          path: spec.template.spec.containers[0].env[11].name
+          value: RATE_LIMIT_BACKEND_TIMEOUT_MS
+      - equal:
+          path: spec.template.spec.containers[0].env[12].name
+          value: AWS_EC2_METADATA_DISABLED
+      - equal:
+          path: spec.template.spec.containers[0].env[13].name
+          value: MY_FLAG
+      - equal:
+          path: spec.template.spec.containers[0].env[14].name
           value: MY_SECRET_VAR
 
   - it: appends extraEnvFrom entries after chart-managed envFrom sources
@@ -153,6 +173,70 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "\"EGRESS_REGISTRY_INTERNAL_URL\" is a reserved variable"
+
+  - it: fails when extraEnv contains AUDIT_LOG_REQUIRE_DURABLE
+    set:
+      extraEnv:
+        - name: AUDIT_LOG_REQUIRE_DURABLE
+          value: "false"
+    asserts:
+      - failedTemplate:
+          errorPattern: "\"AUDIT_LOG_REQUIRE_DURABLE\" is a reserved variable"
+
+  - it: fails when extraEnv contains RATE_LIMITING_ENABLED (issue #295)
+    set:
+      extraEnv:
+        - name: RATE_LIMITING_ENABLED
+          value: "true"
+    asserts:
+      - failedTemplate:
+          errorPattern: "\"RATE_LIMITING_ENABLED\" is a reserved variable"
+
+  - it: disables AWS EC2 IMDS fallback by default (defense-in-depth)
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AWS_EC2_METADATA_DISABLED
+            value: "true"
+
+  - it: omits AWS_EC2_METADATA_DISABLED when disableEc2ImdsFallback=false (node-role escape hatch)
+    set:
+      app:
+        disableEc2ImdsFallback: false
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AWS_EC2_METADATA_DISABLED
+            value: "true"
+
+  - it: fails when extraEnv contains AWS_EC2_METADATA_DISABLED (chart-managed)
+    set:
+      extraEnv:
+        - name: AWS_EC2_METADATA_DISABLED
+          value: "false"
+    asserts:
+      - failedTemplate:
+          errorPattern: "\"AWS_EC2_METADATA_DISABLED\" is a reserved variable"
+
+  - it: fails when extraEnv contains ENTRA_SCOPE_FORMAT (issue #990)
+    set:
+      extraEnv:
+        - name: ENTRA_SCOPE_FORMAT
+          value: "v1"
+    asserts:
+      - failedTemplate:
+          errorPattern: "\"ENTRA_SCOPE_FORMAT\" is a reserved variable"
+
+  - it: fails when extraEnv contains ENTRA_APPLICATION_ID_URI (issue #990)
+    set:
+      extraEnv:
+        - name: ENTRA_APPLICATION_ID_URI
+          value: "api://evil"
+    asserts:
+      - failedTemplate:
+          errorPattern: "\"ENTRA_APPLICATION_ID_URI\" is a reserved variable"
 
   - it: fails on duplicate names within extraEnv
     set:

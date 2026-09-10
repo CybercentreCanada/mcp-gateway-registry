@@ -102,8 +102,13 @@ class AgentScannerService:
             # Analyze results
             is_safe, critical, high, medium, low = self._analyze_scan_results(raw_output)
 
-            # Get agent URL if available
-            agent_url = agent_card.get("url")
+            # Record the URL that was actually scanned: the real backend
+            # (proxy_pass_url) in reverse-proxy mode, else the advertised url.
+            agent_url = (
+                agent_card.get("proxy_pass_url")
+                or agent_card.get("proxyPassUrl")
+                or agent_card.get("url")
+            )
 
             # Create result object
             result = AgentSecurityScanResult(
@@ -144,7 +149,11 @@ class AgentScannerService:
             # Return error result
             result = AgentSecurityScanResult(
                 agent_path=agent_path,
-                agent_url=agent_card.get("url"),
+                agent_url=(
+                    agent_card.get("proxy_pass_url")
+                    or agent_card.get("proxyPassUrl")
+                    or agent_card.get("url")
+                ),
                 scan_timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                 is_safe=False,  # Treat scanner failures as unsafe
                 critical_issues=0,
@@ -179,9 +188,19 @@ class AgentScannerService:
         logger.info(f"Running A2A security scan on: {agent_path}")
         logger.info(f"Using analyzers: {analyzers}")
 
+        # In A2A reverse-proxy mode the card's advertised url is the gateway
+        # address, so scan the real backend instead: point the scanned card's url
+        # at proxy_pass_url when present. Fall back to url for agents registered
+        # before the flag was on (proxy_pass_url absent) -- backwards compatible.
+        # Copy the card so we never mutate the caller's dict.
+        scan_card = dict(agent_card)
+        backend_url = scan_card.get("proxy_pass_url") or scan_card.get("proxyPassUrl")
+        if backend_url:
+            scan_card["url"] = backend_url
+
         # Create temporary file for agent card
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp_file:
-            json.dump(agent_card, tmp_file, indent=2, default=str)
+            json.dump(scan_card, tmp_file, indent=2, default=str)
             tmp_file_path = tmp_file.name
 
         try:

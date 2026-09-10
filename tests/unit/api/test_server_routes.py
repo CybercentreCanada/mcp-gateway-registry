@@ -904,8 +904,20 @@ class TestRegisterService:
             "is_new_version": False,
         }
 
-        with patch(
-            "registry.auth.dependencies.user_has_ui_permission_for_service", return_value=True
+        def fake_encrypt(entry):
+            entry["auth_credential_encrypted"] = "registration-ciphertext"
+            entry.pop("auth_credential", None)
+            return entry
+
+        with (
+            patch(
+                "registry.auth.dependencies.user_has_ui_permission_for_service",
+                return_value=True,
+            ),
+            patch(
+                "registry.api.server_routes.encrypt_credential_in_server_dict",
+                side_effect=fake_encrypt,
+            ),
         ):
             # Act
             response = test_client_admin.post(
@@ -918,6 +930,8 @@ class TestRegisterService:
                     "tags": "test, new",
                     "num_tools": 5,
                     "license": "MIT",
+                    "auth_scheme": "bearer",
+                    "auth_credential": "registration-plaintext",
                 },
             )
 
@@ -926,8 +940,142 @@ class TestRegisterService:
             data = response.json()
             assert data["message"] == "Service registered successfully"
             assert data["service"]["server_name"] == "New Server"
+            persisted = mock_server_service.register_server.call_args.args[0]
+            assert persisted["auth_credential_encrypted"] == "registration-ciphertext"
+            serialized = str(data)
+            assert "auth_credential_encrypted" not in serialized
+            assert "registration-ciphertext" not in serialized
+            assert "registration-plaintext" not in serialized
             mock_server_service.register_server.assert_called_once()
             mock_nginx_reload_scheduler.mark_dirty.assert_called()
+
+    def test_register_new_version_response_strips_encrypted_credential(
+        self,
+        test_client_admin,
+        mock_server_service,
+        mock_nginx_service,
+        mock_nginx_reload_scheduler,
+        mock_health_service,
+    ):
+        mock_server_service.register_server.return_value = {
+            "success": True,
+            "message": "Server version registered successfully",
+            "is_new_version": True,
+            "existing_version": "1.0.0",
+        }
+
+        def fake_encrypt(entry):
+            entry["auth_credential_encrypted"] = "version-ciphertext"
+            entry.pop("auth_credential", None)
+            return entry
+
+        with (
+            patch(
+                "registry.auth.dependencies.user_has_ui_permission_for_service",
+                return_value=True,
+            ),
+            patch(
+                "registry.api.server_routes.encrypt_credential_in_server_dict",
+                side_effect=fake_encrypt,
+            ),
+        ):
+            response = test_client_admin.post(
+                "/api/register",
+                data={
+                    "name": "Versioned Server",
+                    "description": "A new version",
+                    "path": "/versioned-server",
+                    "proxy_pass_url": "http://localhost:9000",
+                    "auth_scheme": "bearer",
+                    "auth_credential": "version-plaintext",
+                },
+            )
+
+        assert response.status_code == 201
+        serialized = str(response.json())
+        assert "auth_credential_encrypted" not in serialized
+        assert "version-ciphertext" not in serialized
+        assert "version-plaintext" not in serialized
+        persisted = mock_server_service.register_server.call_args.args[0]
+        assert persisted["auth_credential_encrypted"] == "version-ciphertext"
+
+    def test_register_service_honors_supplied_id(
+        self,
+        test_client_admin,
+        mock_server_service,
+        mock_nginx_service,
+        mock_nginx_reload_scheduler,
+        mock_health_service,
+    ):
+        """A caller-supplied id reaches the persisted entry and the response (#1276)."""
+        supplied_id = "arn:aws:bedrock:us-east-1:123456789012:server/my-server"
+        mock_server_service.register_server.return_value = {
+            "success": True,
+            "message": "Server registered successfully",
+            "is_new_version": False,
+        }
+
+        with (
+            patch(
+                "registry.auth.dependencies.user_has_ui_permission_for_service", return_value=True
+            ),
+            patch("registry.api.server_routes.settings.allow_caller_supplied_asset_id", True),
+        ):
+            response = test_client_admin.post(
+                "/api/register",
+                data={
+                    "name": "Id Server",
+                    "description": "Server with a caller-supplied id",
+                    "path": "/id-server",
+                    "proxy_pass_url": "http://localhost:9000",
+                    "tags": "test",
+                    "num_tools": 0,
+                    "license": "MIT",
+                    "id": supplied_id,
+                },
+            )
+
+        assert response.status_code == 201
+        assert response.json()["service"]["id"] == supplied_id
+        entry = mock_server_service.register_server.call_args.args[0]
+        assert entry["id"] == supplied_id
+
+    def test_register_service_rejects_invalid_id(
+        self,
+        test_client_admin,
+        mock_server_service,
+        mock_nginx_service,
+        mock_nginx_reload_scheduler,
+        mock_health_service,
+    ):
+        """A blank-after-strip supplied id is rejected with 422 (#1276).
+
+        The /register form route has no Pydantic model, so resolve_asset_id is
+        the only id validation -- the route maps InvalidAssetIdError to 422.
+        The flag is enabled so this exercises the blank-id path, not the gate.
+        """
+        with (
+            patch(
+                "registry.auth.dependencies.user_has_ui_permission_for_service", return_value=True
+            ),
+            patch("registry.api.server_routes.settings.allow_caller_supplied_asset_id", True),
+        ):
+            response = test_client_admin.post(
+                "/api/register",
+                data={
+                    "name": "Bad Id Server",
+                    "description": "Server with an invalid id",
+                    "path": "/bad-id-server",
+                    "proxy_pass_url": "http://localhost:9000",
+                    "tags": "test",
+                    "num_tools": 0,
+                    "license": "MIT",
+                    "id": "   ",
+                },
+            )
+
+        assert response.status_code == 422
+        mock_server_service.register_server.assert_not_called()
 
     def test_register_api_enforced_status_rejects_mismatch(
         self,
@@ -1366,9 +1514,18 @@ class TestInternalRegister:
             "is_new_version": False,
         }
 
+        def fake_encrypt(entry):
+            entry["auth_credential_encrypted"] = "internal-registration-ciphertext"
+            entry.pop("auth_credential", None)
+            return entry
+
         with (
             patch.dict("os.environ", {"SECRET_KEY": "testpass"}),
             patch("registry.utils.scopes_manager.update_server_scopes", new_callable=AsyncMock),
+            patch(
+                "registry.api.server_routes.encrypt_credential_in_server_dict",
+                side_effect=fake_encrypt,
+            ),
         ):
             token = generate_internal_token(subject="test-service", purpose="test")
             # Act
@@ -1381,6 +1538,8 @@ class TestInternalRegister:
                     "proxy_pass_url": "http://localhost:9000",
                     "tags": "internal",
                     "num_tools": 3,
+                    "auth_scheme": "bearer",
+                    "auth_credential": "internal-registration-plaintext",
                 },
                 headers={"Authorization": f"Bearer {token}"},
             )
@@ -1389,7 +1548,82 @@ class TestInternalRegister:
             assert response.status_code == 201
             data = response.json()
             assert data["message"] == "Service registered successfully"
+            persisted = mock_server_service.register_server.call_args.args[0]
+            assert persisted["auth_credential_encrypted"] == "internal-registration-ciphertext"
+            serialized = str(data)
+            assert "auth_credential_encrypted" not in serialized
+            assert "internal-registration-ciphertext" not in serialized
+            assert "internal-registration-plaintext" not in serialized
             mock_server_service.register_server.assert_called_once()
+
+    def test_internal_register_does_not_log_proxy_url_at_info_or_warning(
+        self,
+        test_client_no_auth,
+        mock_server_service,
+        mock_nginx_service,
+        mock_health_service,
+        caplog,
+    ):
+        """The internal-register trace lines are DEBUG, and any URL is redacted.
+
+        The developer trace lines (previously WARNING with a TODO marker) must
+        not emit the backend proxy_pass_url at INFO/WARNING, and where the URL
+        is logged at DEBUG its credential userinfo and query secret must be
+        stripped.
+        """
+        mock_server_service.register_server.return_value = {
+            "success": True,
+            "message": "Server registered successfully",
+            "is_new_version": False,
+        }
+
+        # userinfo credentials + a query-string secret that must never be logged.
+        proxy_url = "http://user:s3cr3t@backend.internal:9000/mcp?token=leakme"
+
+        with (
+            patch.dict("os.environ", {"SECRET_KEY": "testpass"}),
+            patch("registry.utils.scopes_manager.update_server_scopes", new_callable=AsyncMock),
+        ):
+            token = generate_internal_token(subject="test-service", purpose="test")
+            caplog.set_level(logging.DEBUG, logger="registry.api.server_routes")
+            response = test_client_no_auth.post(
+                "/api/internal/register",
+                data={
+                    "name": "Internal Server",
+                    "description": "Registered internally",
+                    "path": "/internal-server",
+                    "proxy_pass_url": proxy_url,
+                    "tags": "internal",
+                    "num_tools": 3,
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert response.status_code == 201
+
+        higher_records = [
+            r
+            for r in caplog.records
+            if r.name == "registry.api.server_routes" and r.levelno >= logging.INFO
+        ]
+        higher_text = "\n".join(r.getMessage() for r in higher_records)
+        # The raw URL, its userinfo, and its query secret must never surface at
+        # INFO or WARNING.
+        assert proxy_url not in higher_text
+        assert "s3cr3t" not in higher_text
+        assert "leakme" not in higher_text
+
+        # At DEBUG the URL may appear, but only in redacted form: scheme://host/path,
+        # with no credentials or query string.
+        debug_records = [
+            r
+            for r in caplog.records
+            if r.name == "registry.api.server_routes" and r.levelno == logging.DEBUG
+        ]
+        debug_text = "\n".join(r.getMessage() for r in debug_records)
+        assert "s3cr3t" not in debug_text
+        assert "leakme" not in debug_text
+        assert "http://backend.internal:9000/mcp" in debug_text
 
     def test_internal_register_missing_auth_header(self, test_client_no_auth):
         """Test internal registration fails without Authorization header."""
@@ -1625,6 +1859,81 @@ class TestInternalRemove:
             # Assert
             assert response.status_code == 200
             mock_server_service.remove_server.assert_called_once_with("/test-server")
+
+
+# =============================================================================
+# TEST POST /servers/remove - Ownership guard
+# =============================================================================
+
+
+@pytest.mark.unit
+@pytest.mark.api
+@pytest.mark.servers
+class TestRemoveServiceOwnership:
+    """Deleting a server must require ownership (or admin) in addition to the
+    delete_service permission, matching the update family. Permission alone is
+    not sufficient, and a missing owner fails closed for a non-admin."""
+
+    def _owned_server(self, owner: str) -> dict[str, Any]:
+        return {
+            "server_name": "test-server",
+            "path": "/test-server",
+            "proxy_pass_url": "http://localhost:8080",
+            "registered_by": owner,
+        }
+
+    def test_non_owner_non_admin_denied(self, test_client_regular, mock_server_service):
+        # regular user is "testuser"; server owned by someone else.
+        mock_server_service.get_server_info.return_value = self._owned_server("someoneelse")
+
+        with patch("registry.api.server_routes.user_has_asset_permission", return_value=True):
+            response = test_client_regular.post(
+                "/api/servers/remove", data={"path": "/test-server"}
+            )
+
+        assert response.status_code == 403
+        assert "registered" in response.json()["reason"].lower()
+        mock_server_service.remove_server.assert_not_called()
+
+    def test_owner_allowed(self, test_client_regular, mock_server_service):
+        mock_server_service.get_server_info.return_value = self._owned_server("testuser")
+        mock_server_service.remove_server.return_value = True
+
+        with patch("registry.api.server_routes.user_has_asset_permission", return_value=True):
+            response = test_client_regular.post(
+                "/api/servers/remove", data={"path": "/test-server"}
+            )
+
+        assert response.status_code == 200
+        mock_server_service.remove_server.assert_called_once_with("/test-server")
+
+    def test_admin_non_owner_allowed(self, test_client_admin, mock_server_service):
+        # admin bypasses both permission and ownership.
+        mock_server_service.get_server_info.return_value = self._owned_server("someoneelse")
+        mock_server_service.remove_server.return_value = True
+
+        response = test_client_admin.post("/api/servers/remove", data={"path": "/test-server"})
+
+        assert response.status_code == 200
+        mock_server_service.remove_server.assert_called_once_with("/test-server")
+
+    def test_missing_registered_by_denied_for_non_admin(
+        self, test_client_regular, mock_server_service
+    ):
+        # Fail closed: no registered_by means ownership cannot be established.
+        server = self._owned_server("testuser")
+        del server["registered_by"]
+        mock_server_service.get_server_info.return_value = server
+
+        with patch(
+            "registry.auth.dependencies.user_has_ui_permission_for_service", return_value=True
+        ):
+            response = test_client_regular.post(
+                "/api/servers/remove", data={"path": "/test-server"}
+            )
+
+        assert response.status_code == 403
+        mock_server_service.remove_server.assert_not_called()
 
 
 # =============================================================================
@@ -2725,6 +3034,70 @@ class TestInternalRegisterMetadata:
         assert any("coerced to {}" in rec.message for rec in caplog.records)
 
 
+class TestServersRegisterAPISuppliedId:
+    """POST /api/servers/register honoring a caller-supplied asset id (#1276).
+
+    This JSON route has no Pydantic model guarding it, so resolve_asset_id is
+    the only id validation — a supplied id flows through verbatim and a blank
+    one is mapped to 422 by the route's explicit InvalidAssetIdError handler.
+    """
+
+    _BASE_FORM = {
+        "name": "Id Server",
+        "description": "Supplied-id round-trip test",
+        "path": "/id-server",
+        "proxy_pass_url": "http://localhost:9000",
+    }
+
+    @staticmethod
+    def _stored(mock_server_service):
+        call_args = mock_server_service.register_server.call_args
+        return call_args.args[0] if call_args.args else call_args.kwargs.get("server_entry")
+
+    def test_register_honors_supplied_id(self, test_client_admin, mock_server_service):
+        supplied_id = "arn:aws:bedrock:us-east-1:123456789012:server/my-server"
+        with patch("registry.api.server_routes.settings.allow_caller_supplied_asset_id", True):
+            response = test_client_admin.post(
+                "/api/servers/register",
+                data={**self._BASE_FORM, "id": supplied_id},
+            )
+        assert response.status_code == 201
+        assert self._stored(mock_server_service)["id"] == supplied_id
+
+    def test_register_omitted_id_autogenerates_uuid(self, test_client_admin, mock_server_service):
+        # Omitting the id is always allowed even with the flag off (default).
+        response = test_client_admin.post("/api/servers/register", data=self._BASE_FORM)
+        assert response.status_code == 201
+        # No id supplied -> a uuid4 string is generated (preserves old behavior)
+        from uuid import UUID
+
+        generated = self._stored(mock_server_service)["id"]
+        assert UUID(generated).version == 4
+
+    def test_register_rejects_blank_id(self, test_client_admin, mock_server_service):
+        with patch("registry.api.server_routes.settings.allow_caller_supplied_asset_id", True):
+            response = test_client_admin.post(
+                "/api/servers/register",
+                data={**self._BASE_FORM, "id": "   "},
+            )
+        assert response.status_code == 422
+        mock_server_service.register_server.assert_not_called()
+
+    def test_register_rejects_supplied_id_when_flag_disabled(
+        self, test_client_admin, mock_server_service
+    ):
+        # Fail-closed (#1276): a supplied id is a 422 while the flag is off,
+        # and the service is never called.
+        supplied_id = "arn:aws:bedrock:us-east-1:123456789012:server/my-server"
+        with patch("registry.api.server_routes.settings.allow_caller_supplied_asset_id", False):
+            response = test_client_admin.post(
+                "/api/servers/register",
+                data={**self._BASE_FORM, "id": supplied_id},
+            )
+        assert response.status_code == 422
+        mock_server_service.register_server.assert_not_called()
+
+
 # =============================================================================
 # TESTS — Read-side metadata normalization on GET /api/servers/{path} (#1165 follow-up)
 # =============================================================================
@@ -3020,7 +3393,7 @@ class TestToggleApiAuthorization:
         mock_server_service.user_can_access_server_path = AsyncMock(return_value=True)
         mock_server_service.toggle_service.return_value = True
         with patch(
-            "registry.auth.dependencies.user_has_ui_permission_for_service",
+            "registry.api.server_routes.user_has_asset_permission",
             return_value=True,
         ):
             response = test_client_regular.post(
@@ -3231,7 +3604,7 @@ class TestServerModifyOwnership:
         """The owner with modify_service may rewrite their own credential."""
         mock_server_service.get_server_info.return_value = dict(self._OWNED)
         with patch(
-            "registry.auth.dependencies.user_has_ui_permission_for_service",
+            "registry.api.server_routes.user_has_asset_permission",
             return_value=True,
         ):
             response = test_client_regular.patch(

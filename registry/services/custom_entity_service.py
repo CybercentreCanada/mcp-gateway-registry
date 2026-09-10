@@ -315,9 +315,7 @@ class CustomEntityService:
         if existing is None or not _user_can_view(existing, user_context):
             raise CustomEntityNotFoundError(path)  # 404 — don't disclose existence
 
-        updated_details, _ = update_rating_details(
-            list(existing.rating_details), username, rating
-        )
+        updated_details, _ = update_rating_details(list(existing.rating_details), username, rating)
         average = calculate_average_rating(updated_details)
         updated = await self._get_entities().update(
             path,
@@ -348,12 +346,22 @@ class CustomEntityService:
         skip: int,
         limit: int,
         user_context: dict,
+        restrict_paths: list[str] | None = None,
     ) -> tuple[list[CustomEntityRecord], int]:
         """List records of a type with in-query visibility filtering.
 
         Returns (page_slice, total_count) where total_count is the number of
         records THIS user can see — both use the SAME filter so the count
         matches the slice.
+
+        The discovery grant and the per-record visibility filter compose here:
+
+        - ``restrict_paths=None`` — whole-type access (grant is ``"all"``/type
+          name, or admin). Only the per-record visibility filter applies.
+        - ``restrict_paths=[...]`` — the caller holds only specific records of
+          this type (record-scoped ``list_<type>_entity``). The result is
+          additionally constrained to those record paths, intersected with the
+          visibility filter. An empty list yields no records.
         """
         # Read path: a list page tolerates brief cross-replica staleness, so
         # use the TTL cache rather than an authoritative Mongo read per page.
@@ -361,7 +369,21 @@ class CustomEntityService:
         if descriptor is None:
             raise UnknownCustomTypeError(type_name)
         visibility_filter = _build_visibility_filter(user_context)
+
+        if restrict_paths is not None:
+            # Intersect the granted record paths with the visibility filter.
+            # `_id` is the synthetic record path. Combine with $and so neither
+            # clause clobbers the other (visibility_filter is None for admins,
+            # but admins never pass restrict_paths, so this branch is non-admin).
+            path_clause: dict = {"_id": {"$in": restrict_paths}}
+            if visibility_filter:
+                combined_filter: dict | None = {"$and": [path_clause, visibility_filter]}
+            else:
+                combined_filter = path_clause
+        else:
+            combined_filter = visibility_filter
+
         entities = self._get_entities()
-        items = await entities.list_paginated(type_name, skip, limit, visibility_filter)
-        total = await entities.count(type_name, visibility_filter)
+        items = await entities.list_paginated(type_name, skip, limit, combined_filter)
+        total = await entities.count(type_name, combined_filter)
         return items, total

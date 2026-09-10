@@ -5,6 +5,7 @@ Tests the NginxConfigService for configuration generation and reload.
 """
 
 import asyncio
+import re
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 from urllib.parse import urlparse
 
@@ -505,6 +506,144 @@ server {
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_a2a_blocks_emitted_when_flag_enabled(
+    nginx_service, sample_servers, mock_health_service, mock_atomic_write
+):
+    """A2A location blocks are rendered when the reverse-proxy flag is on."""
+    template_content = "server {\n    listen 80;\n{{AGENT_LOCATION_BLOCKS}}\n}\n"
+
+    with patch("registry.core.nginx_service.settings") as mock_settings:
+        mock_settings.nginx_updates_enabled = True
+        mock_settings.a2a_reverse_proxy_enabled = True
+        mock_settings.a2a_reverse_proxy_effective = True
+        mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
+        mock_settings.auth_server_url = "http://auth-server:8888"
+        with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
+            with patch("builtins.open", mock_open(read_data=template_content)):
+                with patch("registry.health.service.health_service", mock_health_service):
+                    with patch.object(
+                        nginx_service, "get_additional_server_names", return_value=""
+                    ):
+                        with patch.object(nginx_service, "reload_nginx", return_value=True):
+                            with patch.object(
+                                nginx_service,
+                                "_generate_agent_location_blocks",
+                                new=AsyncMock(return_value="# A2A_BLOCK_SENTINEL"),
+                            ) as gen:
+                                result = await nginx_service.generate_config_async(sample_servers)
+
+    assert result is True
+    gen.assert_awaited_once()
+    written = mock_atomic_write.call_args_list[-1][0][1]
+    assert "# A2A_BLOCK_SENTINEL" in written
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a2a_blocks_skipped_when_flag_disabled(
+    nginx_service, sample_servers, mock_health_service, mock_atomic_write
+):
+    """No A2A blocks are generated when the reverse-proxy flag is off (default)."""
+    template_content = "server {\n    listen 80;\n{{AGENT_LOCATION_BLOCKS}}\n}\n"
+
+    with patch("registry.core.nginx_service.settings") as mock_settings:
+        mock_settings.nginx_updates_enabled = True
+        mock_settings.a2a_reverse_proxy_enabled = False
+        mock_settings.a2a_reverse_proxy_effective = False
+        mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
+        mock_settings.auth_server_url = "http://auth-server:8888"
+        with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
+            with patch("builtins.open", mock_open(read_data=template_content)):
+                with patch("registry.health.service.health_service", mock_health_service):
+                    with patch.object(
+                        nginx_service, "get_additional_server_names", return_value=""
+                    ):
+                        with patch.object(nginx_service, "reload_nginx", return_value=True):
+                            with patch.object(
+                                nginx_service,
+                                "_generate_agent_location_blocks",
+                                new=AsyncMock(return_value="# A2A_BLOCK_SENTINEL"),
+                            ) as gen:
+                                result = await nginx_service.generate_config_async(sample_servers)
+
+    assert result is True
+    gen.assert_not_awaited()
+    written = mock_atomic_write.call_args_list[-1][0][1]
+    assert "# A2A_BLOCK_SENTINEL" not in written
+    assert "{{AGENT_LOCATION_BLOCKS}}" not in written
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_enabling_agent_changes_rendered_config_hash(
+    nginx_service, sample_servers, mock_health_service, mock_atomic_write
+):
+    """Enabling a healthy A2A agent changes the rendered config and its hash.
+
+    Exercises the real render-to-hash path: the agent generator is NOT mocked,
+    so the scheduler's hash-based change detection would see a new hash and
+    trigger an nginx reload once an agent becomes eligible for proxying.
+    """
+    import hashlib
+    from types import SimpleNamespace
+
+    template_content = "server {\n    listen 80;\n{{AGENT_LOCATION_BLOCKS}}\n}\n"
+    healthy_agent = SimpleNamespace(
+        path="/flight-booking-agent",
+        url="https://flight-booking.dev.example.com",
+        name="Flight Booking Agent",
+        supported_protocol="a2a",
+        health_status="healthy",
+    )
+
+    async def _render(enabled_paths, agent_info):
+        with patch("registry.core.nginx_service.settings") as mock_settings:
+            mock_settings.nginx_updates_enabled = True
+            mock_settings.a2a_reverse_proxy_enabled = True
+            mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
+            mock_settings.auth_server_url = "http://auth-server:8888"
+            with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
+                with patch("builtins.open", mock_open(read_data=template_content)):
+                    with patch("registry.health.service.health_service", mock_health_service):
+                        with patch.object(
+                            nginx_service, "get_additional_server_names", return_value=""
+                        ):
+                            with patch.object(nginx_service, "reload_nginx", return_value=True):
+                                with (
+                                    patch(
+                                        "registry.services.agent_service.agent_service"
+                                    ) as mock_agent_svc,
+                                    # The backend DNS resolvability guard is an
+                                    # environmental dependency; stub it True so the
+                                    # test exercises the render path deterministically.
+                                    patch.object(
+                                        type(nginx_service),
+                                        "_agent_backend_resolves",
+                                        AsyncMock(return_value=True),
+                                    ),
+                                ):
+                                    mock_agent_svc.get_enabled_agents = AsyncMock(
+                                        return_value=enabled_paths
+                                    )
+                                    mock_agent_svc.get_agent_info = AsyncMock(
+                                        return_value=agent_info
+                                    )
+                                    await nginx_service.generate_config_async(sample_servers)
+        return mock_atomic_write.call_args_list[-1][0][1]
+
+    without_agent = await _render([], None)
+    with_agent = await _render(["/flight-booking-agent"], healthy_agent)
+
+    assert "/agent/flight-booking-agent/" not in without_agent
+    assert "/agent/flight-booking-agent/" in with_agent
+    assert (
+        hashlib.sha256(without_agent.encode()).hexdigest()
+        != hashlib.sha256(with_agent.encode()).hexdigest()
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_generate_config_async_template_not_found(nginx_service, sample_servers):
     """Test configuration generation when template is not found."""
     with patch.object(nginx_service.nginx_template_path, "exists", return_value=False):
@@ -787,6 +926,12 @@ def test_create_location_block_streamable_http(nginx_service):
     # capture + forward the /validate-minted internal token.
     assert "auth_request_set $auth_internal_token $upstream_http_x_internal_token" in block
     assert "proxy_set_header X-Internal-Token $auth_internal_token" in block
+    # Rate-limit passthrough (issue #295): capture the throttle marker + headers so
+    # @forbidden_error can rewrite a throttle-403 into a real 429 + Retry-After.
+    assert "auth_request_set $rl_throttled $upstream_http_x_ratelimit_throttled" in block
+    assert "auth_request_set $rl_limit $upstream_http_x_ratelimit_limit" in block
+    assert "auth_request_set $rl_reset $upstream_http_x_ratelimit_reset" in block
+    assert "auth_request_set $rl_retry $upstream_http_retry_after" in block
     assert "proxy_buffering off" in block
     assert "auth_request /validate" in block
     # Upstream timeouts derived from MCP_PROXY_TIMEOUT so long-running MCP tool
@@ -858,8 +1003,59 @@ def test_create_location_block_direct_transport(nginx_service):
     assert "proxy_cache off" in block
 
 
-# =============================================================================
-# KEYCLOAK CONFIGURATION TESTS
+@pytest.mark.unit
+def test_create_location_block_appends_trailing_slash(nginx_service):
+    """Issue #1501: a server path without a trailing slash must render as a
+    trailing-slash location so nginx does a subtree prefix match (`/a/`) instead
+    of hijacking any URL that merely starts with the path (`/a` matches /api/...).
+    """
+    block = nginx_service._create_location_block(
+        "/a", "http://localhost:8000/mcp", "streamable-http"
+    )
+
+    # The location directive is normalised to end with a slash ...
+    assert "location {{ROOT_PATH}}/a/ {" in block
+    # ... and must NOT emit the bare-path form that prefix-matches /api, /auth, etc.
+    assert "location {{ROOT_PATH}}/a {" not in block
+
+
+@pytest.mark.unit
+def test_create_location_block_preserves_single_trailing_slash(nginx_service):
+    """A path already ending in a slash stays a single-slash location (no `//`)."""
+    block = nginx_service._create_location_block(
+        "/test/", "http://localhost:8000/mcp", "streamable-http"
+    )
+
+    assert "location {{ROOT_PATH}}/test/ {" in block
+    assert "location {{ROOT_PATH}}/test// {" not in block
+
+
+@pytest.mark.unit
+def test_create_location_block_normalises_multi_segment_path(nginx_service):
+    """A multi-segment path (e.g. a peer-registry namespaced server) keeps its
+    inner segments and only gains a single trailing slash."""
+    block = nginx_service._create_location_block(
+        "/peer-registry/server-name", "http://localhost:8000/mcp", "streamable-http"
+    )
+
+    assert "location {{ROOT_PATH}}/peer-registry/server-name/ {" in block
+    assert "location {{ROOT_PATH}}/peer-registry/server-name {" not in block
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["/", "//", "///", ""])
+def test_generate_transport_location_blocks_skips_empty_path(nginx_service, path):
+    """Issue #1501 render-time mirror of validate_server_path: a persisted path
+    that normalizes to empty (bypassed registration validation) must NOT render
+    a gateway-wide `location /` block. The offending server is skipped; the rest
+    of the config is unaffected."""
+    blocks = nginx_service._generate_transport_location_blocks(
+        path, {"proxy_pass_url": "http://localhost:8000/mcp"}
+    )
+
+    assert blocks == []
+
+
 # =============================================================================
 
 
@@ -1191,25 +1387,35 @@ server {
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_generate_config_async_keycloak_url_parse_exception(
+async def test_generate_config_async_keycloak_bad_port_preserves_https_scheme(
     nginx_service, sample_servers, mock_health_service, mock_atomic_write
 ):
-    """Test Keycloak URL parsing falls back to defaults on exception."""
+    """A malformed port in an https KEYCLOAK_URL must NOT silently downgrade to http.
+
+    Finding A regression guard: ``urlparse(...).port`` raises ValueError for an
+    out-of-range port. The old code caught that and reset the scheme to http,
+    which silently dropped the fail-closed proxy_ssl_verify block (no TLS
+    verification) for a config the operator INTENDED to be https. The fix parses
+    the scheme first and only falls back the PORT (to the scheme default),
+    keeping scheme=https so the renderer still emits verify-on.
+    """
     template_content = """
 server {
-    {{KEYCLOAK_SCHEME}}://{{KEYCLOAK_HOST}}:{{KEYCLOAK_PORT}}
+    proxy_pass {{KEYCLOAK_SCHEME}}://{{KEYCLOAK_HOST}}:{{KEYCLOAK_PORT}};
+    {{KEYCLOAK_PROXY_SSL}}
     {{LOCATION_BLOCKS}}
 }
 """
 
     env_values = {
         "AUTH_PROVIDER": "keycloak",
-        "KEYCLOAK_URL": "http://keycloak:8080",
+        # Out-of-range port -> urlparse(...).port raises ValueError.
+        "KEYCLOAK_URL": "https://keycloak.example.com:99999",
         "NGINX_DISABLE_API_AUTH_REQUEST": "false",
     }
 
     with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
-        with patch("builtins.open", mock_open(read_data=template_content)) as mock_file:
+        with patch("builtins.open", mock_open(read_data=template_content)):
             with patch("registry.health.service.health_service", mock_health_service):
                 mock_health_service.server_health_status = {}
 
@@ -1219,19 +1425,16 @@ server {
                             "os.environ.get",
                             side_effect=lambda key, default=None: env_values.get(key, default),
                         ):
-                            # Force urlparse to raise an exception
-                            with patch(
-                                "registry.core.nginx_service.urlparse",
-                                side_effect=Exception("parse error"),
-                            ):
-                                result = await nginx_service.generate_config_async(sample_servers)
+                            result = await nginx_service.generate_config_async(sample_servers)
 
-                                assert result is True
-                                written_content = mock_atomic_write.call_args_list[0][0][1]
-                                # Should fall back to defaults
-                                assert "http" in written_content
-                                assert "keycloak" in written_content
-                                assert "8080" in written_content
+                            assert result is True
+                            written_content = mock_atomic_write.call_args_list[0][0][1]
+                            # Scheme preserved as https (NOT downgraded to http),
+                            # port falls back to the https default 443, and the
+                            # fail-closed TLS block is still rendered.
+                            assert "https://keycloak.example.com:443" in written_content
+                            assert "proxy_ssl_verify on;" in written_content
+                            assert "proxy_ssl_verify off" not in written_content
 
 
 # =============================================================================
@@ -1545,6 +1748,27 @@ def test_generated_protected_api_block_carries_internal_token():
     assert "proxy_set_header X-Internal-Token-Registry $auth_internal_token_registry;" in src
 
 
+def test_unprotected_api_block_still_rate_limited():
+    """When auth_request is bypassed (NGINX_DISABLE_API_AUTH_REQUEST=true), the
+    replacement /api/ block must STILL carry the inbound rate limits — /api/ is
+    the highest-volume surface and dropping the edge/registration caps here would
+    reopen the flood path the limits exist to close.
+    """
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[3] / "registry" / "core" / "nginx_service.py"
+    ).read_text()
+    # Isolate the unprotected replacement block so we assert on IT, not the
+    # protected block elsewhere in the file.
+    marker = "unprotected_api_block = "
+    assert marker in src
+    unprotected = src[src.index(marker) : src.index('"""', src.index(marker) + len(marker) + 4) + 3]
+    assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in unprotected
+    assert "limit_req zone=mcp_gateway_register burst=10 nodelay;" in unprotected
+    assert "limit_conn mcp_gateway_conn 100;" in unprotected
+
+
 @pytest.mark.unit
 class TestResolveMcpProxyReadTimeout:
     """Tests for the nginx MCP proxy_read_timeout derivation helper.
@@ -1854,3 +2078,530 @@ async def test_scheduler_rejects_invalid_config_and_keeps_last_good(monkeypatch,
     assert scheduler._last_config_hash == ""
     reload_mock.assert_not_called()
     assert scheduler._dirty is True
+
+
+# =============================================================================
+# Inbound rate limiting (DoS protection for the shared /validate subrequest)
+# =============================================================================
+
+from pathlib import Path  # noqa: E402
+
+_DOCKER_DIR = Path(__file__).resolve().parents[3] / "docker"
+_HTTP_ONLY_CONF = _DOCKER_DIR / "nginx_rev_proxy_http_only.conf"
+_HTTP_AND_HTTPS_CONF = _DOCKER_DIR / "nginx_rev_proxy_http_and_https.conf"
+
+
+@pytest.mark.unit
+def test_generated_mcp_proxy_block_is_rate_limited(nginx_service):
+    """Generated /mcp-proxy/ location blocks must carry the inbound edge limits.
+
+    Every MCP request fans out to the shared /validate auth subrequest; without
+    an inbound limit_req/limit_conn a flood on one server's path exhausts
+    /validate for all servers.
+    """
+    for transport in ("streamable-http", "sse", "direct"):
+        block = nginx_service._create_location_block(
+            "/test", "http://localhost:8000/mcp", transport
+        )
+        assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in block, transport
+        assert "limit_conn mcp_gateway_conn 100;" in block, transport
+        # The limit must sit inside the location, before auth_request (so the
+        # fan-out is bounded), never on the /validate subrequest itself.
+        assert block.index("limit_req") < block.index("auth_request /validate")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_generated_virtual_server_block_is_rate_limited(nginx_service):
+    """Client-facing virtual-server blocks must also carry the inbound limits."""
+
+    class _VS:
+        path = "/virtual/dev-essentials"
+        server_name = "Dev Essentials"
+
+    repo = MagicMock()
+    repo.list_enabled = AsyncMock(return_value=[_VS()])
+    with patch(
+        "registry.repositories.factory.get_virtual_server_repository",
+        return_value=repo,
+    ):
+        blocks = await nginx_service._generate_virtual_server_blocks()
+
+    assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in blocks
+    assert "limit_conn mcp_gateway_conn 100;" in blocks
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_declares_rate_limit_zones(conf_path):
+    """Both nginx conf templates must declare the rate-limit zones at http scope."""
+    text = conf_path.read_text()
+    assert "limit_req_zone $binary_remote_addr zone=mcp_gateway_edge:10m rate=50r/s;" in text
+    assert (
+        "limit_req_zone $mcp_gateway_register_key zone=mcp_gateway_register:10m rate=5r/s;" in text
+    )
+    assert "limit_conn_zone $binary_remote_addr zone=mcp_gateway_conn:10m;" in text
+    assert "limit_req_zone $binary_remote_addr zone=mcp_gateway_wellknown:5m rate=2r/s;" in text
+    # Registration classifier map + fail-safe empty default (skip when non-register).
+    assert "map $uri $mcp_gateway_register_key {" in text
+    assert re.search(r'default\s+"";', text)
+    # Registration patterns must allow an optional trailing slash so a request to
+    # /api/register/ cannot bypass the stricter registration cap (only the generous
+    # edge limit would apply). Match must be anchored to the register path suffix.
+    for register_path in ("register", "servers/register", "internal/register"):
+        assert f'"~*/api/{register_path}/?$"' in text, (
+            f"register classifier for /api/{register_path} must accept an optional "
+            "trailing slash to prevent a trailing-slash throttle bypass"
+        )
+    # 429 status so clients back off.
+    assert "limit_req_status 429;" in text
+    assert "limit_conn_status 429;" in text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_applies_edge_limit_on_general_api_location(conf_path):
+    """The general /api/ location (covers registration) must carry both limits."""
+    text = conf_path.read_text()
+    # Locate the general /api/ location body and assert the limits are inside it.
+    marker = "location {{ROOT_PATH}}/api/ {"
+    assert marker in text
+    idx = text.index(marker)
+    body = text[idx : idx + 800]
+    assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in body
+    # Registration endpoints (/api/register, /api/servers/register,
+    # /api/internal/register) fall through this location and get the tighter cap.
+    assert "limit_req zone=mcp_gateway_register burst=10 nodelay;" in body
+    assert "limit_conn mcp_gateway_conn 100;" in body
+
+
+def _assert_all_locations_rate_limited(
+    text: str,
+    marker: str,
+    expected_count: int,
+) -> None:
+    """Assert every occurrence of a location marker carries the edge limits.
+
+    Uses an EXACT expected count (not ``>= 1``) so that deleting one of the
+    duplicated server blocks in the http+https template — which has two listeners
+    (:8080 and :8443) — fails the test instead of silently passing on the survivor.
+    """
+    assert text.count(marker) == expected_count, (
+        f"expected {expected_count} occurrence(s) of {marker!r}, found {text.count(marker)}"
+    )
+    start = 0
+    seen = 0
+    while True:
+        idx = text.find(marker, start)
+        if idx == -1:
+            break
+        seen += 1
+        body = text[idx : idx + 800]
+        assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in body, (
+            f"{marker!r} occurrence {seen} is missing the edge rate limit"
+        )
+        assert "limit_conn mcp_gateway_conn 100;" in body, (
+            f"{marker!r} occurrence {seen} is missing the connection limit"
+        )
+        start = idx + len(marker)
+    assert seen == expected_count
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conf_path", "expected_count"),
+    [(_HTTP_ONLY_CONF, 1), (_HTTP_AND_HTTPS_CONF, 2)],
+)
+def test_conf_rate_limits_exact_match_auth_me_location(conf_path, expected_count):
+    """The exact-match /api/auth/me location fans out to /validate too.
+
+    Being an exact match it does NOT fall through to the rate-limited /api/
+    prefix, so every instance must carry its own edge limit. The http+https
+    template renders it twice (one per listener); assert the exact count so a
+    dropped instance is caught.
+    """
+    _assert_all_locations_rate_limited(
+        conf_path.read_text(),
+        "location = {{ROOT_PATH}}/api/auth/me {",
+        expected_count,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conf_path", "expected_count"),
+    [(_HTTP_ONLY_CONF, 1), (_HTTP_AND_HTTPS_CONF, 2)],
+)
+def test_conf_rate_limits_ard_location(conf_path, expected_count):
+    """The ^~ /api/ard/ location has its own auth_request /validate fan-out.
+
+    It uses ^~ priority over the general /api/ prefix, so it does not inherit the
+    /api/ limits and must carry its own.
+    """
+    _assert_all_locations_rate_limited(
+        conf_path.read_text(),
+        "location ^~ {{ROOT_PATH}}/api/ard/ {",
+        expected_count,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conf_path", "expected_count"),
+    [(_HTTP_ONLY_CONF, 1), (_HTTP_AND_HTTPS_CONF, 2)],
+)
+def test_conf_rate_limits_anthropic_api_location(conf_path, expected_count):
+    """The Anthropic-API version location fans out to /validate and must be capped."""
+    _assert_all_locations_rate_limited(
+        conf_path.read_text(),
+        "location {{ROOT_PATH}}/{{ANTHROPIC_API_VERSION}}/ {",
+        expected_count,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_does_not_rate_limit_validate_subrequest(conf_path):
+    """The internal /validate subrequest must NOT be rate-limited directly.
+
+    Limiting the fan-out target would throttle legitimate authenticated traffic;
+    the bound belongs on the inbound edge locations instead.
+    """
+    text = conf_path.read_text()
+    marker = "location = /validate {"
+    assert marker in text
+    idx = text.index(marker)
+    # /validate body ends at the next top-level 4-space-indented closing brace;
+    # grab a generous window and assert no limit_req/limit_conn inside it.
+    body = text[idx : idx + 1600]
+    # Trim at the block's closing to avoid spilling into the next location.
+    end = body.find("\n    }")
+    body = body[: end if end != -1 else len(body)]
+    assert "limit_req" not in body
+    assert "limit_conn" not in body
+
+
+# =============================================================================
+# PingFederate upstream TLS verification (MITM / auth-bypass guard)
+# =============================================================================
+#
+# The nginx -> PingFederate runtime reverse proxy carries the token exchange,
+# JWKS, and OIDC discovery. If nginx does not verify the upstream cert over TLS,
+# a MITM can substitute JWKS (forge tokens) or intercept the token exchange =
+# authentication bypass for every PingFederate user. The intent pinned here:
+# when the upstream is https, verification is ON with a trusted CA bundle, and
+# the rendered/static config NEVER contains `proxy_ssl_verify off` for these
+# locations. Same class as the internal-mtls and lambda-tls verify-off fixes.
+
+# Marker comments delimiting the PingFederate location blocks in both confs.
+_PF_START_MARKER = "# {{PINGFEDERATE_LOCATIONS_START}}"
+_PF_END_MARKER = "# {{PINGFEDERATE_LOCATIONS_END}}"
+
+
+def _pingfederate_block_bodies(text: str) -> list[str]:
+    """Return every PingFederate location block body from a conf template.
+
+    The http+https template carries two copies (one per listener), so this
+    returns a list and callers assert against all of them.
+    """
+    bodies = []
+    start = 0
+    while True:
+        s = text.find(_PF_START_MARKER, start)
+        if s == -1:
+            break
+        e = text.find(_PF_END_MARKER, s)
+        assert e != -1, "unbalanced PingFederate location markers"
+        bodies.append(text[s:e])
+        start = e + len(_PF_END_MARKER)
+    return bodies
+
+
+@pytest.mark.unit
+def test_render_pingfederate_proxy_ssl_https_is_fail_closed():
+    """When the upstream scheme is https, verification MUST be ON with a CA bundle.
+
+    This is the core invariant: a MITM cannot present an untrusted cert because
+    proxy_ssl_verify is enforced and a trusted CA bundle is pinned. Hostname
+    verification (SNI + proxy_ssl_name) binds the cert to the configured host.
+    """
+    rendered = nginx_module._render_pingfederate_proxy_ssl("https", "pf.example.com")
+    assert "proxy_ssl_verify on;" in rendered
+    assert "proxy_ssl_verify off" not in rendered
+    assert "proxy_ssl_trusted_certificate " in rendered
+    assert "proxy_ssl_server_name on;" in rendered
+    assert "proxy_ssl_name pf.example.com;" in rendered
+
+
+@pytest.mark.unit
+def test_render_pingfederate_proxy_ssl_https_uses_configured_ca_bundle(monkeypatch):
+    """The CA bundle path is operator-configurable via PINGFEDERATE_CA_BUNDLE."""
+    monkeypatch.setenv("PINGFEDERATE_CA_BUNDLE", "/custom/pf-root.pem")
+    rendered = nginx_module._render_pingfederate_proxy_ssl("https", "pf.example.com")
+    assert "proxy_ssl_trusted_certificate /custom/pf-root.pem;" in rendered
+
+
+@pytest.mark.unit
+def test_render_pingfederate_proxy_ssl_https_defaults_ca_bundle(monkeypatch):
+    """With no env override, a documented default CA bundle path is emitted."""
+    monkeypatch.delenv("PINGFEDERATE_CA_BUNDLE", raising=False)
+    rendered = nginx_module._render_pingfederate_proxy_ssl("https", "pf.example.com")
+    assert (
+        f"proxy_ssl_trusted_certificate {nginx_module._PINGFEDERATE_CA_BUNDLE_DEFAULT};" in rendered
+    )
+
+
+@pytest.mark.unit
+def test_render_pingfederate_proxy_ssl_http_does_not_disable_verification():
+    """An http upstream has nothing to verify, but must NOT emit `proxy_ssl_verify off`.
+
+    Emitting verify-off would be dead config for http and a latent footgun if the
+    scheme later flips to https; instead we emit only an explanatory comment.
+    """
+    rendered = nginx_module._render_pingfederate_proxy_ssl("http", "pingfederate")
+    assert "proxy_ssl_verify off" not in rendered
+    assert "proxy_ssl_verify on" not in rendered
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_pingfederate_blocks_never_disable_ssl_verify(conf_path):
+    """Neither static conf may hardcode `proxy_ssl_verify off` in a PingFederate block.
+
+    Regression guard for the two duplicated templates: the fix must not silently
+    persist in one file while the other keeps the MITM hole. The blocks use the
+    {{PINGFEDERATE_PROXY_SSL}} placeholder that nginx_service renders fail-closed.
+    """
+    text = conf_path.read_text()
+    bodies = _pingfederate_block_bodies(text)
+    assert bodies, f"{conf_path.name}: no PingFederate location blocks found"
+    for body in bodies:
+        assert "proxy_ssl_verify off" not in body, (
+            f"{conf_path.name}: a PingFederate location still disables TLS "
+            f"verification (proxy_ssl_verify off) -- MITM/auth-bypass hole."
+        )
+        assert "{{PINGFEDERATE_PROXY_SSL}}" in body, (
+            f"{conf_path.name}: PingFederate blocks must use the "
+            f"{{{{PINGFEDERATE_PROXY_SSL}}}} placeholder rendered by nginx_service."
+        )
+
+
+@pytest.mark.unit
+def test_conf_templates_have_no_leftover_proxy_ssl_verify_off():
+    """No nginx conf template anywhere should hardcode `proxy_ssl_verify off`."""
+    for conf_path in (_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF):
+        assert "proxy_ssl_verify off" not in conf_path.read_text(), (
+            f"{conf_path.name} still contains a hardcoded `proxy_ssl_verify off`."
+        )
+
+
+# =============================================================================
+# Keycloak upstream TLS verification (MITM / auth-bypass guard)
+# =============================================================================
+#
+# The nginx -> Keycloak runtime reverse proxy (/keycloak/, /realms/, /resources/)
+# carries Keycloak's JWKS, token, and OIDC discovery traffic. The shipped default
+# upstream is in-cluster http://keycloak:8080 (plaintext), but an operator may
+# point KEYCLOAK_URL at an https endpoint (BYO Keycloak). If nginx does not verify
+# the upstream cert over TLS, a MITM can substitute JWKS (forge tokens) or
+# intercept the token exchange = authentication bypass for every Keycloak user.
+# Before this fix these locations set NO proxy_ssl_verify directive at all and
+# relied on nginx's insecure DEFAULT-OFF. The intent pinned here: when the
+# upstream is https, verification is ON with a trusted CA bundle, and the
+# rendered/static config NEVER contains `proxy_ssl_verify off` for these
+# locations. Same class as the PingFederate front-channel verify fix.
+
+# Marker comments delimiting the Keycloak location blocks in both confs.
+_KC_START_MARKER = "# {{KEYCLOAK_LOCATIONS_START}}"
+_KC_END_MARKER = "# {{KEYCLOAK_LOCATIONS_END}}"
+
+
+def _keycloak_block_bodies(text: str) -> list[str]:
+    """Return every Keycloak location block body from a conf template.
+
+    The http+https template carries two copies (one per listener), so this
+    returns a list and callers assert against all of them.
+    """
+    bodies = []
+    start = 0
+    while True:
+        s = text.find(_KC_START_MARKER, start)
+        if s == -1:
+            break
+        e = text.find(_KC_END_MARKER, s)
+        assert e != -1, "unbalanced Keycloak location markers"
+        bodies.append(text[s:e])
+        start = e + len(_KC_END_MARKER)
+    return bodies
+
+
+@pytest.mark.unit
+def test_render_keycloak_proxy_ssl_https_is_fail_closed():
+    """When the Keycloak upstream is https, verification MUST be ON with a CA bundle.
+
+    Core invariant: a MITM cannot present an untrusted cert to the Keycloak
+    upstream because verification is enforced when https and a trusted CA bundle
+    is pinned. Hostname verification (SNI + proxy_ssl_name) binds the cert to the
+    configured host.
+    """
+    rendered = nginx_module._render_keycloak_proxy_ssl("https", "keycloak.example.com")
+    assert "proxy_ssl_verify on;" in rendered
+    assert "proxy_ssl_verify off" not in rendered
+    assert "proxy_ssl_trusted_certificate " in rendered
+    assert "proxy_ssl_server_name on;" in rendered
+    assert "proxy_ssl_name keycloak.example.com;" in rendered
+
+
+@pytest.mark.unit
+def test_render_keycloak_proxy_ssl_https_uses_configured_ca_bundle(monkeypatch):
+    """The CA bundle path is operator-configurable via KEYCLOAK_CA_BUNDLE."""
+    monkeypatch.setenv("KEYCLOAK_CA_BUNDLE", "/custom/kc-root.pem")
+    rendered = nginx_module._render_keycloak_proxy_ssl("https", "keycloak.example.com")
+    assert "proxy_ssl_trusted_certificate /custom/kc-root.pem;" in rendered
+
+
+@pytest.mark.unit
+def test_render_keycloak_proxy_ssl_https_defaults_ca_bundle(monkeypatch):
+    """With no env override, a documented default CA bundle path is emitted."""
+    monkeypatch.delenv("KEYCLOAK_CA_BUNDLE", raising=False)
+    rendered = nginx_module._render_keycloak_proxy_ssl("https", "keycloak.example.com")
+    assert f"proxy_ssl_trusted_certificate {nginx_module._KEYCLOAK_CA_BUNDLE_DEFAULT};" in rendered
+
+
+@pytest.mark.unit
+def test_render_keycloak_proxy_ssl_http_does_not_disable_verification():
+    """The in-cluster http default has nothing to verify, but must NOT emit verify-off.
+
+    Emitting verify-off would be dead config for http and a latent footgun if the
+    scheme later flips to https; instead we emit only an explanatory comment.
+    """
+    rendered = nginx_module._render_keycloak_proxy_ssl("http", "keycloak")
+    assert "proxy_ssl_verify off" not in rendered
+    assert "proxy_ssl_verify on" not in rendered
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_keycloak_blocks_never_disable_ssl_verify(conf_path):
+    """Neither static conf may hardcode `proxy_ssl_verify off` in a Keycloak block.
+
+    Regression guard for the two duplicated templates: the fix must not silently
+    persist in one file while the other keeps the MITM hole. The blocks use the
+    {{KEYCLOAK_PROXY_SSL}} placeholder that nginx_service renders fail-closed.
+    """
+    text = conf_path.read_text()
+    bodies = _keycloak_block_bodies(text)
+    assert bodies, f"{conf_path.name}: no Keycloak location blocks found"
+    for body in bodies:
+        assert "proxy_ssl_verify off" not in body, (
+            f"{conf_path.name}: a Keycloak location still disables TLS "
+            f"verification (proxy_ssl_verify off) -- MITM/auth-bypass hole."
+        )
+        assert "{{KEYCLOAK_PROXY_SSL}}" in body, (
+            f"{conf_path.name}: Keycloak upstream blocks must use the "
+            f"{{{{KEYCLOAK_PROXY_SSL}}}} placeholder rendered by nginx_service."
+        )
+
+
+async def _render_real_conf(
+    nginx_service,
+    sample_servers,
+    mock_health_service,
+    mock_atomic_write,
+    conf_path,
+    env_values,
+):
+    """Render a real conf template through generate_config_async and return the output.
+
+    Feeds the on-disk conf template into the genuine ``_render_config_impl`` path
+    (so the ``.replace("{{...PROXY_SSL}}", ...)`` wiring actually runs) and
+    returns the string handed to the atomic writer.
+    """
+    template_content = conf_path.read_text()
+    mock_health_service.server_health_status = {}
+    with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
+        with patch("builtins.open", mock_open(read_data=template_content)):
+            with patch("registry.health.service.health_service", mock_health_service):
+                with patch.object(nginx_service, "get_additional_server_names", return_value=""):
+                    with patch.object(nginx_service, "reload_nginx", return_value=True):
+                        with patch(
+                            "os.environ.get",
+                            side_effect=lambda key, default=None: env_values.get(key, default),
+                        ):
+                            result = await nginx_service.generate_config_async(sample_servers)
+    assert result is True
+    return mock_atomic_write.call_args_list[0][0][1]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+async def test_proxy_ssl_placeholder_is_substituted_end_to_end(
+    conf_path, nginx_service, sample_servers, mock_health_service, mock_atomic_write
+):
+    """The {{*_PROXY_SSL}} placeholders must be substituted by the real render path.
+
+    Finding B: the per-helper unit tests and the static-conf guards prove the
+    helpers render fail-closed and the templates carry the placeholder, but
+    NOTHING pinned the ``.replace("{{...PROXY_SSL}}", ...)`` wiring in
+    ``_render_config_impl``. If that wiring were deleted or the placeholder name
+    typo'd, both existing checks still pass and a literal ``{{KEYCLOAK_PROXY_SSL}}``
+    / ``{{PINGFEDERATE_PROXY_SSL}}`` would survive into the rendered config -- only
+    caught by ``nginx -t`` at deploy (and not even that when the nginx binary is
+    absent and validation is skipped -> broken cold start).
+
+    Because each provider's location blocks are stripped when the other provider
+    is active, this renders the real conf ONCE PER PROVIDER (https Keycloak URL,
+    https PingFederate URL) and asserts for each: (a) ``proxy_ssl_verify on``
+    appears in the rendered output, and (b) NO ``{{...PROXY_SSL}}`` literal
+    placeholder remains anywhere in the rendered output.
+    """
+    # --- Keycloak provider: https KEYCLOAK_URL ---
+    keycloak_env = {
+        "AUTH_PROVIDER": "keycloak",
+        "KEYCLOAK_URL": "https://keycloak.example.com:8443",
+        "NGINX_DISABLE_API_AUTH_REQUEST": "false",
+    }
+    keycloak_rendered = await _render_real_conf(
+        nginx_service,
+        sample_servers,
+        mock_health_service,
+        mock_atomic_write,
+        conf_path,
+        keycloak_env,
+    )
+    assert "proxy_ssl_verify on;" in keycloak_rendered, (
+        f"{conf_path.name} (keycloak): rendered config missing proxy_ssl_verify on -- "
+        "the {{KEYCLOAK_PROXY_SSL}} placeholder was not substituted fail-closed."
+    )
+    assert "proxy_ssl_verify off" not in keycloak_rendered
+    assert "{{KEYCLOAK_PROXY_SSL}}" not in keycloak_rendered, (
+        f"{conf_path.name} (keycloak): {{{{KEYCLOAK_PROXY_SSL}}}} placeholder was NOT "
+        "substituted -- the .replace() wiring in _render_config_impl is broken."
+    )
+
+    mock_atomic_write.reset_mock()
+
+    # --- PingFederate provider: https PINGFEDERATE_BASE_URL ---
+    pingfederate_env = {
+        "AUTH_PROVIDER": "pingfederate",
+        "PINGFEDERATE_BASE_URL": "https://pf.example.com:9031",
+        "NGINX_DISABLE_API_AUTH_REQUEST": "false",
+    }
+    pingfederate_rendered = await _render_real_conf(
+        nginx_service,
+        sample_servers,
+        mock_health_service,
+        mock_atomic_write,
+        conf_path,
+        pingfederate_env,
+    )
+    assert "proxy_ssl_verify on;" in pingfederate_rendered, (
+        f"{conf_path.name} (pingfederate): rendered config missing proxy_ssl_verify on -- "
+        "the {{PINGFEDERATE_PROXY_SSL}} placeholder was not substituted fail-closed."
+    )
+    assert "proxy_ssl_verify off" not in pingfederate_rendered
+    assert "{{PINGFEDERATE_PROXY_SSL}}" not in pingfederate_rendered, (
+        f"{conf_path.name} (pingfederate): {{{{PINGFEDERATE_PROXY_SSL}}}} placeholder was NOT "
+        "substituted -- the .replace() wiring in _render_config_impl is broken."
+    )

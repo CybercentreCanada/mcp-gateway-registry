@@ -74,6 +74,3 @@ class TestDocumentDBMappedGroups:
     async def test_error_returns_empty_set(self, doc_repo, mock_collection):
         mock_collection.find.side_effect = Exception("db error")
         assert await doc_repo.get_all_mapped_group_names() == set()
-
-
-

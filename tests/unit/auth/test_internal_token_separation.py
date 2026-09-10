@@ -82,12 +82,16 @@ class TestInternalTokenSeparation:
 
         ``_validate_authorization_header`` returns a ``(caller, claims)`` tuple;
         single-use enforcement (``jti``) happens in the async
-        ``validate_internal_auth`` gate that wraps this helper.
+        ``validate_internal_auth`` gate that wraps this helper. The returned
+        subject is the attributable, instance-qualified identity
+        (``<service>@<instance_id>``) so the audit trail can attribute the
+        action to a specific replica; the leading service segment is preserved.
         """
-        with patch.dict(os.environ, {"SECRET_KEY": _SECRET_KEY}):
+        with patch.dict(os.environ, {"SECRET_KEY": _SECRET_KEY, "AUDIT_INSTANCE_ID": "inst-42"}):
             token = generate_internal_token(subject="registry-service", purpose="test")
             caller, claims = _validate_authorization_header(f"Bearer {token}")
-        assert caller == "registry-service"
+        assert caller == "registry-service@inst-42"
+        assert caller.split("@", 1)[0] == "registry-service"
         assert claims["jti"]
 
     def test_user_token_rejected_by_audience(self) -> None:

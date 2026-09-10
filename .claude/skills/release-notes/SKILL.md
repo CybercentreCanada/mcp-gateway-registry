@@ -26,6 +26,45 @@ Creates a release notes file in `docs/release-notes/` and tags the repo:
 
 ## Workflow
 
+### Step 0: Confirm the Pre-Release Smoke Test Was Run (Gate)
+
+Before doing any release-notes work, confirm the end-to-end release smoke test
+([tests/e2e_release_test.py](../../../tests/e2e_release_test.py)) has been run
+against a live gateway and passed. This suite exercises the surface a release
+must not break: the registry is up, the built-in `airegistry-tools` server is
+healthy and its search tool works, servers/agents/skills support full CRUD,
+semantic search returns results, security scans run, and one real external MCP
+server (AWS knowledge base) is reachable end to end through the gateway proxy.
+
+1. **Ask the user, using AskUserQuestion**, whether they have already run the
+   release smoke test and it passed. Offer these options:
+   - "Yes, it passed" (proceed to Step 1)
+   - "No, run it now" (Recommended - run it for them, see below)
+   - "Skip it" (proceed, but see the warning below)
+
+2. **If the user asks you to run it**, run against the target gateway. It needs
+   an admin/M2M bearer token file (Keycloak tokens expire in ~5 minutes, so
+   regenerate first if unsure):
+   ```bash
+   # Local gateway with an admin token at ./.token
+   uv run python tests/e2e_release_test.py --token-file .token --registry-url http://localhost
+
+   # Remote gateway
+   uv run python tests/e2e_release_test.py \
+     --registry-url https://<gateway-host> --token-file .oauth-tokens/ingress.json
+   ```
+   The runner prints a pass/fail table and exits non-zero if any test fails.
+   - **If it exits non-zero (any FAILED), STOP.** Do not proceed with the
+     release. Report which tests failed and their messages, and help the user
+     investigate. A release must not be cut with a failing smoke test.
+   - **SKIPPED is acceptable** (e.g. the external AWS test skips on a network
+     outage rather than failing) - only FAILED is a hard block.
+
+3. **If the user chooses to skip it**, warn once that the release is being cut
+   without an end-to-end verification, then proceed only if they confirm.
+
+Only after this gate is resolved do you continue to Step 1.
+
 ### Step 1: Determine the New Version Tag
 
 1. Parse the version from user input. If not provided, ask the user what version to release.
@@ -370,18 +409,18 @@ Once the user confirms the release notes are ready:
    order, that is a separate, deliberate `mkdocs.yml` change — not part of the routine release cut.
 
 2. **Add a highlight entry and rotate the README's "What's New" (regrowth prevention).** The
-   README's `## What's New` section holds **exactly the 3 most-recent highlights**; the full
+   README's `## What's New` section holds **exactly the 5 most-recent highlights**; the full
    history lives in `docs/overview/feature-release-highlights.md`. On a release with a notable
    user-facing feature:
    - **Prepend** one curated highlight entry (headline + 1-3 sentences + doc links) to the top of
      `docs/overview/feature-release-highlights.md`, just under its intro, matching the existing
      bullet format.
    - **Rotate the README:** add that same highlight as the new first bullet under `## What's New`
-     in `README.md`, then **delete the now-fourth bullet** so exactly three remain (the dropped one
+     in `README.md`, then **delete the now-sixth bullet** so exactly five remain (the dropped one
      already lives in the archive — this is a delete, not a re-copy). Keep the
      "Older highlights → Feature & Release Highlights" line in place.
    - This is the ONLY change the release cut makes to `README.md`. **Never add a new `##` section,
-     never let What's New exceed 3 bullets, and never touch any other part of the README** — those
+     never let What's New exceed 5 bullets, and never touch any other part of the README** — those
      require their own dedicated PR. The README has a CI line-budget (350 lines) that will fail the
      build otherwise. A patch release with no user-facing feature skips this step entirely.
 
@@ -419,6 +458,7 @@ Once the user confirms the release notes are ready:
 
 ## Important Rules
 
+- **Always run the Step 0 smoke-test gate first.** Confirm the end-to-end release smoke test (`tests/e2e_release_test.py`) was run and passed, or offer to run it. If it reports any FAILED test, STOP and do not cut the release. Only a user's explicit decision to skip may bypass this, and it must be warned about once.
 - **Never skip the user confirmation** for base version in Step 2. The user may want to create release notes that span multiple versions.
 - **Never include emojis** in the release notes file. The project CLAUDE.md prohibits emojis in documentation.
 - **Never include Claude Code attribution** or "Co-Authored-By" lines in commits.

@@ -34,6 +34,13 @@ _sync_history: list[dict] = []
 MAX_SYNC_HISTORY: int = 20
 
 
+def _as_dict(record: Any) -> dict[str, Any]:
+    """Return a plain dict for a repository record (Pydantic model or dict)."""
+    if hasattr(record, "model_dump"):
+        return record.model_dump()
+    return record
+
+
 def _store_sync_history(
     stats: ANSSyncStats,
 ) -> None:
@@ -317,7 +324,7 @@ async def get_ans_metrics() -> ANSIntegrationMetrics:
 
     agents = await agent_repo.list_all()
     for agent in agents:
-        agent_dict = agent.model_dump() if hasattr(agent, "model_dump") else agent
+        agent_dict = _as_dict(agent)
         ans_meta = agent_dict.get("ans_metadata")
         if ans_meta:
             metrics.total_linked += 1
@@ -327,7 +334,7 @@ async def get_ans_metrics() -> ANSIntegrationMetrics:
 
     servers = await server_repo.list_all()
     for server in servers:
-        server_dict = server.model_dump() if hasattr(server, "model_dump") else server
+        server_dict = _as_dict(server)
         ans_meta = server_dict.get("ans_metadata")
         if ans_meta:
             metrics.total_linked += 1

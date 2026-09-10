@@ -157,8 +157,7 @@ class TestMetricsStorage:
         # The discovery metric is persisted under the renamed column.
         async with aiosqlite.connect(storage.db_path) as db:
             cursor = await db.execute(
-                "SELECT vector_search_time_ms FROM discovery_metrics "
-                "WHERE request_id = ?",
+                "SELECT vector_search_time_ms FROM discovery_metrics WHERE request_id = ?",
                 ("test_req_discovery",),
             )
             row = await cursor.fetchone()

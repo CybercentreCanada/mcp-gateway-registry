@@ -112,6 +112,8 @@ class MetricsClient:
                         )
                         return False
 
+            return False
+
         except Exception as e:
             # Never fail the main operation due to metrics
             logger.error(f"Failed to emit metric {metric_type}: {e}")

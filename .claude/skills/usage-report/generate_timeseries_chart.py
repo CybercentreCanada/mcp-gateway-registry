@@ -16,10 +16,11 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import sys as _sys
+
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import seaborn as sns
-import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
@@ -299,7 +300,9 @@ def _generate_chart(
         )
 
     ax_new.set_ylabel("New Installs (first-seen)")
-    ax_new.set_title("Daily NEW Registry Installs (first-seen on that day)", loc="left", fontsize=11)
+    ax_new.set_title(
+        "Daily NEW Registry Installs (first-seen on that day)", loc="left", fontsize=11
+    )
     ax_new.legend(title="Cloud Provider", loc="upper left")
     ax_new.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
     tufte_axes(ax_new)

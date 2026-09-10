@@ -19,7 +19,7 @@ Two CLI tools are available:
 
 ## A2A Agent Management
 
-For complete A2A agent management documentation, see: [A2A Agent Management Guide](a2a-agent-management.md)
+For complete A2A agent management documentation, see: [A2A Protocol Support](a2a.md#crud-and-discovery-apis)
 
 Quick start with the `mcp-gateway-m2m` service account:
 ```bash

@@ -531,7 +531,7 @@ async def update_auth0_user_groups(
 
         # Remove current roles
         if current_role_ids:
-            await client.delete(
+            await client.delete(  # type: ignore[call-arg]  # httpx stub omits json= for DELETE-with-body (works at runtime)
                 f"{base_url}/users/{user_id}/roles",
                 headers=headers,
                 json={"roles": current_role_ids},

@@ -232,9 +232,11 @@ function _createRotationRole(
     new iam.PolicyStatement({
       sid: 'DocumentDBAccess',
       effect: iam.Effect.ALLOW,
+      // Amazon DocumentDB shares the RDS control-plane API; boto3 docdb
+      // calls are authorized as rds:* actions against the DocDB cluster ARN.
       actions: [
-        'docdb:DescribeDBClusters',
-        'docdb:ModifyDBCluster',
+        'rds:DescribeDBClusters',
+        'rds:ModifyDBCluster',
       ],
       resources: [documentDbClusterArn],
     }),

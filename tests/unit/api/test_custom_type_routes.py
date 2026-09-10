@@ -63,7 +63,30 @@ def service() -> MagicMock:
 
 
 @pytest.fixture
-def patched_service(service):
+def patched_scope_hooks():
+    """Stub out the mint/cleanup/reload calls the type routes now make.
+
+    Type create mints the per-type scope set (fatal on failure) and reloads the
+    auth server; delete cleans up scopes and reloads. These tests focus on the
+    route behavior, so the scope-store side effects are stubbed and their
+    invocation asserted where relevant.
+    """
+    with (
+        patch.object(
+            custom_type_routes, "mint_custom_type_scopes", new=AsyncMock(return_value=True)
+        ) as mint,
+        patch.object(
+            custom_type_routes, "cleanup_custom_type_scopes", new=AsyncMock(return_value=1)
+        ) as cleanup,
+        patch.object(
+            custom_type_routes, "trigger_auth_server_reload", new=AsyncMock(return_value=True)
+        ) as reload,
+    ):
+        yield {"mint": mint, "cleanup": cleanup, "reload": reload}
+
+
+@pytest.fixture
+def patched_service(service, patched_scope_hooks):
     with patch.object(custom_type_routes, "_get_service", return_value=service):
         yield service
 
@@ -111,6 +134,57 @@ class TestCreate:
         assert resp.status_code == 201
         patched_service.create_type.assert_awaited_once()
 
+    def test_create_mints_scopes(self, patched_service, patched_scope_hooks):
+        client = _make_client(ADMIN_CTX, patched_service)
+        resp = client.post("/api/custom-types", json=self._payload())
+        assert resp.status_code == 201
+        # The per-type scope set is minted for the created type name.
+        patched_scope_hooks["mint"].assert_awaited_once_with("workflow")
+        patched_scope_hooks["reload"].assert_awaited_once()
+
+    def test_create_fails_when_mint_fails(self, patched_service, patched_scope_hooks):
+        # Mint is FATAL: a type whose scopes could not be granted is unusable.
+        from registry.services.scope_service import ScopeMintError
+
+        patched_scope_hooks["mint"] = AsyncMock(side_effect=ScopeMintError("boom"))
+        with patch.object(
+            custom_type_routes, "mint_custom_type_scopes", patched_scope_hooks["mint"]
+        ):
+            client = _make_client(ADMIN_CTX, patched_service)
+            resp = client.post("/api/custom-types", json=self._payload())
+        assert resp.status_code == 500
+
+    def test_create_rolls_back_descriptor_when_mint_fails(
+        self, patched_service, patched_scope_hooks
+    ):
+        # A mint failure must not leave an orphaned descriptor behind (an
+        # identical retry would otherwise 409). The route deletes the just-created
+        # type so create stays atomic.
+        from registry.services.scope_service import ScopeMintError
+
+        patched_scope_hooks["mint"] = AsyncMock(side_effect=ScopeMintError("boom"))
+        with patch.object(
+            custom_type_routes, "mint_custom_type_scopes", patched_scope_hooks["mint"]
+        ):
+            client = _make_client(ADMIN_CTX, patched_service)
+            resp = client.post("/api/custom-types", json=self._payload())
+        assert resp.status_code == 500
+        patched_service.delete_type.assert_awaited_once_with("workflow", force=False)
+
+    def test_create_survives_rollback_failure(self, patched_service, patched_scope_hooks):
+        # If the rollback delete itself fails, the route still returns 500 (it does
+        # not mask the original mint failure with a rollback error).
+        from registry.services.scope_service import ScopeMintError
+
+        patched_service.delete_type = AsyncMock(side_effect=RuntimeError("db down"))
+        patched_scope_hooks["mint"] = AsyncMock(side_effect=ScopeMintError("boom"))
+        with patch.object(
+            custom_type_routes, "mint_custom_type_scopes", patched_scope_hooks["mint"]
+        ):
+            client = _make_client(ADMIN_CTX, patched_service)
+            resp = client.post("/api/custom-types", json=self._payload())
+        assert resp.status_code == 500
+
     def test_non_admin_forbidden(self, patched_service):
         client = _make_client(USER_CTX, patched_service)
         resp = client.post("/api/custom-types", json=self._payload())
@@ -141,6 +215,13 @@ class TestDelete:
         resp = client.delete("/api/custom-types/workflow")
         assert resp.status_code == 204
         patched_service.delete_type.assert_awaited_once_with("workflow", force=False)
+
+    def test_delete_cleans_up_scopes(self, patched_service, patched_scope_hooks):
+        client = _make_client(ADMIN_CTX, patched_service)
+        resp = client.delete("/api/custom-types/workflow")
+        assert resp.status_code == 204
+        patched_scope_hooks["cleanup"].assert_awaited_once_with("workflow")
+        patched_scope_hooks["reload"].assert_awaited_once()
 
     def test_non_admin_forbidden(self, patched_service):
         client = _make_client(USER_CTX, patched_service)

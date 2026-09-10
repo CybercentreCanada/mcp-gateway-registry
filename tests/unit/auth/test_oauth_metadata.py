@@ -215,7 +215,9 @@ class TestBuildPerServerResourceUrl:
         from registry.auth.oauth_metadata import build_per_server_resource_url
 
         assert (
-            build_per_server_resource_url("https://gw.example.com/", "aws-knowledge", append_mcp=False)
+            build_per_server_resource_url(
+                "https://gw.example.com/", "aws-knowledge", append_mcp=False
+            )
             == "https://gw.example.com/aws-knowledge"
         )
 

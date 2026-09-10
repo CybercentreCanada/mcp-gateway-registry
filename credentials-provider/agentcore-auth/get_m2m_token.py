@@ -129,7 +129,7 @@ def _get_cognito_token(
             "scope": "invoke:gateway",
         }
         # Send as JSON for Auth0
-        response_method = lambda: requests.post(url, headers=headers, json=data, timeout=30)
+        send_as_json = True
     else:
         # Cognito format
         url = f"{cognito_domain_url.rstrip('/')}/oauth2/token"
@@ -140,11 +140,14 @@ def _get_cognito_token(
             "client_secret": client_secret,
         }
         # Send as form data for Cognito
-        response_method = lambda: requests.post(url, headers=headers, data=data, timeout=30)
+        send_as_json = False
 
     try:
         # Make the request
-        response = response_method()
+        if send_as_json:
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+        else:
+            response = requests.post(url, headers=headers, data=data, timeout=30)
         response.raise_for_status()  # Raise exception for bad status codes
 
         provider_type = "Auth0" if is_auth0 else "Cognito"

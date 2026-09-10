@@ -10,7 +10,12 @@ import asyncio
 import logging
 
 from ..core.config import settings
+from ..schemas.agent_security import AgentSecurityScanResult
 from ..schemas.security import SecurityScanResult
+
+# Scan-result models across asset types share the fields the webhook payload
+# reads (is_safe, critical_issues, high/medium/low_severity).
+_ScanResult = SecurityScanResult | AgentSecurityScanResult
 from ..utils.credential_encryption import strip_credentials_from_dict
 from .webhook_service import send_registration_webhook
 
@@ -106,9 +111,7 @@ def enforce_registration_status(
     enforced = enforced.lower().strip()
 
     if requested_status is None:
-        logger.info(
-            f"Enforced status '{enforced}' applied to new {registration_type} registration"
-        )
+        logger.info(f"Enforced status '{enforced}' applied to new {registration_type} registration")
         return enforced
 
     if requested_status.lower().strip() != enforced:
@@ -145,7 +148,7 @@ def _sanitize_scan_error(
 
 
 def _build_scan_fields(
-    scan_result: SecurityScanResult | None,
+    scan_result: _ScanResult | None,
     server_entry: dict,
     scan_error: str | None,
     auto_disabled: bool,
@@ -187,7 +190,7 @@ def _build_scan_fields(
 
 def fire_scan_complete_event(
     asset_entry: dict,
-    scan_result: SecurityScanResult | None,
+    scan_result: _ScanResult | None,
     scan_error: str | None = None,
     auto_disabled: bool = False,
     registration_type: str = "server",

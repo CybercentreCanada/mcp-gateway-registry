@@ -6,8 +6,13 @@ from registry.services import ard_ingest_mapping as m
 
 def _entry(identifier, type_):
     return ArdCatalogEntry(
-        identifier=identifier, display_name="X", type=type_, url="https://acme.com/x",
-        description="d", tags=["t"], version="1.0.0",
+        identifier=identifier,
+        display_name="X",
+        type=type_,
+        url="https://acme.com/x",
+        description="d",
+        tags=["t"],
+        version="1.0.0",
     )
 
 
@@ -59,11 +64,17 @@ class TestEntryToRecord:
         assert kind == "skill"
 
     def test_registry_type_is_unsupported(self):
-        assert m.entry_to_record(
-            _entry("urn:air:acme.com:registry:self", "application/ai-registry+json"), "acme"
-        ) is None
+        assert (
+            m.entry_to_record(
+                _entry("urn:air:acme.com:registry:self", "application/ai-registry+json"), "acme"
+            )
+            is None
+        )
 
     def test_catalog_type_is_unsupported(self):
-        assert m.entry_to_record(
-            _entry("urn:air:acme.com:catalog:x", "application/ai-catalog+json"), "acme"
-        ) is None
+        assert (
+            m.entry_to_record(
+                _entry("urn:air:acme.com:catalog:x", "application/ai-catalog+json"), "acme"
+            )
+            is None
+        )

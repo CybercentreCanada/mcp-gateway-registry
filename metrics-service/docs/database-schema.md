@@ -42,7 +42,7 @@ The metrics service uses SQLite as its primary data store with a carefully desig
 │ • key_hash      │────▶│ • request_id    │     │ • name          │
 │ • service_name  │     │ • service       │     │ • applied_at    │
 │ • rate_limit    │     │ • metric_type   │     └─────────────────┘
-│ • usage_count   │     │ • timestamp     │              
+│ • usage_count   │     │ • timestamp     │
 │ • created_at    │     │ • value         │     ┌─────────────────┐
 └─────────────────┘     │ • duration_ms   │     │retention_policies│
                         │ • dimensions    │     │                 │
@@ -107,7 +107,7 @@ CREATE INDEX idx_api_keys_service ON api_keys(service_name);
 ```sql
 INSERT INTO api_keys VALUES (
     1,
-    'a1b2c3d4e5f6...', 
+    'a1b2c3d4e5f6...',
     'auth-server',
     '2024-01-01T00:00:00Z',
     '2024-01-01T12:30:15Z',
@@ -321,9 +321,9 @@ CREATE TABLE retention_policies (
 );
 
 -- Default policies
-INSERT INTO retention_policies (table_name, retention_days) VALUES 
+INSERT INTO retention_policies (table_name, retention_days) VALUES
     ('metrics', 90),           -- Raw metrics: 90 days
-    ('auth_metrics', 90),      -- Auth metrics: 90 days  
+    ('auth_metrics', 90),      -- Auth metrics: 90 days
     ('discovery_metrics', 90), -- Discovery metrics: 90 days
     ('tool_metrics', 90),      -- Tool metrics: 90 days
     ('metrics_hourly', 365),   -- Hourly aggregates: 1 year
@@ -419,17 +419,17 @@ migration = Migration(
     up_sql="""
         -- Add labels column to metrics table
         ALTER TABLE metrics ADD COLUMN labels TEXT;
-        
+
         -- Create index on labels
         CREATE INDEX idx_metrics_labels ON metrics(labels);
-        
+
         -- Update existing metrics with empty labels
         UPDATE metrics SET labels = '{}' WHERE labels IS NULL;
     """,
     down_sql="""
         -- Remove labels functionality
         DROP INDEX idx_metrics_labels;
-        
+
         -- Note: Cannot drop column in SQLite easily
         -- Would require table recreation in production
     """,
@@ -445,7 +445,7 @@ migration = Migration(
 The service implements a multi-tiered retention strategy:
 
 1. **Raw Data**: 90 days for detailed analysis
-2. **Hourly Aggregates**: 365 days for trend analysis  
+2. **Hourly Aggregates**: 365 days for trend analysis
 3. **Daily Aggregates**: 3 years for historical reporting
 4. **Audit Logs**: 90 days for compliance
 
@@ -455,19 +455,19 @@ The service implements a multi-tiered retention strategy:
 -- Example cleanup procedures (run via cron)
 
 -- Clean old raw metrics
-DELETE FROM metrics 
+DELETE FROM metrics
 WHERE created_at < datetime('now', '-90 days');
 
 -- Clean old hourly aggregates
-DELETE FROM metrics_hourly 
+DELETE FROM metrics_hourly
 WHERE hour_timestamp < datetime('now', '-365 days');
 
 -- Clean old daily aggregates
-DELETE FROM metrics_daily 
+DELETE FROM metrics_daily
 WHERE date < date('now', '-1095 days');
 
 -- Clean old API usage logs
-DELETE FROM api_key_usage_log 
+DELETE FROM api_key_usage_log
 WHERE timestamp < datetime('now', '-90 days');
 ```
 
@@ -497,13 +497,13 @@ await storage.apply_retention_cleanup()
 
 ```sql
 -- Time-range queries (most common)
-SELECT * FROM metrics 
+SELECT * FROM metrics
 WHERE timestamp BETWEEN ? AND ?
   AND service = ?;
 
 -- Aggregation queries
 SELECT service, metric_type, COUNT(*), AVG(value)
-FROM metrics 
+FROM metrics
 WHERE timestamp > datetime('now', '-1 hour')
 GROUP BY service, metric_type;
 
@@ -594,7 +594,7 @@ async def batch_insert_metrics(metrics_batch):
 # Reuse prepared statements
 INSERT_METRIC = """
     INSERT INTO metrics (
-        request_id, service, metric_type, timestamp, 
+        request_id, service, metric_type, timestamp,
         value, duration_ms, dimensions, metadata
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
@@ -627,9 +627,9 @@ WHERE service = 'auth-server'
 
 ```sql
 -- Analyze query performance
-EXPLAIN QUERY PLAN 
-SELECT COUNT(*) FROM metrics 
-WHERE timestamp > '2024-01-01T00:00:00Z' 
+EXPLAIN QUERY PLAN
+SELECT COUNT(*) FROM metrics
+WHERE timestamp > '2024-01-01T00:00:00Z'
   AND service = 'auth-server';
 
 -- Expected plan should use index

@@ -19,7 +19,6 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-
 PRIMARY_COLOR: str = "#2b2b2b"
 SECONDARY_COLOR: str = "#6b6b6b"
 ACCENT_COLOR: str = "#1f77b4"

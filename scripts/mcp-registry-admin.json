@@ -1,6 +1,6 @@
 {
   "_id": "mcp-registry-admin",
-  "group_mappings": ["mcp-registry-admin", "mcp-servers-unrestricted/read", "mcp-servers-unrestricted/execute"],
+  "group_mappings": ["mcp-registry-admin"],
   "server_access": [
     {
       "server": "*",
@@ -10,6 +10,10 @@
     {
       "server": "api",
       "methods": ["tokens", "GET", "POST"]
+    },
+    {
+      "agent": "*",
+      "actions": ["list_agents", "get_agent", "publish_agent", "modify_agent", "delete_agent", "toggle_agent", "invoke_agent"]
     }
   ],
   "ui_permissions": {
@@ -18,6 +22,12 @@
     "publish_agent": ["all"],
     "modify_agent": ["all"],
     "delete_agent": ["all"],
+    "toggle_agent": ["all"],
+    "list_skills": ["all"],
+    "publish_skill": ["all"],
+    "modify_skill": ["all"],
+    "delete_skill": ["all"],
+    "toggle_skill": ["all"],
     "list_service": ["all"],
     "register_service": ["all"],
     "health_check_service": ["all"],

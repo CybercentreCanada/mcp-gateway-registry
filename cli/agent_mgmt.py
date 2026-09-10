@@ -264,7 +264,9 @@ def _make_request(
     logger.info(f"  URL: {url}")
     logger.info("  Headers:")
     logger.info(
-        f"    Authorization: Bearer <token len={len(token)}>" if token else "    Authorization: <NO_TOKEN>"
+        f"    Authorization: Bearer <token len={len(token)}>"
+        if token
+        else "    Authorization: <NO_TOKEN>"
     )
     logger.info("    Content-Type: application/json")
     if params:

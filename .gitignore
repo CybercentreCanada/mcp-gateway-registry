@@ -56,6 +56,9 @@ coverage.xml
 cover/
 tests/reports/
 frontend/tests/reports/
+# pytest report artifacts from the agents/a2a subproject (its own test runs)
+agents/a2a/tests/reports/
+agents/a2a/src/*/tests/reports/
 
 # Translations
 *.mo
@@ -137,6 +140,9 @@ celerybeat.pid
 .env
 .env.*
 !.env.example
+# Allow committed env EXAMPLES (never real .env). Covers variants like
+# .env.ecs.example / .env.local.example that .env.* would otherwise ignore.
+!.env.*.example
 .env.backup
 .env.user
 .env.docker
@@ -393,6 +399,8 @@ terraform/telemetry-collector/lambda/collector/lambda_function_linux.zip
 terraform/telemetry-collector/lambda/index-setup/index_setup.zip
 terraform/telemetry-collector/lambda/lambda_function.zip
 terraform/telemetry-collector/global-bundle.pem
+# Generated at runtime by deploy.sh (mongosh index script), then removed
+terraform/telemetry-collector/create-indexes.js
 terraform/telemetry-collector/terraform.tfvars
 terraform/telemetry-collector/DEPLOYMENT-SUMMARY.md
 terraform/telemetry-collector/INTEGRATION-TEST-SUMMARY.md

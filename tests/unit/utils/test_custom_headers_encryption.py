@@ -7,9 +7,9 @@ from unittest.mock import patch
 import pytest
 
 from registry.utils.credential_encryption import (
+    CUSTOM_HEADER_NAMES_FIELD,
     CUSTOM_HEADERS_ENCRYPTED_FIELD,
     CUSTOM_HEADERS_PLAINTEXT_FIELD,
-    CUSTOM_HEADER_NAMES_FIELD,
     decrypt_custom_headers,
     encrypt_credential,
     encrypt_custom_headers_in_server_dict,
@@ -74,13 +74,13 @@ class TestEncryptCustomHeaders:
     def test_rejects_empty_name(self, mock_secret_key):
         server_dict = {"custom_headers": [{"name": "", "value": "v"}]}
 
-        with pytest.raises(ValueError, match="non-empty name and value"):
+        with pytest.raises(ValueError, match="non-empty name"):
             encrypt_custom_headers_in_server_dict(server_dict)
 
     def test_rejects_empty_value(self, mock_secret_key):
         server_dict = {"custom_headers": [{"name": "X-Foo", "value": ""}]}
 
-        with pytest.raises(ValueError, match="non-empty name and value"):
+        with pytest.raises(ValueError, match="non-empty value"):
             encrypt_custom_headers_in_server_dict(server_dict)
 
     def test_rejects_duplicate_names(self, mock_secret_key):

@@ -16,6 +16,7 @@ from urllib.parse import unquote
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
+from ..auth.csrf import verify_csrf_token_flexible
 from ..auth.dependencies import nginx_proxied_auth
 from ..constants import REGISTRY_CONSTANTS, DeploymentType
 from ..health.service import health_service
@@ -385,7 +386,7 @@ async def _auto_initialize_registry_card():
         else:
             adjectives = ["brave", "clever", "swift", "bright", "noble", "wise", "bold", "keen"]
             nouns = ["falcon", "dolphin", "tiger", "phoenix", "dragon", "wolf", "eagle", "lion"]
-            registry_name = f"{random.choice(adjectives)}-{random.choice(nouns)}-registry"
+            registry_name = f"{random.choice(adjectives)}-{random.choice(nouns)}-registry"  # nosec B311 - cosmetic display name, not security-sensitive
             logger.info(f"Generated random registry name: {registry_name}")
 
         # Use organization name from config (defaults to "ACME Inc.")
@@ -512,6 +513,7 @@ async def get_registry_card():
 async def update_registry_card(
     request: dict,
     user_context: dict = Depends(nginx_proxied_auth),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Create or update the Registry Card.
@@ -628,6 +630,7 @@ async def update_registry_card(
 async def patch_registry_card(
     request: dict,
     user_context: dict = Depends(nginx_proxied_auth),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Partially update the Registry Card.
@@ -820,6 +823,7 @@ async def set_cloud_provider_hint(
     payload: CloudProviderHintRequest,
     request: Request,
     user_context: dict = Depends(nginx_proxied_auth),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> None:
     """Persist the operator's cloud-provider banner answer.
 

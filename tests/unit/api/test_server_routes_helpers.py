@@ -207,3 +207,97 @@ class TestBuildVersionsList:
         # Default entry + one resolved fanout, missing entry skipped.
         assert len(result) == 2
         assert result[1]["version"] == "v2.0.0"
+
+
+@pytest.mark.unit
+class TestBuildScanHeadersDestinationRevalidation:
+    """A stored credential must only be handed to the external scanner after the
+    scan destination is re-validated through the shared SSRF guard at the moment
+    of use. A destination mutated to a private/metadata address after
+    registration must not receive the credential (fail closed)."""
+
+    def _server_with_credential(self) -> dict:
+        return {
+            "path": "/test-server",
+            "auth_scheme": "bearer",
+            "auth_credential_encrypted": "enc-blob",
+            "proxy_pass_url": "https://backend.example.com",
+        }
+
+    def test_no_credential_returns_none(self):
+        from registry.api.server_routes import _build_scan_headers_from_credentials
+
+        assert _build_scan_headers_from_credentials({"auth_scheme": "none"}) is None
+
+    def test_valid_destination_attaches_credential(self):
+        from registry.api.server_routes import _build_scan_headers_from_credentials
+
+        with (
+            patch("registry.utils.url_guard.validate_url", return_value=["1.2.3.4"]),
+            patch(
+                "registry.utils.credential_encryption.decrypt_credential",
+                return_value="s3cret",
+            ),
+        ):
+            headers_json = _build_scan_headers_from_credentials(self._server_with_credential())
+
+        assert headers_json is not None
+        assert "Bearer s3cret" in headers_json
+
+    def test_unsafe_destination_refuses_credential(self):
+        from registry.api.server_routes import _build_scan_headers_from_credentials
+        from registry.exceptions import UrlValidationError
+
+        decrypt = AsyncMock()  # sentinel; must never be called
+        with (
+            patch(
+                "registry.utils.url_guard.validate_url",
+                side_effect=UrlValidationError("https://169.254.169.254", "blocked"),
+            ),
+            patch(
+                "registry.utils.credential_encryption.decrypt_credential",
+                decrypt,
+            ),
+        ):
+            result = _build_scan_headers_from_credentials(self._server_with_credential())
+
+        assert result is None
+        decrypt.assert_not_called()
+
+    def test_unsafe_mcp_endpoint_refuses_credential(self):
+        from registry.api.server_routes import _build_scan_headers_from_credentials
+        from registry.exceptions import UrlValidationError
+
+        server = self._server_with_credential()
+        server["mcp_endpoint"] = "http://10.0.0.5/mcp"
+
+        def _validate(url, **_kwargs):
+            if "10.0.0.5" in url:
+                raise UrlValidationError(url, "blocked/private")
+            return ["1.2.3.4"]
+
+        with (
+            patch("registry.utils.url_guard.validate_url", side_effect=_validate),
+            patch(
+                "registry.utils.credential_encryption.decrypt_credential",
+                return_value="s3cret",
+            ),
+        ):
+            result = _build_scan_headers_from_credentials(server)
+
+        assert result is None
+
+    def test_no_destination_fails_closed(self):
+        from registry.api.server_routes import _build_scan_headers_from_credentials
+
+        server = {
+            "path": "/test-server",
+            "auth_scheme": "bearer",
+            "auth_credential_encrypted": "enc-blob",
+            # no proxy_pass_url, no mcp_endpoint
+        }
+        with patch(
+            "registry.utils.credential_encryption.decrypt_credential",
+            return_value="s3cret",
+        ):
+            assert _build_scan_headers_from_credentials(server) is None

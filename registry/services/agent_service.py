@@ -11,6 +11,8 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from ..core.metrics import ASSET_ID_CONFLICT_TOTAL
+from ..exceptions import AssetIdConflictError
 from ..repositories.factory import get_agent_repository, get_search_repository
 from ..repositories.interfaces import AgentRepositoryBase, SearchRepositoryBase
 from ..schemas.agent_models import AgentCard
@@ -63,6 +65,13 @@ class AgentService:
         if await self._repo.get(path) is not None:
             logger.error(f"Agent registration failed: path '{path}' already exists")
             raise ValueError(f"Agent path '{path}' already exists")
+
+        # Id uniqueness pre-check (#1276): a caller-supplied id must not
+        # collide with an existing agent. Raise -> route maps to 409.
+        if agent_card.id and await self._repo.find_by_id(agent_card.id):
+            logger.warning(f"Agent registration rejected: id '{agent_card.id}' already exists")
+            ASSET_ID_CONFLICT_TOTAL.labels(asset_type="agent").inc()
+            raise AssetIdConflictError(asset_type="agent", asset_id=agent_card.id)
 
         agent_card = await self._repo.create(agent_card)
         await self._repo.set_state(path, False)
@@ -220,6 +229,14 @@ class AgentService:
             logger.error(f"Failed to re-index agent {path}: {e}")
 
         logger.info(f"Agent '{updated_agent.name}' ({path}) updated")
+
+        # Regenerate nginx config if the agent is enabled, since its backend
+        # url may have changed.
+        if await self.is_agent_enabled(path):
+            from ..core.nginx_service import nginx_reload_scheduler
+
+            nginx_reload_scheduler.mark_dirty()
+
         return updated_agent
 
     async def delete_agent(
@@ -245,6 +262,9 @@ class AgentService:
 
         try:
             agent_name = existing_agent.name
+            # Capture enabled state before deletion removes the state record, so
+            # we only regenerate nginx config when a proxied block actually existed.
+            was_enabled = await self.is_agent_enabled(path)
 
             from .search_index_cleanup import remove_from_search_index_with_retry
 
@@ -260,6 +280,13 @@ class AgentService:
             await self._repo.delete(path)
 
             logger.info(f"Successfully deleted agent '{agent_name}' from path '{path}'")
+
+            # Regenerate nginx config so the agent's reverse-proxy block is
+            # removed, but only if it was enabled.
+            if was_enabled:
+                from ..core.nginx_service import nginx_reload_scheduler
+
+                nginx_reload_scheduler.mark_dirty()
             return True
 
         except ValueError:
@@ -292,6 +319,11 @@ class AgentService:
         await self._repo.set_state(path, True)
         logger.info(f"Enabled agent '{agent.name}' ({path})")
 
+        # Regenerate nginx config so the agent's reverse-proxy block is added.
+        from ..core.nginx_service import nginx_reload_scheduler
+
+        nginx_reload_scheduler.mark_dirty()
+
     async def disable_agent(
         self,
         path: str,
@@ -315,6 +347,11 @@ class AgentService:
 
         await self._repo.set_state(path, False)
         logger.info(f"Disabled agent '{agent.name}' ({path})")
+
+        # Regenerate nginx config so the agent's reverse-proxy block is removed.
+        from ..core.nginx_service import nginx_reload_scheduler
+
+        nginx_reload_scheduler.mark_dirty()
 
     async def is_agent_enabled(
         self,
@@ -381,7 +418,11 @@ class AgentService:
         try:
             agent_data = agent_card.model_dump(mode="json")
             is_enabled = await self.is_agent_enabled(agent_card.path)
-            await self._search_repo.index_entity(
+            # NOTE: `index_entity` is not defined on any SearchRepository backend;
+            # this unused method's body is a latent bug (the call raises
+            # AttributeError at runtime, swallowed by the surrounding except).
+            # Preserving existing behavior; ignore the attr-defined error here.
+            await self._search_repo.index_entity(  # type: ignore[attr-defined]
                 entity_path=agent_card.path,
                 entity_data=agent_data,
                 entity_type="a2a_agent",
