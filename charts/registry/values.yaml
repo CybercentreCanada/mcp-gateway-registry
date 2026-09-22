@@ -331,6 +331,17 @@ app:
   # The cloud metadata address (169.254.169.254) is never permitted by either.
   ssrfAllowedHosts: ""
   ssrfAllowedCidrs: ""
+  # GHES/internal-GitHub allowlist for SKILL.md fetching (registry.services.skill_service).
+  # This is a SEPARATE allowlist from ssrfAllowedHosts/ssrfAllowedCidrs above --
+  # those gate server/agent proxy targets; this one gates the skill-fetch SSRF
+  # check specifically, and only supports exact hostnames (no CIDRs, by design:
+  # keep the skill-fetch trust surface as small as possible). Comma-separated,
+  # e.g. "github.mycompany.com,raw.github.mycompany.com". A GHES instance's raw
+  # content server may itself redirect to an internal backend IP/hostname when
+  # serving a file -- if so, that redirect target also needs to be listed here,
+  # or the fetch is blocked as an unsafe redirect even though the original host
+  # was trusted.
+  githubExtraHosts: ""
   # IDE OAuth login (PR #1224). Pre-registered PUBLIC OAuth client_id that IDEs
   # (Cursor, Claude Code, Codex) use to start the gateway login flow. When set,
   # the Connect config advertises it and drops the static gateway token. Empty
