@@ -151,6 +151,12 @@ spec:
               value: {{ .Values.app.ssrfAllowedHosts | default "" | quote }}
             - name: SSRF_ALLOWED_CIDRS
               value: {{ .Values.app.ssrfAllowedCidrs | default "" | quote }}
+            # GHES/internal-GitHub allowlist for SKILL.md fetching -- a separate
+            # allowlist from SSRF_ALLOWED_HOSTS/CIDRS above (see values.yaml comment).
+            {{- if .Values.app.githubExtraHosts }}
+            - name: GITHUB_EXTRA_HOSTS
+              value: {{ .Values.app.githubExtraHosts | quote }}
+            {{- end }}
             # A2A reverse-proxy gateway (opt-in; default off). When true, each
             # enabled A2A agent gets nginx location blocks proxying its card +
             # JSON-RPC through the gateway for centralized auth and metrics.

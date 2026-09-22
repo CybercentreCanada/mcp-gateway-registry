@@ -77,6 +77,24 @@ tests:
             name: SSRF_ALLOWED_CIDRS
             value: "172.20.0.0/16"
 
+  - it: omits GITHUB_EXTRA_HOSTS by default (separate allowlist from SSRF_ALLOWED_*)
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GITHUB_EXTRA_HOSTS
+
+  - it: renders GITHUB_EXTRA_HOSTS when set (GHES skill-fetch allowlist)
+    set:
+      app:
+        githubExtraHosts: "github.mycompany.com,raw.github.mycompany.com"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GITHUB_EXTRA_HOSTS
+            value: "github.mycompany.com,raw.github.mycompany.com"
+
   - it: appends extraEnv entries after chart-managed env vars
     set:
       extraEnv:
