@@ -491,6 +491,29 @@ class TestAllowlists:
                 with pytest.raises(UrlValidationError):
                     url_guard.validate_url("https://github.corp/x", profile=url_guard.PROXY_PROFILE)
 
+    def test_skill_profile_ghes_literal_ip_redirect_target_allowed(self):
+        """A GHES raw-content redirect can land on a literal internal IP rather
+        than a resolvable hostname (e.g. an internal backend IP). If that exact
+        IP is itself listed in github_extra_hosts, it must be trusted the same
+        way a trusted hostname's resolved IP is -- previously the literal-IP
+        branch never consulted the allowlist at all, so this always failed."""
+        with patch.object(url_guard, "settings", _settings(github_extra_hosts="172.20.73.8")):
+            assert url_guard.validate_url(
+                "https://172.20.73.8/ORG/Skills/refs/heads/main/x/SKILL.md",
+                profile=url_guard.SKILL_PROFILE,
+            ) == ["172.20.73.8"]
+
+    def test_skill_profile_literal_ip_not_in_allowlist_still_rejected(self):
+        with patch.object(url_guard, "settings", _settings(github_extra_hosts="172.20.73.8")):
+            with pytest.raises(UrlValidationError):
+                url_guard.validate_url("https://172.20.73.9/x", profile=url_guard.SKILL_PROFILE)
+
+    def test_proxy_profile_host_allowlist_literal_ip_allowed(self):
+        with patch.object(url_guard, "settings", _settings(ssrf_allowed_hosts="10.1.2.3")):
+            assert url_guard.validate_url(
+                "http://10.1.2.3/mcp", profile=url_guard.PROXY_PROFILE
+            ) == ["10.1.2.3"]
+
 
 # ---------------------------------------------------------------------------
 # Pinned transport (DNS-rebinding defeat)
@@ -540,6 +563,28 @@ class TestPinnedTransport:
             request = httpx.Request("GET", "http://169.254.169.254/latest/meta-data/")
             with pytest.raises(UrlValidationError):
                 transport._pin_request(request)
+
+    def test_pin_allows_literal_ip_in_host_allowlist(self):
+        """The fetch-time pinning path (what guarded_async_client actually uses
+        while following redirects) must relax a literal IP the same way
+        validate_url does when that exact IP is allowlisted -- this is the
+        real-world GHES-redirect-to-internal-IP case."""
+        with patch.object(url_guard, "settings", _settings(github_extra_hosts="172.20.73.8")):
+            transport = url_guard.GuardedAsyncTransport(guard_profile=url_guard.SKILL_PROFILE)
+            request = httpx.Request(
+                "GET", "https://172.20.73.8/ORG/Skills/refs/heads/main/x/SKILL.md"
+            )
+            pinned = transport._pin_request(request)
+        assert pinned.url.host == "172.20.73.8"
+
+    async def test_async_pin_allows_literal_ip_in_host_allowlist(self):
+        with patch.object(url_guard, "settings", _settings(github_extra_hosts="172.20.73.8")):
+            transport = url_guard.GuardedAsyncTransport(guard_profile=url_guard.SKILL_PROFILE)
+            request = httpx.Request(
+                "GET", "https://172.20.73.8/ORG/Skills/refs/heads/main/x/SKILL.md"
+            )
+            pinned = await transport._pin_request_async(request)
+        assert pinned.url.host == "172.20.73.8"
 
     def test_pin_rebinding_between_check_and_connect_is_defeated(self):
         """A host that validated once but rebinds to a private IP is still blocked.

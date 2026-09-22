@@ -792,10 +792,13 @@ def validate_url(
     # network and catches the most direct SSRF payloads like the metadata IP).
     # Use coerce_ip_literal (not ipaddress.ip_address) so obfuscated spellings
     # (hex/octal/decimal/embedded-v4) are recognized as IPs and category-checked,
-    # not mistaken for opaque hostnames.
+    # not mistaken for opaque hostnames. Consult the allowlist here too (an
+    # operator-trusted literal IP, e.g. a GHES raw-content redirect target,
+    # must be relaxed the same way a trusted DNS name's resolved IP is below --
+    # hard-denied categories still apply regardless via _ip_denial_reason).
     literal = coerce_ip_literal(hostname)
     if literal is not None:
-        if _is_blocked_ip(hostname, allowlist):
+        if _is_blocked_ip(hostname, allowlist, trusted_hostname=allowlist.allows_host(hostname_lower)):
             raise UrlValidationError(url, f"targets blocked/private IP {hostname}")
         return [str(literal)]
 
@@ -986,7 +989,7 @@ class _PinnedResolverMixin:
         """Synchronously validate, resolve, and pin a request."""
         url, _scheme, hostname, port, allowlist = self._request_target(request)
         if coerce_ip_literal(hostname) is not None:
-            if _is_blocked_ip(hostname, allowlist):
+            if _is_blocked_ip(hostname, allowlist, trusted_hostname=allowlist.allows_host(hostname.lower())):
                 raise UrlValidationError(str(url), f"targets blocked/private IP {hostname}")
             return request
         pinned_ip = _resolve_public_ips(hostname, port, allowlist)[0]
@@ -999,7 +1002,7 @@ class _PinnedResolverMixin:
         """Asynchronously validate, resolve under deadline, and pin a request."""
         url, _scheme, hostname, port, allowlist = self._request_target(request)
         if coerce_ip_literal(hostname) is not None:
-            if _is_blocked_ip(hostname, allowlist):
+            if _is_blocked_ip(hostname, allowlist, trusted_hostname=allowlist.allows_host(hostname.lower())):
                 raise UrlValidationError(str(url), f"targets blocked/private IP {hostname}")
             return request
         pinned_ip = (await _resolve_public_ips_async(hostname, port, allowlist))[0]
