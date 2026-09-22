@@ -286,6 +286,8 @@ def test_nginx_service_init_http_only():
 
         # Should use HTTP-only template
         assert "http_only" in str(service.nginx_template_path).lower()
+        # http-only template names the forwarded-proto map $forwarded_proto.
+        assert service._forwarded_scheme_var == "$forwarded_proto"
 
 
 @pytest.mark.unit
@@ -321,6 +323,8 @@ def test_nginx_service_init_http_and_https():
 
         # Should use HTTP+HTTPS template
         assert "http_and_https" in str(service.nginx_template_path).lower()
+        # http+https template names the forwarded-proto map $real_scheme.
+        assert service._forwarded_scheme_var == "$real_scheme"
 
 
 # =============================================================================
@@ -791,6 +795,30 @@ def test_generate_transport_location_blocks_streamable_http(nginx_service):
     # subrequest can bind it into the internal token, then forwarded as X-Upstream-Url.
     assert 'set $backend_url "http://localhost:8000/mcp"' in blocks[0]
     assert "proxy_set_header X-Upstream-Url $backend_url" in blocks[0]
+
+
+@pytest.mark.unit
+def test_location_block_forwards_proto_from_map_not_scheme(nginx_service):
+    """The generated MCP block must forward the terminated-TLS scheme via the
+    template's forwarded-proto map ($forwarded_proto here), not nginx's own
+    $scheme. Using $scheme leaks X-Forwarded-Proto: http to the upstream when the
+    ingress/ALB terminates TLS, causing upstreams behind their own force-ssl
+    redirect to answer 308."""
+    server_info = {
+        "proxy_pass_url": "https://upstream.example.com/mcp",
+        "supported_transports": ["streamable-http"],
+    }
+
+    blocks = nginx_service._generate_transport_location_blocks("/test", server_info)
+
+    assert len(blocks) == 1
+    block = blocks[0]
+    var = nginx_service._forwarded_scheme_var
+    assert f"proxy_set_header X-Forwarded-Proto {var};" in block
+    assert f"proxy_set_header X-Original-URL {var}://$host$request_uri;" in block
+    # The regressed literal must be gone from both headers.
+    assert "X-Forwarded-Proto $scheme;" not in block
+    assert "X-Original-URL $scheme://" not in block
 
 
 @pytest.mark.unit

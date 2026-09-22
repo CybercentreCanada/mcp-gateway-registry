@@ -734,6 +734,9 @@ class NginxConfigService:
                 self.nginx_template_path = Path(
                     REGISTRY_CONSTANTS.NGINX_TEMPLATE_HTTP_AND_HTTPS_LOCAL
                 )
+            # Scheme map variable defined by this template (honors the ingress/ALB
+            # X-Forwarded-Proto after TLS termination, not nginx's own $scheme).
+            self._forwarded_scheme_var = "$real_scheme"
         else:
             # Use HTTP-only template
             if Path(REGISTRY_CONSTANTS.NGINX_TEMPLATE_HTTP_ONLY).exists():
@@ -741,6 +744,8 @@ class NginxConfigService:
             else:
                 # Fallback for local development
                 self.nginx_template_path = Path(REGISTRY_CONSTANTS.NGINX_TEMPLATE_HTTP_ONLY_LOCAL)
+            # The http-only template names the same map variable $forwarded_proto.
+            self._forwarded_scheme_var = "$forwarded_proto"
 
     async def get_additional_server_names(self) -> str:
         """Fetch or determine additional server names for nginx gateway configuration.
@@ -2539,10 +2544,10 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         proxy_set_header Host {host_header};
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto {self._forwarded_scheme_var};
 
         # Add original URL for auth server scope validation
-        proxy_set_header X-Original-URL $scheme://$host$request_uri;
+        proxy_set_header X-Original-URL {self._forwarded_scheme_var}://$host$request_uri;
 
         # Pass through the original authentication headers
         proxy_set_header Authorization $http_authorization;
