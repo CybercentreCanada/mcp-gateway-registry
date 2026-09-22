@@ -77,3 +77,48 @@ it's a latent bug in both branches. Same trigger condition: only matters when
 Not fixed as part of this audit since it's outside "port what we already fixed" —
 raise separately, and consider fixing in both branches (this one and our actual
 fork) rather than just here.
+
+## Follow-up: SKILL.md registration blocked by SSRF guard (found during DEV UI testing)
+
+Admins hit `Failed to parse SKILL.md: Redirect to unsafe URL blocked: https://<internal-IP>/...`
+when registering a skill backed by our internal GHES. Root cause, and what it is
+NOT:
+
+- **Not** the `ssrfAllowedHosts` / `ssrfAllowedCidrs` values (`10.0.0.0/8,172.0.0.0/8`
+  in our env files) — those feed `registry.utils.url_guard`'s *proxy* allowlist
+  (`_proxy_allowlist`), used for server/agent proxy targets. They have no effect on
+  skill fetching at all.
+- **Is** `registry.utils.url_guard._skill_allowlist()`, which `skill_service.py`
+  uses for the SKILL.md SSRF check. It only consults `GITHUB_EXTRA_HOSTS`
+  (exact hostnames, deliberately no CIDR support) and is fully separate from the
+  proxy allowlist above.
+- `GITHUB_EXTRA_HOSTS` for the registry pod is already set correctly (via a manual
+  `registry.extraEnv` entry in our values files, since `charts/registry` had no
+  native key for it — fixed below) to our GHES hostnames. That's enough for the
+  *initial* request to succeed.
+- The failure is on the **redirect**: our GHES's raw-content server responds to the
+  initial (trusted-hostname) request with an HTTP redirect straight to an internal
+  backend IP. `skill_service.py` re-validates the final URL after redirects
+  (`follow_redirects=True`, then a second `_is_safe_url` check on `response.url`),
+  and that backend IP is not itself in the hostname-only allowlist, so it's
+  correctly blocked as an unsafe redirect target — the guard is working as
+  designed; the trust list is just missing the redirect target.
+
+Fixed (chart hygiene, no security-posture change): added a native
+`app.githubExtraHosts` value + `GITHUB_EXTRA_HOSTS` env wiring to
+`charts/registry` (values.yaml, deployment.yaml, reserved-env-names.txt, plus
+two new `extra_env_test.yaml` cases) — `charts/mcpgw` already had this, registry
+did not. See commit `6d0c6844`.
+
+**Still needs a team decision, not yet applied**: whether to add the specific
+redirect-target IP (or a stable hostname for it, if GHES can be configured to
+redirect by name instead of raw IP) to `GITHUB_EXTRA_HOSTS`. A bare IP is fragile
+if that backend ever moves; confirm with whoever manages the GHES instance
+whether it's stable before allowlisting it.
+
+Separately investigated: `publishSkillEnabled` (recalled from our actual fork, not
+found here) does not exist as a toggle in this vanilla-1.29.0-based branch at all —
+`charts/mongodb-configure/templates/configmap.yaml` unconditionally grants
+`"publish_skill": ["all"]` in the `registry-admins`/unrestricted scope seed here,
+no gate. Not a blocker for the SSRF issue above; this was the RBAC/scope-content
+item already flagged as out of scope in this audit.
