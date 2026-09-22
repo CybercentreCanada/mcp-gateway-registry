@@ -99,26 +99,63 @@ NOT:
 - The failure is on the **redirect**: our GHES's raw-content server responds to the
   initial (trusted-hostname) request with an HTTP redirect straight to an internal
   backend IP. `skill_service.py` re-validates the final URL after redirects
-  (`follow_redirects=True`, then a second `_is_safe_url` check on `response.url`),
-  and that backend IP is not itself in the hostname-only allowlist, so it's
-  correctly blocked as an unsafe redirect target — the guard is working as
-  designed; the trust list is just missing the redirect target.
+  (`follow_redirects=True`, then a second `_is_safe_url` check on `response.url`).
+  That backend IP is stable, and we confirmed it's fine to allowlist (see below) —
+  but after adding it to `GITHUB_EXTRA_HOSTS`, the redirect was **still** blocked.
+  That pointed at a second, deeper bug (see "Actual root cause" below).
 
-Fixed (chart hygiene, no security-posture change): added a native
+Fixed layer 1 (chart hygiene, no security-posture change): added a native
 `app.githubExtraHosts` value + `GITHUB_EXTRA_HOSTS` env wiring to
 `charts/registry` (values.yaml, deployment.yaml, reserved-env-names.txt, plus
 two new `extra_env_test.yaml` cases) — `charts/mcpgw` already had this, registry
 did not. See commit `6d0c6844`.
 
-**Still needs a team decision, not yet applied**: whether to add the specific
-redirect-target IP (or a stable hostname for it, if GHES can be configured to
-redirect by name instead of raw IP) to `GITHUB_EXTRA_HOSTS`. A bare IP is fragile
-if that backend ever moves; confirm with whoever manages the GHES instance
-whether it's stable before allowlisting it.
+### Actual root cause: `url_guard.py` never relaxed literal-IP hosts against the allowlist
+
+`registry/utils/url_guard.py` has two code paths that decide whether a target IP is
+blocked: the DNS-resolved-hostname path (`_validate_resolved_ips`), and the
+literal-IP-in-URL path (used directly when a URL's host is already an IP, which is
+exactly what happens after GHES's redirect). The DNS path correctly computes
+`trusted_hostname = allowlist.allows_host(hostname)` and passes it to
+`_is_blocked_ip()`, which relaxes the private-IP block for allowlisted hosts. The
+literal-IP path — in `validate_url()`, and in `GuardedAsyncTransport`'s
+`_pin_request()` / `_pin_request_async()` — called `_is_blocked_ip()` **without**
+`trusted_hostname`, so an allowlisted literal IP was never relaxed. Adding
+`172.20.73.8` to `GITHUB_EXTRA_HOSTS` therefore had no effect on the redirect
+check specifically. Hard-denied categories (cloud metadata `169.254.169.254`,
+loopback, link-local, multicast, reserved, unspecified) are enforced independently
+of `trusted_hostname` and remain blocked even for allowlisted hosts — this fix
+does not weaken that.
+
+Fixed (application code, all 3 call sites): pass `trusted_hostname =
+allowlist.allows_host(hostname.lower())` into `_is_blocked_ip()` in all three
+literal-IP branches. See commit `26f1cd3e`. Added 5 regression tests to
+`tests/unit/utils/test_url_guard.py` covering the allowed and still-blocked cases
+(allowlisted literal IP allowed, non-allowlisted private IP still blocked, hard-denied
+metadata IP still blocked even if allowlisted). Full suite: 258 `url_guard` tests +
+47 skill-service tests pass.
+
+`172.20.73.8` is included in `GITHUB_EXTRA_HOSTS` for `pb-dev` only (staging/prod
+values files intentionally omit it for now — they're still on older, unrelated
+custom image tags and haven't hit this issue). **Still open**: we have not yet
+confirmed with whoever manages our GHES instance whether this backend IP is
+stable long-term; a bare IP is fragile if that backend ever moves. Follow up on
+this before relying on it outside of `pb-dev` testing.
+
+**Deployed and verified in `pb-dev`**: built `registry:1.29.0-cccs-ssrf-fix1`
+(chart fix + `url_guard.py` fix only) and, after picking up `fe59c5f8` — a
+teammate's unrelated nginx `X-Forwarded-Proto`/`X-Original-URL` redirect fix that
+landed on the same branch — rebuilt as `registry:1.29.0-cccs-combined1` (both
+fixes together, using Docker layer caching so the rebuild only reran the
+`uv sync`/frontend layers, not the ~1GB nginx-extras install). Retested by an
+admin in the DEV UI: skill registration via a SKILL.md URL now succeeds when
+using "global credentials" (the registry's PAT) as the source authentication
+mode. Issue resolved.
 
 Separately investigated: `publishSkillEnabled` (recalled from our actual fork, not
 found here) does not exist as a toggle in this vanilla-1.29.0-based branch at all —
 `charts/mongodb-configure/templates/configmap.yaml` unconditionally grants
 `"publish_skill": ["all"]` in the `registry-admins`/unrestricted scope seed here,
-no gate. Not a blocker for the SSRF issue above; this was the RBAC/scope-content
-item already flagged as out of scope in this audit.
+no gate. Admins already have the permission needed to register skills, so this
+does not need to be ported for the SSRF fix above to take effect; this remains the
+RBAC/scope-content item already flagged as out of scope in this audit.
