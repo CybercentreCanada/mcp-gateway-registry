@@ -248,6 +248,23 @@ sequenceDiagram
 
 **Egress trust model:** the gateway is a policy gate, never a credential broker. `X-Authorization` carries the caller's gateway token (authenticated, then stripped so it never reaches the registrant-controlled backend); `Authorization` carries the target agent's own credential (forwarded untouched). As defense-in-depth, `/validate` rejects a request whose `Authorization` duplicates the `X-Authorization` value.
 
+### Shared gateway/agent token mode (opt-in, default off)
+
+`A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED=true` relaxes the credential separation
+on `/agent/...` paths. When enabled, a **single** `Authorization` bearer token is
+used both to authenticate the caller to the gateway (the gateway falls back to
+`Authorization` when `X-Authorization` is absent) **and** is forwarded end-to-end
+to the agent backend, and `/validate` no longer rejects a request whose
+`Authorization` equals its `X-Authorization`. The `invoke_agent` scope check
+still applies.
+
+This **intentionally defeats** the gateway/agent credential separation: the
+gateway credential becomes readable — and replayable against the registry — by
+the registrant-controlled agent backend. It is therefore **default-off**,
+**opt-in via env var only**, and **fail-closed** (strict separation remains the
+default whenever the flag is unset or false). Only enable it when the agent
+backend is in the **same trust domain** as the gateway (i.e. you own the agent).
+
 ### Verifying it works
 
 ```bash

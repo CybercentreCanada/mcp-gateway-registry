@@ -1,0 +1,56 @@
+# Overlay image: takes a PREBUILT auth-server image (e.g. from the ACR mirror)
+# and adds:
+#   1. the A2A shared gateway/agent token change (auth_server/server.py +
+#      registry/core/config.py), and
+#   2. a corporate/private CA.
+# It does NOT rebuild the app.
+#
+# IMPORTANT: build with the REPO ROOT as the build context (the final `.`) --
+# it copies auth_server/server.py and registry/core/config.py from this repo.
+# Pick an AUTH_BASE_IMAGE whose version MATCHES this repo checkout so the
+# overlaid modules are compatible with the rest of the image's code.
+#
+# If you only want the CA (no app-code change), delete the "A2A" COPY/RUN lines.
+#
+# Build:
+#   # put your PEM CA at docker/extra-ca.crt first
+#   docker build -f docker/Dockerfile.auth.custom \
+#     --build-arg AUTH_BASE_IMAGE=uchimera.azurecr.io/mcpgateway/auth-server:1.29.0 \
+#     -t uchimera.azurecr.io/mcpgateway/auth-server:1.29.0_custom .
+#
+# For K8s: push the tag and set auth-server.image.tag to it.
+
+ARG AUTH_BASE_IMAGE=uchimera.azurecr.io/mcpgateway/auth-server:1.29.0
+FROM ${AUTH_BASE_IMAGE}
+
+# The base image ends on `USER appuser`; the changes below need root.
+USER root
+
+# --- A2A shared gateway/agent token change ------------------------------------
+# The auth image lays auth_server/ at /app (so server.py -> /app/server.py) and
+# bundles registry/ at /app/registry. server.py holds the validate_request
+# decision; config.py defines the setting so the A2A_SHARED_GATEWAY_AGENT_TOKEN_
+# ENABLED env var is parsed (without it, the flag reads as default-false). Drop
+# cached bytecode so Python recompiles from the new source on start.
+COPY --chown=appuser:appuser auth_server/server.py /app/server.py
+COPY --chown=appuser:appuser registry/core/config.py /app/registry/core/config.py
+RUN rm -f /app/__pycache__/server.*.pyc /app/registry/core/__pycache__/config.*.pyc
+
+# --- Corporate / private CA trust ---------------------------------------------
+# Unlike the registry image, the auth image ships no corporate bundle and sets
+# no SSL_CERT_FILE, and it has no openssl CLI. So append the CA to the system
+# bundle and point TLS clients (openssl/httpx via SSL_CERT_FILE, requests via
+# REQUESTS_CA_BUNDLE) at it. The bundle keeps the standard roots, so public
+# endpoints (Entra) still validate.
+COPY ./ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_DIR=/etc/ssl/certs \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+# --- Extra configuration / setup ----------------------------------------------
+# Add your customizations below, e.g.:
+#   COPY --chown=appuser:appuser my-extra.conf /app/config/my-extra.conf
+#   ENV MY_FLAG=true
+
+# Return to the non-root runtime user (unchanged entrypoint from the base image).
+USER appuser
