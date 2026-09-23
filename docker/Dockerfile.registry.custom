@@ -1,0 +1,53 @@
+# Overlay image: takes a PREBUILT registry image (e.g. from Docker Hub) and adds
+#   1. the X-Forwarded-Proto fix for the generated nginx MCP location blocks, and
+#   2. a corporate/private CA.
+# It does NOT rebuild the app.
+#
+# IMPORTANT: build with the REPO ROOT as the build context (the final `.`) --
+# it copies registry/core/nginx_service.py from this repo. Pick a
+# REGISTRY_BASE_IMAGE whose version MATCHES this repo checkout so the overlaid
+# module is compatible with the rest of the image's code.
+#
+# Build:
+#   # put your PEM CA at docker/extra-ca.crt first
+#   docker build -f docker/Dockerfile.registry.custom \
+#     --build-arg REGISTRY_BASE_IMAGE=<dockerhub-user>/mcp-gateway-registry:<version> \
+#     -t <your-registry>/mcp-gateway-registry:custom .
+#
+# For K8s: push the tag and point the registry Deployment's image at it.
+
+ARG REGISTRY_BASE_IMAGE=uchimera.azurecr.io/mcpgateway/registry:1.29.0
+FROM ${REGISTRY_BASE_IMAGE}
+
+# The base image ends on `USER appuser`; the changes below need root.
+USER root
+
+# --- Fix: forward the terminated-TLS scheme in generated nginx MCP blocks ------
+# Overlays the patched module onto the editable install at /app/registry, and
+# drops cached bytecode so Python recompiles from the new source on start.
+COPY --chown=appuser:appuser registry/core/nginx_service.py /app/registry/core/nginx_service.py
+RUN rm -f /app/registry/core/__pycache__/nginx_service.*.pyc
+
+# --- Corporate / private CA trust ---------------------------------------------
+# Drop the PEM-encoded CA into the Debian local trust dir (must end in .crt).
+# The base image already copies a (corporate) bundle over
+# /etc/ssl/certs/ca-certificates.crt, so we APPEND rather than regenerate with
+# update-ca-certificates -- regenerating could drop base certs that are not in
+# the Debian store. We append to the bundle (SSL_CERT_FILE) and add the hashed
+# symlink (SSL_CERT_DIR), so clients reading either the file or the dir trust it.
+# COPY docker/extra-ca.crt /usr/local/share/ca-certificates/extra-ca.crt
+# RUN cat /usr/local/share/ca-certificates/extra-ca.crt >> /etc/ssl/certs/ca-certificates.crt \
+#     && ln -sf /usr/local/share/ca-certificates/extra-ca.crt \
+#        "/etc/ssl/certs/$(openssl x509 -hash -noout -in /usr/local/share/ca-certificates/extra-ca.crt).0"
+
+COPY ./ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+# --- Extra configuration / setup ----------------------------------------------
+# Add your customizations below. Examples:
+#   COPY my-extra.conf /app/config/my-extra.conf
+#   ENV MY_FLAG=true
+# Keep file ownership as appuser:appuser (uid/gid 1000) for anything under /app:
+#   COPY --chown=appuser:appuser my-extra.conf /app/config/my-extra.conf
+
+# Return to the non-root runtime user (unchanged entrypoint from the base image).
+USER appuser
