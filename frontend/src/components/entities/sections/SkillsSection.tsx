@@ -29,6 +29,8 @@ interface SkillsSectionProps {
   onShowToast: (message: string, type: 'success' | 'error') => void;
   onSkillUpdate: (path: string, updates: Partial<Skill>) => void;
   canToggleSkill: (skill: Skill) => boolean;
+  /** Per-skill edit capability (owner or admin), independent of the register-new capability above. */
+  canModifySkill: (skill: Skill) => boolean;
 }
 
 /**
@@ -58,6 +60,7 @@ const SkillsSection: React.FC<SkillsSectionProps> = ({
   onShowToast,
   onSkillUpdate,
   canToggleSkill,
+  canModifySkill,
 }) => {
   return (
     <div className="mb-8">
@@ -122,7 +125,7 @@ const SkillsSection: React.FC<SkillsSectionProps> = ({
               onToggle={onToggle}
               onEdit={onEdit}
               onDelete={onDelete}
-              canModify={canModify}
+              canModify={canModifySkill(skill)}
               canToggle={canToggleSkill(skill)}
               onRefreshSuccess={onRefreshSuccess}
               onShowToast={onShowToast}

@@ -143,6 +143,7 @@ const SkillCard: React.FC<SkillCardProps> = React.memo(({
   const [loadingToolCheck, setLoadingToolCheck] = useState(false);
   const [toolCheckResult, setToolCheckResult] = useState<any>(null);
   const [loadingHealthCheck, setLoadingHealthCheck] = useState(false);
+  const [loadingResourceRefresh, setLoadingResourceRefresh] = useState(false);
   const toSkillHealth = (raw: string | undefined): 'healthy' | 'unhealthy' | 'unknown' => {
     if (raw === 'healthy' || raw === 'unhealthy' || raw === 'unknown') return raw;
     return 'unknown';
@@ -324,6 +325,46 @@ const SkillCard: React.FC<SkillCardProps> = React.memo(({
       setLoadingHealthCheck(false);
     }
   }, [skill.path, authToken, loadingHealthCheck, onShowToast, onSkillUpdate]);
+
+  const handleRefreshResources = useCallback(async () => {
+    if (loadingResourceRefresh) return;
+
+    setLoadingResourceRefresh(true);
+    try {
+      const csrf = await axios.get('/api/auth/csrf-token');
+      const csrfHeaders: Record<string, string> = {};
+      if (csrf.data?.csrf_token) csrfHeaders['X-CSRF-Token'] = csrf.data.csrf_token;
+      if (authToken) csrfHeaders['Authorization'] = `Bearer ${authToken}`;
+
+      const response = await axios.post(
+        `/api/skills${skillApiPath}/refresh-resources`,
+        undefined,
+        { headers: csrfHeaders }
+      );
+
+      setResourceManifest(response.data.resource_manifest ?? null);
+
+      if (onShowToast) {
+        const count = response.data.resources_discovered ?? 0;
+        onShowToast(
+          count > 0
+            ? `Discovered ${count} resource file(s)`
+            : 'No companion resource files found',
+          'success'
+        );
+      }
+    } catch (error: any) {
+      console.error('Failed to refresh skill resources:', error);
+      if (onShowToast) {
+        onShowToast(
+          error.response?.data?.detail || 'Failed to refresh resources',
+          'error'
+        );
+      }
+    } finally {
+      setLoadingResourceRefresh(false);
+    }
+  }, [skillApiPath, authToken, loadingResourceRefresh, onShowToast]);
 
   const handleViewSecurityScan = useCallback(async () => {
     if (loadingSecurityScan) return;
@@ -677,6 +718,24 @@ const SkillCard: React.FC<SkillCardProps> = React.memo(({
                   aria-label={`Check health for ${skill.name}`}
                 >
                   <ArrowPathIcon className={`h-4 w-4 ${loadingHealthCheck ? 'animate-spin' : ''}`} />
+                </button>
+              )}
+
+              {/* Refresh Resources Button — re-discovers companion files (scripts,
+                  references, assets) from the SKILL.md repo. Owner or admin only:
+                  mirrors the backend's _user_can_modify_skill gate. */}
+              {canModify && !isArdDiscovery && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleRefreshResources();
+                  }}
+                  disabled={loadingResourceRefresh}
+                  className="p-2.5 text-gray-500 hover:text-amber-600 dark:hover:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/20 rounded-lg transition-all duration-200 disabled:opacity-50"
+                  title="Re-discover companion resource files from the repository"
+                  aria-label={`Refresh resources for ${skill.name}`}
+                >
+                  <ArrowDownTrayIcon className={`h-4 w-4 ${loadingResourceRefresh ? 'animate-pulse' : ''}`} />
                 </button>
               )}
 

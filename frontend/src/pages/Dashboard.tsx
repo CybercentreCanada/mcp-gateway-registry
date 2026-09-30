@@ -2450,7 +2450,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
             loading={skillsLoading}
             error={skillsError}
             isFiltered={!!searchTerm || activeFilter !== 'all'}
-            canModify={user?.can_modify_servers || false}
+            canModify={!!user?.is_admin || hasUiPermission('publish_skill', '')}
             page={skillPage}
             totalPages={skillTotalPages}
             pageSize={PAGE_SIZE}
@@ -2463,8 +2463,11 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
             onRefreshSuccess={refreshSkills}
             onShowToast={showToast}
             onSkillUpdate={handleSkillUpdate}
+            canModifySkill={(skill) =>
+              !!user?.is_admin || skill.owner === user?.username
+            }
             canToggleSkill={(skill) =>
-              user?.is_admin || hasUiPermission('toggle_skill', skill.path)
+              !!user?.is_admin || skill.owner === user?.username
             }
           />
         )}
@@ -2551,8 +2554,8 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
               onToggle={handleToggleSkill}
               onEdit={handleEditSkill}
               onDelete={(path) => setShowDeleteSkillConfirm(path)}
-              canModify={user?.can_modify_servers || false}
-              canToggle={user?.is_admin || hasUiPermission('toggle_skill', skill.path)}
+              canModify={!!user?.is_admin || skill.owner === user?.username}
+              canToggle={!!user?.is_admin || skill.owner === user?.username}
               onRefreshSuccess={refreshSkills}
               onShowToast={showToast}
               onSkillUpdate={handleSkillUpdate}

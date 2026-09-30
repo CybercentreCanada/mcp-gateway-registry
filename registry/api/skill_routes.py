@@ -848,6 +848,7 @@ async def refresh_skill_resources(
     http_request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     skill_path: str = Path(..., description="Skill path or name"),
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ) -> dict:
     """Re-discover companion resource files and update the stored manifest.
 

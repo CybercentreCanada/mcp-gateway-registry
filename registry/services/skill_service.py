@@ -17,6 +17,7 @@ from typing import (
 from urllib.parse import urlparse
 
 import httpx
+import yaml
 
 from ..core.config import settings
 from ..exceptions import (
@@ -690,27 +691,30 @@ async def _parse_skill_md_content(
                         frontmatter_end_pos = codeblock_no_markers.end()
 
             if frontmatter:
-                # Parse simple YAML key: value pairs
-                for line in frontmatter.split("\n"):
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        key = key.strip().lower()
-                        value = value.strip().strip('"').strip("'")
-                        if key == "name":
-                            result["name"] = value
-                        elif key == "description":
-                            result["description"] = value
-                        elif key == "version":
-                            result["version"] = value
-                        elif key == "tags":
-                            # Handle comma-separated or YAML list
-                            if value.startswith("["):
-                                value = value.strip("[]")
-                            result["tags"] = [
-                                t.strip().strip('"').strip("'")
-                                for t in value.split(",")
-                                if t.strip()
-                            ]
+                # Full YAML parse (safe_load) so block-style lists
+                # (tags:\n  - a\n  - b) parse correctly, not just
+                # flow-style (tags: [a, b]) or comma-separated strings.
+                try:
+                    parsed_frontmatter = yaml.safe_load(frontmatter)
+                except yaml.YAMLError as e:
+                    logger.warning("Failed to parse SKILL.md frontmatter as YAML: %s", e)
+                    parsed_frontmatter = None
+
+                if isinstance(parsed_frontmatter, dict):
+                    fm = {str(k).strip().lower(): v for k, v in parsed_frontmatter.items()}
+
+                    if fm.get("name") is not None:
+                        result["name"] = str(fm["name"]).strip()
+                    if fm.get("description") is not None:
+                        result["description"] = str(fm["description"]).strip()
+                    if fm.get("version") is not None:
+                        result["version"] = str(fm["version"]).strip()
+
+                    raw_tags = fm.get("tags")
+                    if isinstance(raw_tags, list):
+                        result["tags"] = [str(t).strip() for t in raw_tags if str(t).strip()]
+                    elif isinstance(raw_tags, str) and raw_tags.strip():
+                        result["tags"] = [t.strip() for t in raw_tags.split(",") if t.strip()]
 
                 # Remove frontmatter from content for further parsing
                 content = content[frontmatter_end_pos:]
