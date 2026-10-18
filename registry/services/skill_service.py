@@ -116,6 +116,57 @@ def _append_page_param(
     return f"{url}{separator}page={page}"
 
 
+def _normalize_credential(
+    credential: str | None,
+) -> str | None:
+    """Strip whitespace and an accidentally pasted "Bearer " prefix from a token."""
+    if credential is None:
+        return None
+    cleaned = credential.strip()
+    if cleaned.lower() == "bearer":
+        return None
+    if cleaned.lower().startswith("bearer "):
+        cleaned = cleaned[7:].strip()
+    return cleaned or None
+
+
+def _describe_request_error(
+    error: httpx.RequestError,
+) -> str:
+    """Build a non-empty, credential-free reason for a failed SKILL.md fetch.
+
+    Never derived from str(error): httpx echoes header values in some messages
+    (e.g. "Illegal header value b'Bearer <token>'"), and many network errors
+    stringify to "".
+    """
+    if isinstance(error, httpx.TimeoutException):
+        return (
+            "Timed out connecting to the SKILL.md host. The registry may not have "
+            "network access to it (public github.com is not reachable from this cluster)."
+        )
+    if isinstance(error, httpx.ConnectError):
+        return "Could not connect to the SKILL.md host (DNS or network error)."
+    if isinstance(error, httpx.InvalidURL):
+        return "The SKILL.md URL is not valid."
+    if isinstance(error, httpx.LocalProtocolError):
+        return "The credential contains characters that are not allowed in an HTTP header."
+    return f"Request to the SKILL.md host failed ({type(error).__name__})."
+
+
+def _describe_http_status(
+    status_code: int,
+    auth_scheme: str,
+) -> str:
+    """Explain an HTTP error from the SKILL.md host in terms the user can act on."""
+    if status_code in (401, 403, 404) and auth_scheme in ("bearer", "api_key"):
+        return (
+            f"HTTP {status_code}. The host returns this when the file does not exist or "
+            "the token is missing, expired, for a different host, or lacks read access to "
+            "the repository (GitHub Enterprise hides private repositories as 404)."
+        )
+    return f"HTTP {status_code}"
+
+
 def _build_fetch_headers(
     url: str,
     auth_scheme: str = "none",
@@ -132,6 +183,7 @@ def _build_fetch_headers(
     headers: dict[str, str] = {}
     fetch_url = url
 
+    auth_credential = _normalize_credential(auth_credential)
     if auth_scheme in ("none", "global_credentials") or not auth_credential:
         return fetch_url, headers
 
@@ -543,7 +595,9 @@ async def _validate_skill_md_url(
                 raise SkillUrlValidationError(url, f"Redirect to unsafe URL blocked: {final_url}")
 
             if response.status_code >= 400:
-                raise SkillUrlValidationError(url, f"HTTP {response.status_code}")
+                raise SkillUrlValidationError(
+                    url, _describe_http_status(response.status_code, auth_scheme)
+                )
 
             content_hash = hashlib.sha256(response.content).hexdigest()[:16]
 
@@ -558,7 +612,7 @@ async def _validate_skill_md_url(
             url, "URL failed SSRF validation - private/internal addresses are not allowed"
         ) from e
     except httpx.RequestError as e:
-        raise SkillUrlValidationError(url, str(e)) from e
+        raise SkillUrlValidationError(url, _describe_request_error(e)) from e
 
 
 async def _parse_skill_md_content(
@@ -641,7 +695,9 @@ async def _parse_skill_md_content(
                 raise SkillUrlValidationError(url, f"Redirect to unsafe URL blocked: {final_url}")
 
             if response.status_code >= 400:
-                raise SkillUrlValidationError(url, f"HTTP {response.status_code}")
+                raise SkillUrlValidationError(
+                    url, _describe_http_status(response.status_code, auth_scheme)
+                )
 
             content = response.text
             result: dict[str, Any] = {
@@ -775,7 +831,7 @@ async def _parse_skill_md_content(
             url, "URL failed SSRF validation - private/internal addresses are not allowed"
         ) from e
     except httpx.RequestError as e:
-        raise SkillUrlValidationError(url, str(e)) from e
+        raise SkillUrlValidationError(url, _describe_request_error(e)) from e
 
 
 async def _check_skill_health(
