@@ -51,13 +51,15 @@ Proposed change: `global.openbaoInitImage` and `global.openbaoInitEnabled` value
 
 ## 6. SKILL.md fetch errors are not actionable
 
-Problem: a failed SKILL.md fetch surfaces a generic error. Proposed change (`registry/services/skill_service.py`): normalize the configured credential, and describe request errors and HTTP status failures with the URL host and a remediation hint. Four files, with a new `test_skill_service_fetch_errors.py`.
+Problem: a failed SKILL.md fetch gives an empty or unhelpful reason (many httpx network errors stringify to an empty string), and a token pasted with a `Bearer ` prefix or stray whitespace is sent as-is.
+
+Proposed change (`registry/services/skill_service.py`): `_normalize_credential` strips whitespace and a pasted `Bearer ` prefix; `_describe_request_error` builds a non-empty, credential-free reason (timeout, connect error, invalid URL, illegal header characters) and is never derived from `str(error)`, because httpx can echo header values; `_describe_http_status` explains 401/403/404 for bearer and API-key auth (GitHub Enterprise hides private repositories as 404). The timeout message names the case where public github.com is not reachable from the cluster. Includes `test_skill_service_fetch_errors.py`.
 
 ## 7. Registry ingress template supports ALB only
 
-Problem: `charts/registry/templates/ingress.yaml` always emits `alb.ingress.kubernetes.io/*` annotations. On AKS with an nginx ingress controller those are ignored, and TLS is not configurable.
+Problem: `charts/registry/templates/ingress.yaml` always emits `alb.ingress.kubernetes.io/*` annotations and takes only `ingress.className`. On AKS with an nginx ingress controller the ALB annotations are ignored and there is no TLS block.
 
-Proposed change: render ALB annotations only when the class is ALB, and add `ingress.tls` support with a secret name, as in `1eed68a9`.
+Proposed change (as in `1eed68a9`): resolve the class from `ingress.className`, then `global.ingress.className`, defaulting to `alb`; emit the ALB annotations only for `alb`; for `nginx` emit `ssl-redirect`, `force-ssl-redirect`, `proxy-body-size`, and read/send timeouts; add a `spec.tls` block when `ingress.tls` (or the global equivalent) is true, with an optional `tlsSecretName`; allow extra `ingress.annotations`. Needs rebasing on the `1.37.0` template, which already handles `registrySubdomain` and path routing mode itself.
 
 ## Process notes
 
