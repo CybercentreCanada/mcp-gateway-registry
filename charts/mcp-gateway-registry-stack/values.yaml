@@ -153,6 +153,9 @@ global:
     scheme: internet-facing
     className: alb
     tls: true
+    # TLS Secret for the nginx ingress class (spec.tls secretName). Empty uses the
+    # controller's default certificate.
+    tlsSecretName: ""
     # Routing mode: "subdomain" or "path"
     # - subdomain: mcpregistry.domain.com
     # - path:      domain.com/registry

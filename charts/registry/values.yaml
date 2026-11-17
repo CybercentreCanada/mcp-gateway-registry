@@ -752,7 +752,10 @@ resources:
 # Ingress configuration
 ingress:
   enabled: false
-  className: alb
+  # Empty falls back to global.ingress.className, then "alb". "alb" renders the AWS
+  # Load Balancer Controller annotations; "nginx" renders ingress-nginx annotations
+  # and, with tls enabled, a spec.tls block.
+  className: ""
   # ALB scheme for this specific ingress. Leave empty to fall back to
   # global.ingress.scheme (chart-level default, or stack-level override
   # when deployed via mcp-gateway-registry-stack), and finally to
@@ -761,6 +764,9 @@ ingress:
   hostname: ""
   annotations: {}
   tls: false
+  # Secret holding the TLS certificate for the nginx class. Falls back to
+  # global.ingress.tlsSecretName. Empty uses the controller's default certificate.
+  tlsSecretName: ""
   # Routing mode: "subdomain" or "path"
   # - subdomain: mcpregistry.domain.com
   # - path: domain.com/registry (configurable via path setting)
