@@ -3048,6 +3048,14 @@ class NginxConfigService:
         # an unroutable remote declaration produces a genuine 502 instead.
 
         return f"""
+    # Canonicalize a slashless /agent/<path> to the proxied route. Without this it
+    # misses the prefix location below and falls through to the application route.
+    # The scheme comes from the forwarded-proto map so a TLS-terminating ingress
+    # does not get an http:// Location (a redirect loop).
+    location = {{{{ROOT_PATH}}}}{route} {{
+        return 308 {self._forwarded_scheme_var}://$host$uri/$is_args$args;
+    }}
+
     # A2A agent card (discovery): {safe_name}
     # Exact match so suffixes (e.g. /.well-known/agent-card.json/../secret)
     # cannot be smuggled through this proxy.
@@ -3132,8 +3140,8 @@ class NginxConfigService:
         proxy_set_header Host {host_header};
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Original-URL $scheme://$host$request_uri;
+        proxy_set_header X-Forwarded-Proto {self._forwarded_scheme_var};
+        proxy_set_header X-Original-URL {self._forwarded_scheme_var}://$host$request_uri;
         # SECURITY (A2A egress trust model): X-Authorization carries the caller's
         # gateway credential -- it is validated at /validate and MUST NOT reach
         # this registrant-controlled backend, or a malicious agent could replay
