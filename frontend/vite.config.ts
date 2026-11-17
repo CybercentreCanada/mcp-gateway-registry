@@ -16,6 +16,10 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   base: '/',
+  // Optional build-time override of the header GitHub link (see src/utils/githubUrl.ts).
+  define: {
+    __GITHUB_URL__: JSON.stringify(process.env.VITE_GITHUB_URL ?? ''),
+  },
   experimental: {
     renderBuiltUrl(_filename, { hostType }) {
       return hostType === 'html' ? undefined : { relative: true };
