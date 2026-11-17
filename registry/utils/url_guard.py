@@ -524,6 +524,11 @@ class _Allowlist:
     hosts: frozenset[str] = field(default_factory=frozenset)
     cidrs: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = ()
     allow_private: bool = False
+    # True only where the operator types the host list by hand and may list an IP
+    # (GITHUB_EXTRA_HOSTS, e.g. the backend a GHES raw-content server redirects
+    # to). Allowlists derived from a configured base URL stay False so a literal
+    # private IP there is never trusted.
+    trust_literal_hosts: bool = False
 
     def allows_host(
         self,
@@ -531,6 +536,13 @@ class _Allowlist:
     ) -> bool:
         """Return True if the hostname is explicitly allowlisted."""
         return hostname_lower in self.hosts
+
+    def trusts_literal_ip(
+        self,
+        hostname_lower: str,
+    ) -> bool:
+        """Return True if a literal-IP host was explicitly listed by the operator."""
+        return self.trust_literal_hosts and hostname_lower in self.hosts
 
 
 def _parse_hosts(
@@ -1108,7 +1120,10 @@ def _skill_allowlist() -> _Allowlist:
     and those hosts are still resolved, classified, and pinned.
     Cached because settings are immutable per-process.
     """
-    return _Allowlist(hosts=_parse_hosts(_get_settings().github_extra_hosts))
+    return _Allowlist(
+        hosts=_parse_hosts(_get_settings().github_extra_hosts),
+        trust_literal_hosts=True,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -1487,7 +1502,12 @@ def validate_url(
     # not mistaken for opaque hostnames.
     literal = coerce_ip_literal(hostname)
     if literal is not None:
-        if _is_blocked_ip(hostname, allowlist, allow_private=profile.allow_private):
+        if _is_blocked_ip(
+            hostname,
+            allowlist,
+            trusted_hostname=allowlist.trusts_literal_ip(hostname_lower),
+            allow_private=profile.allow_private,
+        ):
             raise UrlValidationError(url, f"targets blocked/private IP {hostname}")
         return [str(literal)]
 
@@ -1691,7 +1711,12 @@ class _PinnedResolverMixin:
         """Synchronously validate, resolve, and pin a request."""
         url, _scheme, hostname, port, allowlist = self._request_target(request)
         if coerce_ip_literal(hostname) is not None:
-            if _is_blocked_ip(hostname, allowlist, allow_private=self._guard_profile.allow_private):
+            if _is_blocked_ip(
+                hostname,
+                allowlist,
+                trusted_hostname=allowlist.trusts_literal_ip(hostname.lower()),
+                allow_private=self._guard_profile.allow_private,
+            ):
                 raise UrlValidationError(str(url), f"targets blocked/private IP {hostname}")
             return request
         pinned_ip = _resolve_public_ips(
@@ -1706,7 +1731,12 @@ class _PinnedResolverMixin:
         """Asynchronously validate, resolve under deadline, and pin a request."""
         url, _scheme, hostname, port, allowlist = self._request_target(request)
         if coerce_ip_literal(hostname) is not None:
-            if _is_blocked_ip(hostname, allowlist, allow_private=self._guard_profile.allow_private):
+            if _is_blocked_ip(
+                hostname,
+                allowlist,
+                trusted_hostname=allowlist.trusts_literal_ip(hostname.lower()),
+                allow_private=self._guard_profile.allow_private,
+            ):
                 raise UrlValidationError(str(url), f"targets blocked/private IP {hostname}")
             return request
         pinned_ip = (
@@ -1807,7 +1837,12 @@ class _PinnedResolverMixin:
         branches.
         """
         if coerce_ip_literal(hostname) is not None:
-            if _is_blocked_ip(hostname, allowlist, allow_private=self._guard_profile.allow_private):
+            if _is_blocked_ip(
+                hostname,
+                allowlist,
+                trusted_hostname=allowlist.trusts_literal_ip(hostname.lower()),
+                allow_private=self._guard_profile.allow_private,
+            ):
                 raise UrlValidationError(str(url), f"targets blocked/private IP {hostname}")
             return [hostname]
         # Raises if ANY answer is blocked under the profile's allowlist.
@@ -1824,7 +1859,12 @@ class _PinnedResolverMixin:
     ) -> list[str]:
         """Async twin of :meth:`_validated_addresses`."""
         if coerce_ip_literal(hostname) is not None:
-            if _is_blocked_ip(hostname, allowlist, allow_private=self._guard_profile.allow_private):
+            if _is_blocked_ip(
+                hostname,
+                allowlist,
+                trusted_hostname=allowlist.trusts_literal_ip(hostname.lower()),
+                allow_private=self._guard_profile.allow_private,
+            ):
                 raise UrlValidationError(str(url), f"targets blocked/private IP {hostname}")
             return [hostname]
         return await _resolve_public_ips_async(

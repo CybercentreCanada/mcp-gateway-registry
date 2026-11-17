@@ -583,6 +583,37 @@ class TestAllowlists:
                 with pytest.raises(UrlValidationError):
                     url_guard.validate_url("https://github.corp/x", profile=url_guard.PROXY_PROFILE)
 
+    def test_skill_profile_listed_literal_ip_is_trusted(self):
+        # A GHES raw-content server can redirect to a raw internal backend IP.
+        # An IP the operator listed in github_extra_hosts is trusted like a
+        # listed hostname's resolved address.
+        with patch.object(url_guard, "settings", _settings(github_extra_hosts="172.20.73.8")):
+            assert url_guard.validate_url(
+                "https://172.20.73.8/ORG/Skills/refs/heads/main/x/SKILL.md",
+                profile=url_guard.SKILL_PROFILE,
+            ) == ["172.20.73.8"]
+
+    def test_skill_profile_unlisted_literal_ip_still_rejected(self):
+        with patch.object(url_guard, "settings", _settings(github_extra_hosts="172.20.73.8")):
+            with pytest.raises(UrlValidationError):
+                url_guard.validate_url("https://172.20.73.9/x", profile=url_guard.SKILL_PROFILE)
+
+    def test_skill_profile_listed_metadata_literal_still_rejected(self):
+        with patch.object(
+            url_guard, "settings", _settings(github_extra_hosts="169.254.169.254,10.0.0.5")
+        ):
+            with pytest.raises(UrlValidationError):
+                url_guard.validate_url(
+                    "http://169.254.169.254/latest/meta-data/", profile=url_guard.SKILL_PROFILE
+                )
+
+    def test_proxy_profile_host_allowlist_does_not_trust_literal_ip(self):
+        # Literal IPs on the proxy profile are admitted by ssrf_allowed_cidrs, not
+        # by the hostname list.
+        with patch.object(url_guard, "settings", _settings(ssrf_allowed_hosts="10.1.2.3")):
+            with pytest.raises(UrlValidationError):
+                url_guard.validate_url("http://10.1.2.3/mcp", profile=url_guard.PROXY_PROFILE)
+
 
 # ---------------------------------------------------------------------------
 # Pinned transport (DNS-rebinding defeat)
@@ -632,6 +663,46 @@ class TestPinnedTransport:
             request = httpx.Request("GET", "http://169.254.169.254/latest/meta-data/")
             with pytest.raises(UrlValidationError):
                 transport._pin_request(request)
+
+    def test_pin_allows_listed_literal_ip(self):
+        # Fetch-time pinning while following a redirect must agree with validate_url.
+        with patch.object(url_guard, "settings", _settings(github_extra_hosts="172.20.73.8")):
+            transport = url_guard.GuardedAsyncTransport(guard_profile=url_guard.SKILL_PROFILE)
+            request = httpx.Request("GET", "https://172.20.73.8/ORG/Skills/x/SKILL.md")
+            pinned = transport._pin_request(request)
+        assert pinned.url.host == "172.20.73.8"
+
+    async def test_async_pin_allows_listed_literal_ip(self):
+        with patch.object(url_guard, "settings", _settings(github_extra_hosts="172.20.73.8")):
+            transport = url_guard.GuardedAsyncTransport(guard_profile=url_guard.SKILL_PROFILE)
+            request = httpx.Request("GET", "https://172.20.73.8/ORG/Skills/x/SKILL.md")
+            pinned = await transport._pin_request_async(request)
+        assert pinned.url.host == "172.20.73.8"
+
+    def test_pin_rejects_unlisted_literal_ip(self):
+        with patch.object(url_guard, "settings", _settings(github_extra_hosts="172.20.73.8")):
+            transport = url_guard.GuardedAsyncTransport(guard_profile=url_guard.SKILL_PROFILE)
+            request = httpx.Request("GET", "https://172.20.73.9/x")
+            with pytest.raises(UrlValidationError):
+                transport._pin_request(request)
+
+    def test_validated_addresses_allows_listed_literal_ip(self):
+        with patch.object(url_guard, "settings", _settings(github_extra_hosts="172.20.73.8")):
+            transport = url_guard.GuardedAsyncTransport(guard_profile=url_guard.SKILL_PROFILE)
+            url = httpx.URL("https://172.20.73.8/x")
+            allowlist = url_guard.SKILL_PROFILE.allowlist_factory()
+            assert transport._validated_addresses(url, "172.20.73.8", 443, allowlist) == [
+                "172.20.73.8"
+            ]
+
+    async def test_validated_addresses_async_allows_listed_literal_ip(self):
+        with patch.object(url_guard, "settings", _settings(github_extra_hosts="172.20.73.8")):
+            transport = url_guard.GuardedAsyncTransport(guard_profile=url_guard.SKILL_PROFILE)
+            url = httpx.URL("https://172.20.73.8/x")
+            allowlist = url_guard.SKILL_PROFILE.allowlist_factory()
+            assert await transport._validated_addresses_async(
+                url, "172.20.73.8", 443, allowlist
+            ) == ["172.20.73.8"]
 
     def test_pin_rebinding_between_check_and_connect_is_defeated(self):
         """A host that validated once but rebinds to a private IP is still blocked.
