@@ -9,7 +9,7 @@ We curate and run each change ourselves first (see [cccs-main-1.37.0-port-audit.
 |---|---|---|---|
 | 1 | Allowlisted literal-IP hosts are never relaxed by the SSRF guard | Yes, read from the tag, not yet reproduced on `1.37.0` | `26f1cd3e` |
 | 2 | `charts/registry` has no `githubExtraHosts` value | Yes | `6d0c6844` |
-| 3 | Generated nginx MCP blocks forward `$scheme` instead of the terminated-TLS scheme | Yes | `fe59c5f8` |
+| 3 | Generated nginx MCP and agent blocks forward `$scheme` instead of the terminated-TLS scheme | Yes for agent blocks and `X-Original-URL`; the 308 symptom on MCP servers may already be fixed by the auth server stripping `x-forwarded-*` | `fe59c5f8` |
 | 4 | `openbao-init` needs internet access at runtime and has no image override or opt-out | Yes | `607380f2`, `7205d71f`, `02fd175e`, `9dd29761` |
 | 5 | SKILL.md fetch errors are not actionable | Yes (apply trial clean) | `abd522be` |
 | 6 | Registry ingress template supports ALB only | Yes | `1eed68a9` |
@@ -32,11 +32,13 @@ Problem: `charts/mcpgw` exposes `app.githubExtraHosts` and reserves `GITHUB_EXTR
 
 Proposed change: add `app.githubExtraHosts` to `charts/registry/values.yaml`, render `GITHUB_EXTRA_HOSTS` in `templates/deployment.yaml` when set, add the name to `reserved-env-names.txt`, and add two `extra_env_test.yaml` cases (omitted by default, rendered when set). Document that it is a separate allowlist from `ssrfAllowedHosts`/`ssrfAllowedCidrs`, which feed the proxy profile and are never consulted for skill fetches.
 
-## 3. Generated nginx MCP blocks forward `$scheme` instead of the terminated-TLS scheme
+## 3. Generated nginx blocks forward `$scheme` instead of the terminated-TLS scheme
 
 Problem: when an ingress or load balancer terminates TLS, nginx inside the registry pod sees `$scheme = http`. The generated per-server location blocks send `X-Forwarded-Proto $scheme` and `X-Original-URL $scheme://...`, so upstreams behind their own force-SSL redirect answer 308 to the gateway.
 
 Proposed change: forward the template's forwarded-proto map variable (`$real_scheme` in the http+https template, `$forwarded_proto` in the http-only template) through a `_forwarded_scheme_var` attribute set in `NginxConfigService.__init__`. Includes a unit test asserting the generated block never contains `$scheme` in those two headers.
+
+The same applies to the generated A2A agent blocks, which proxy directly to the agent backend (`proxy_pass {backend_url}/`), and a slashless `/agent/<path>` needs a 308 to the proxied route built from the same variable. On `1.37.0` the MCP blocks go through the auth server, which strips `x-forwarded-*` before calling the upstream, so reproduce the original 308 on a stock image before filing; the agent blocks have no such intermediary.
 
 ## 4. `openbao-init` needs internet access at runtime and has no image override or opt-out
 
