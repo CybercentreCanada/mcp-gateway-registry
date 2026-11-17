@@ -25,7 +25,13 @@ being deployed by this stack.
 {{- if .Values.openbao }}
   {{- $openbaoEnabled = .Values.openbao.enabled | default false }}
 {{- end }}
-{{- if and $egressEnabled $openbaoEnabled }}
+{{- /* global.openbaoInitEnabled (default true): skip only the init Job when its image
+       cannot be used (air-gapped clusters). The OpenBao StatefulSet still deploys. */ -}}
+{{- $initEnabled := true }}
+{{- if hasKey .Values.global "openbaoInitEnabled" }}
+  {{- $initEnabled = .Values.global.openbaoInitEnabled }}
+{{- end }}
+{{- if and $egressEnabled $openbaoEnabled $initEnabled }}
 {{- $ns := .Release.Namespace }}
 {{- $kvMount := "secret" }}
 {{- $egressPrefix := "mcp/egress" }}
@@ -150,7 +156,7 @@ spec:
           # parses the init JSON robustly; kubectl writes the keys Secret with
           # proper k8s TLS (busybox wget in the openbao image cannot verify the
           # API cert -- the original failure mode).
-          image: public.ecr.aws/docker/library/python:3.14-slim
+          image: {{ .Values.global.openbaoInitImage | default "public.ecr.aws/docker/library/python:3.14-slim" | quote }}
           env:
             - name: BAO_ADDR
               value: "http://{{ include "mcp-gateway-registry-stack.openbaoServiceHost" . }}:8200"

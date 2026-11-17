@@ -214,3 +214,45 @@ tests:
           content:
             name: OBO_CACHE_ENABLED
             value: "false"
+
+  - it: Job image defaults to the public python image
+    documentIndex: 3
+    set:
+      registry: {egressAuth: {enabled: true}}
+      openbao: {enabled: true}
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: public.ecr.aws/docker/library/python:3.14-slim
+
+  - it: Job image honours global.openbaoInitImage
+    documentIndex: 3
+    set:
+      global:
+        openbaoInitImage: registry.example.com/mirror/python:3.14-slim
+      registry: {egressAuth: {enabled: true}}
+      openbao: {enabled: true}
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.example.com/mirror/python:3.14-slim
+
+  - it: global.openbaoInitEnabled=false skips the init resources
+    set:
+      global:
+        openbaoInitEnabled: false
+      registry: {egressAuth: {enabled: true}}
+      openbao: {enabled: true}
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: global.openbaoInitEnabled=true keeps the four init documents
+    set:
+      global:
+        openbaoInitEnabled: true
+      registry: {egressAuth: {enabled: true}}
+      openbao: {enabled: true}
+    asserts:
+      - hasDocuments:
+          count: 4
