@@ -189,7 +189,11 @@ spec:
             - -c
             - |
               set -euo pipefail
-              apt-get update -qq && apt-get install -y -qq curl jq kubectl >/dev/null
+              # Install only what is missing, so an image that already ships curl,
+              # jq and kubectl (global.openbaoInitImage) runs without internet access.
+              if ! command -v curl >/dev/null || ! command -v jq >/dev/null || ! command -v kubectl >/dev/null; then
+                apt-get update -qq && apt-get install -y -qq curl jq kubectl >/dev/null
+              fi
 
               # All OpenBao calls go over plain HTTP (tls_disable=1) to the REST
               # API; helper wraps curl with the (optional) root token header.

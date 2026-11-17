@@ -256,3 +256,14 @@ tests:
     asserts:
       - hasDocuments:
           count: 4
+
+  - it: Job installs curl, jq and kubectl only when one is missing (air-gapped images)
+    documentIndex: 3
+    set:
+      registry: {egressAuth: {enabled: true}}
+      openbao: {enabled: true}
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'if ! command -v curl >/dev/null \|\| ! command -v jq >/dev/null \|\| ! command -v kubectl >/dev/null; then\n\s+apt-get update'
+
