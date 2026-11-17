@@ -480,3 +480,7 @@ site/
 
 # Local machine-specific build artifacts (never commit)
 .local-build/
+
+# Overlay build staging and the optional host CA bundle
+.overlay/
+ca-certificates.crt
