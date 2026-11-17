@@ -55,7 +55,7 @@ The 1.37.0 notes add a per-provider JWKS refetch (rate limited to once a minute)
 | A2 | `registrySubdomain` in secrets, ingress, egress configmaps | `037e35fa`, `d87137e4`, `1dd8d684` | COVERED | Upstream now reads `global.ingress.registrySubdomain` in registry ingress and secret, auth-server secret, keycloak-configure, mcpgw, oauth-provider-secret and the egress configmaps. This also closes the keycloak-configure/mcpgw gap noted in the 1.29.0 audit. Verify by rendering with the staging value `mcpregistry-stg`. |
 | A3 | mongodb-configure `pythonImage`, `PIP_INDEX_URL`, setup-mongodb fixes, image-registry override | `81821da8`, `48493c7c`, `38bfc6a3`, `a9210bcc`, `a9b08a77` | OBSOLETE | The job now runs the registry image and installs nothing at runtime; image registry comes from `global.image.registry` / `image.registry`. |
 | A4 | openbao-init: image override, `openbaoInitEnabled` escape hatch, pure-Python rewrite (no runtime apt-get), HTTP 204 handling, test update | `607380f2`, `7205d71f`, `d87137e4`, `02fd175e`, `9dd29761`, `dcc057b8` | PORT | `1.37.0` `openbao-init.yaml` still runs `apt-get install curl jq kubectl` in `public.ecr.aws/docker/library/python:3.14-slim`, which does not work in our network. `607380f2` and `7205d71f` apply cleanly; the rewrite must be redone against the new template (it uses jq/kubectl). |
-| A5 | `charts/registry` `app.githubExtraHosts` -> `GITHUB_EXTRA_HOSTS` | `6d0c6844` | PORT | Only `charts/mcpgw` has it in `1.37.0`. Trial: conflict (reserved-env list, deployment, test). Upstream candidate. |
+| A5 | `charts/registry` `app.githubExtraHosts` -> `GITHUB_EXTRA_HOSTS` | `6d0c6844` | DONE | Only `charts/mcpgw` has it in `1.37.0`. Trial: conflict (reserved-env list, deployment, test). Upstream candidate. |
 | A6 | configmap namespace syntax fix | `037e35fa` (part) | OBSOLETE | The mongodb-configure ConfigMap no longer exists. |
 | A7 | Overlay build and custom Dockerfiles | `3d0136cf`, `58cc633d` (files) | PORT | Trial: clean. Extend to overlay every patched module. |
 | A8 | Move `ssrfAllowedCidrs` to `global.ssrfAllowedCidrs` in env values | (deployment repo) | PORT | Values change, no chart change. |
@@ -78,9 +78,9 @@ The 1.37.0 notes add a per-provider JWKS refetch (rate limited to once a minute)
 | C1 | SKILL.md security scan with GHES credentials (`_build_skill_fetch_auth`) | `21013bdf` | PORT | Function absent upstream; the surrounding code changed. Trial: conflict (`skill_routes.py`, `skill_service.py`). |
 | C2 | SKILL.md fetch error hardening | `abd522be` | PORT | Absent upstream. Trial: clean (4 files, includes its tests). |
 | C3 | Skill ownership gating, frontmatter tag parsing, resource refresh action | `3d13a70e` | PARTIAL | Upstream already parses frontmatter tags generically and `skill_routes.py` has a resources-discovered path. Re-check whether the tag-parsing bug and the ownership gating still reproduce; the UI refresh button (`handleRefreshResources`) is absent. Trial: conflict (`Dashboard.tsx`). |
-| C4 | `url_guard` literal-IP allowlist fix | `26f1cd3e` | PORT | The `1.37.0` literal-IP branches (`validate_url` and the three transport sites) still call `_is_blocked_ip` without `trusted_hostname`. Needed for the GHES redirect to `172.20.73.8` (stable per the team). Upstream candidate. |
-| C5 | Forwarded scheme: nginx MCP blocks use `$real_scheme`/`$forwarded_proto`, not `$scheme` | `fe59c5f8` | PORT | Still `$scheme` upstream. Trial: clean apart from the submodule path. Upstream candidate. |
-| C6 | Forwarded scheme in the auth server | `4cbc52e4` | PORT | Trial: clean. |
+| C4 | `url_guard` literal-IP allowlist fix | `26f1cd3e` | DONE | Ported with a narrower design than on `1.29.0`: only the skill allowlist (`GITHUB_EXTRA_HOSTS`) trusts operator-listed literal IPs, because `1.37.0` has a test that a literal private IP from a configured base URL must not be trusted. See `cccs-upstream-contributions.md` item 1. |
+| C5 | Forwarded scheme: nginx MCP blocks use `$real_scheme`/`$forwarded_proto`, not `$scheme` | `fe59c5f8` | DONE | Still `$scheme` upstream. Trial: clean apart from the submodule path. Upstream candidate. |
+| C6 | Forwarded scheme in the auth server | `4cbc52e4` | COVERED | `1.37.0` `_PROXY_CONTEXT_HEADERS` already strips `forwarded`, `x-forwarded-host`, `x-forwarded-port` and `x-forwarded-proto` in `_forward_headers`. The cherry-pick applied cleanly only because the lines differ; behavior is already present. Not ported. |
 | C7 | Agent proxying must not downgrade to http | `10b20da2` | PORT | Trial: conflict in one test file only. |
 | C8 | A2A shared gateway/agent token (`A2A_SHARED_GATEWAY_AGENT_TOKEN`) | `05cbdd60` (1.27.1 line), `58cc633d` (1.29.0 port, use this one) | PORT | Absent upstream. Conflicts in `charts/auth-server`. Must be re-checked against the new egress/OBO code and the per-user vault change. |
 | C9 | Ingress relay of the access token to listed MCP servers (`ingressRelayAllowedServers`) | `dbbb0154` | REVIEW | Absent upstream and it overlaps the reworked egress credentials and the OBO cache. Staging and prod use it (`/rag`, `/rag-stg`, `/mcp-a2a-bridge`). Decide whether to port as-is or re-express it on the new egress model; either way it must exist on dev. |
@@ -91,12 +91,13 @@ The 1.37.0 notes add a per-provider JWKS refetch (rate limited to once a minute)
 
 48 commits evaluated: 7 apply cleanly, 40 conflict, 1 is empty on `1.37.0`.
 The clean ones are `607380f2`, `7205d71f`, `7526db9f` (docs), `4cbc52e4`, `97f34deb`, `abd522be` and `3d0136cf`.
+A clean apply does not prove the behavior is missing upstream: `4cbc52e4` applied cleanly but `1.37.0` already strips the same headers under a different name. Check behavior, not just the diff, before porting each item.
 The 40 conflicts are mostly the chart items that are obsolete or already reimplemented upstream (A2, A3, A6, B2) plus code that moved (C1, C3, C4, B4, B5).
 A verbatim-line comparison of each commit against `1.37.0` found essentially no commit already present upstream (all but a few at 0 to 11 percent), which is consistent with the matrix above.
 
 ## Suggested order
 
-1. A5, A7, C4, C5, C6, C7 (small, well understood, upstream candidates), each with its tests.
+1. A5, A7, C4, C5, C7 (small, well understood, upstream candidates), each with its tests.
 2. A4, A1 (chart work with `helm unittest` coverage).
 3. C2, C1, B6, C11.
 4. B1, B2 (decide source of truth first), B4, B5, C3.
