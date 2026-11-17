@@ -103,6 +103,15 @@ class TestParseSkillMdContent:
         ):
             return await svc._parse_skill_md_content(GHES_URL, **kwargs)
 
+    async def test_block_style_tags_are_parsed(self):
+        content = (
+            "---\nname: demo\ndescription: d\ntags:\n  - triage\n  - KT:TIER:STABLE\n---\n# Demo\n"
+        )
+        ctx = _mock_client(_response(text=content, url="https://raw.github.chimera.cyber.gc.ca/x"))
+        result = await self._parse(ctx)
+        assert result["tags"] == ["triage", "KT:TIER:STABLE"]
+        assert result["name"] == "demo"
+
     @pytest.mark.parametrize(
         ("tags_line", "expected"),
         [("tags: [a, b]", ["a", "b"]), ("tags: a, b", ["a", "b"]), ("tags:", [])],
