@@ -209,6 +209,12 @@ spec:
               value: {{ .Values.app.ssrfAllowedHosts | default "" | quote }}
             - name: SSRF_ALLOWED_CIDRS
               value: {{ .Values.global.ssrfAllowedCidrs | default .Values.app.ssrfAllowedCidrs | default "" | quote }}
+            # GHES/internal-GitHub allowlist for SKILL.md fetching -- a separate
+            # allowlist from SSRF_ALLOWED_HOSTS/CIDRS above (see values.yaml comment).
+            {{- if .Values.app.githubExtraHosts }}
+            - name: GITHUB_EXTRA_HOSTS
+              value: {{ .Values.app.githubExtraHosts | quote }}
+            {{- end }}
             - name: CIMD_PUBLISHER_ENABLED
               value: {{ .Values.app.cimdPublisherEnabled | default false | toString | quote }}
             - name: CIMD_CACHE_TTL
