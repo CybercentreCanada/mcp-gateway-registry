@@ -1666,7 +1666,11 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
 
       // Per-user egress credential vault (separate admin endpoint; the server
       // must exist first, which it does on edit). Only when the feature is on.
-      if (egressEnabled) {
+      // A non-admin cannot change an admin-set OBO exchange; the server would
+      // refuse it, so leave that config alone instead of reporting a failure.
+      const leavesAdminOboAlone =
+        editForm.egress_auth_mode === 'obo_exchange' && !user?.is_admin;
+      if (egressEnabled && !leavesAdminOboAlone) {
         try {
           const csrf = await axios.get('/api/auth/csrf-token');
           const csrfHeaders: Record<string, string> = {};
@@ -3177,6 +3181,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
           loading={editLoading}
           egressEnabled={egressEnabled}
           withGateway={withGateway}
+          isAdmin={!!user?.is_admin}
           onSave={handleSaveEdit}
           onClose={handleCloseEdit}
         />

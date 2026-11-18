@@ -92,6 +92,8 @@ interface ServerEditModalProps {
   egressEnabled: boolean;
   /** True only in with-gateway deployment mode; egress auth requires a gateway. */
   withGateway: boolean;
+  /** OBO exchange can only be set by admins; the server refuses it for registrants. */
+  isAdmin: boolean;
   onSave: () => Promise<void> | void;
   onClose: () => void;
 }
@@ -108,6 +110,7 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({
   loading,
   egressEnabled,
   withGateway,
+  isAdmin,
   onSave,
   onClose,
 }) => {
@@ -398,6 +401,7 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({
                   <select
                     id="egress-auth-mode"
                     value={form.egress_auth_mode}
+                    disabled={form.egress_auth_mode === 'obo_exchange' && !isAdmin}
                     onChange={(e) =>
                       setForm((prev) => ({
                         ...prev,
@@ -408,11 +412,18 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({
                   >
                     <option value="none">Disabled</option>
                     <option value="oauth_user">Per-user OAuth (3LO)</option>
-                    <option value="obo_exchange">OBO exchange (same IdP)</option>
+                    {(isAdmin || form.egress_auth_mode === 'obo_exchange') && (
+                      <option value="obo_exchange">OBO exchange (same IdP)</option>
+                    )}
                     <option value="pat">Per-user PAT / API key</option>
                     <option value="ingress_relay">Ingress token relay (same token)</option>
                   </select>
                 </div>
+                {form.egress_auth_mode === 'obo_exchange' && !isAdmin && (
+                  <p className="text-xs text-amber-700 dark:text-amber-300">
+                    OBO exchange is configured by an administrator and is not changed when you save.
+                  </p>
+                )}
                 {form.egress_auth_mode === 'ingress_relay' && (
                   <p className="text-xs text-amber-700 dark:text-amber-300">
                     Requires this server path in EGRESS_INGRESS_RELAY_ALLOWED_SERVERS. The
