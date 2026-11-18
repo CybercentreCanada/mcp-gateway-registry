@@ -39,6 +39,9 @@ AssetFamily = Literal["server", "agent", "skill", "custom_entity"]
 # discovery action every family gates on.
 AssetAction = Literal["list", "get", "create", "modify", "delete", "toggle", "health_check"]
 
+# Actions a "*" grant applies to (see user_has_asset_permission).
+_OWNER_SCOPED_ACTIONS: frozenset[str] = frozenset({"create", "modify", "delete", "toggle"})
+
 # (family, action) -> the EXACT on-disk ui_permission key. These strings match
 # what is persisted in the scope store today; do not "fix" them here (see the
 # module docstring). custom_entity is intentionally ABSENT: its keys are
@@ -117,6 +120,7 @@ def user_has_asset_permission(
     user_context: dict,
     *,
     type_name: str | None = None,
+    owner: str | None = None,
 ) -> bool:
     """Return True if the caller may perform ``action`` on ``resource_name``.
 
@@ -125,6 +129,11 @@ def user_has_asset_permission(
     - Admin (``user_context["is_admin"]``) is the catch-all bypass.
     - Otherwise the caller must hold the family/action scope for this specific
       resource (or ``"all"``) in their ``ui_permissions``.
+    - A ``"*"`` grant means "my own resources": ``create`` anywhere, but
+      ``modify``/``toggle``/``delete`` only when ``owner`` (the resource's
+      registrant) is the caller. Without ``owner`` it grants nothing, so a call
+      site that has not been given the owner stays fail-closed. It never confers
+      admin (only ``"all"`` does) and never applies to list/get/health_check.
     - Fails closed: a missing/empty ``ui_permissions`` denies.
 
     Args:
@@ -135,6 +144,7 @@ def user_has_asset_permission(
             resource list.
         user_context: The authenticated request context.
         type_name: The custom type name; REQUIRED when family == custom_entity.
+        owner: Username that registered the resource, for the ``"*"`` grant.
 
     Returns:
         True if access is permitted, False otherwise.
@@ -143,7 +153,14 @@ def user_has_asset_permission(
         return True
     scope = asset_scope_name(family, action, type_name)
     granted = (user_context.get("ui_permissions") or {}).get(scope) or []
-    return "all" in granted or resource_name in granted
+    if "all" in granted or resource_name in granted:
+        return True
+    if "*" not in granted or action not in _OWNER_SCOPED_ACTIONS:
+        return False
+    if action == "create":
+        return True
+    username = user_context.get("username")
+    return bool(username) and owner == username
 
 
 def accessible_resources_for(
