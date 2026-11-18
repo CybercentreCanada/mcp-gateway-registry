@@ -70,6 +70,15 @@ describe('buildEgressConfigBody', () => {
     });
   });
 
+  it('builds the ingress_relay body without any credential fields', () => {
+    const body = buildEgressConfigBody({
+      ...form,
+      egress_auth_mode: 'ingress_relay',
+      egress_client_secret: 'must-not-be-sent',
+    });
+    expect(body).toEqual({ egress_auth_mode: 'ingress_relay' });
+  });
+
   it('builds the disabled body', () => {
     expect(buildEgressConfigBody(form)).toEqual({ egress_auth_mode: 'none' });
   });

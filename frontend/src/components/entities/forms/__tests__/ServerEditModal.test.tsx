@@ -154,6 +154,17 @@ describe('ServerEditModal', () => {
     expect(screen.getByText('Egress Auth')).toBeInTheDocument();
   });
 
+  it('shows the ingress_relay mode and its allowlist requirement', () => {
+    render(<Harness initial={{ ...baseForm, egress_auth_mode: 'ingress_relay' }} egressEnabled />);
+    expect(screen.getByRole('combobox', { name: 'Mode' })).toHaveValue('ingress_relay');
+    expect(screen.getByText(/Requires this server path/)).toBeInTheDocument();
+  });
+
+  it('hides the ingress_relay hint for other modes', () => {
+    render(<Harness egressEnabled />);
+    expect(screen.queryByText(/Requires this server path/)).not.toBeInTheDocument();
+  });
+
   it('hides the egress section for local deployments even when enabled', () => {
     render(<Harness initial={{ ...baseForm, deployment: 'local' }} egressEnabled />);
     expect(screen.queryByText('Egress Auth')).not.toBeInTheDocument();

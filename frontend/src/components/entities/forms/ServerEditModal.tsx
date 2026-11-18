@@ -46,8 +46,8 @@ export interface ServerEditForm {
   deployment: 'remote' | 'local';
   local_runtime: LocalRuntimeFormData;
   custom_headers: Array<{ name: string; value: string }>;
-  // Egress auth to the upstream (admin config). 'none' | 'oauth_user' | 'obo_exchange' | 'pat'.
-  egress_auth_mode: 'none' | 'oauth_user' | 'obo_exchange' | 'pat';
+  // Egress auth to the upstream (admin config).
+  egress_auth_mode: 'none' | 'oauth_user' | 'obo_exchange' | 'pat' | 'ingress_relay';
   // oauth_user (3LO vault) fields:
   egress_provider: string;
   egress_client_id: string;
@@ -389,11 +389,14 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({
                 account (GitHub, Slack, …) whose token the gateway injects.
                 <strong> OBO exchange</strong> re-audiences the user&apos;s gateway token to an
                 internal server&apos;s app via the same IdP (no per-user login).
+                <strong> Ingress relay</strong> forwards the original bearer token unchanged to
+                an operator-allowlisted, same-trust-domain server.
               </p>
               <div className="space-y-3">
                 <div>
-                  <label className={LABEL}>Mode</label>
+                  <label htmlFor="egress-auth-mode" className={LABEL}>Mode</label>
                   <select
+                    id="egress-auth-mode"
                     value={form.egress_auth_mode}
                     onChange={(e) =>
                       setForm((prev) => ({
@@ -407,8 +410,15 @@ const ServerEditModal: React.FC<ServerEditModalProps> = ({
                     <option value="oauth_user">Per-user OAuth (3LO)</option>
                     <option value="obo_exchange">OBO exchange (same IdP)</option>
                     <option value="pat">Per-user PAT / API key</option>
+                    <option value="ingress_relay">Ingress token relay (same token)</option>
                   </select>
                 </div>
+                {form.egress_auth_mode === 'ingress_relay' && (
+                  <p className="text-xs text-amber-700 dark:text-amber-300">
+                    Requires this server path in EGRESS_INGRESS_RELAY_ALLOWED_SERVERS. The
+                    upstream must validate the same issuer, audience, signature, and expiry.
+                  </p>
+                )}
                 {LIST_BEFORE_CONSENT_MODES.includes(form.egress_auth_mode) && (
                   <div>
                     <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-900 dark:text-white">

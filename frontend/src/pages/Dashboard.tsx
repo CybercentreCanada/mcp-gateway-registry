@@ -334,7 +334,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
     },
     custom_headers: [] as Array<{ name: string; value: string }>,
     // Egress auth to the upstream (admin config).
-    egress_auth_mode: 'none' as 'none' | 'oauth_user' | 'obo_exchange' | 'pat',
+    egress_auth_mode: 'none' as 'none' | 'oauth_user' | 'obo_exchange' | 'pat' | 'ingress_relay',
     egress_provider: '',
     egress_client_id: '',
     egress_client_secret: '',  // write-only; blank on edit keeps the stored one
@@ -1361,7 +1361,12 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
         deployment,
         local_runtime: buildLocalRuntimeForm(localRuntimeRaw),
         custom_headers: (serverDetails.custom_header_names || []).map((name: string) => ({ name, value: '' })),
-        egress_auth_mode: (serverDetails.egress_auth_mode || 'none') as 'none' | 'oauth_user' | 'obo_exchange' | 'pat',
+        egress_auth_mode: (serverDetails.egress_auth_mode || 'none') as
+          | 'none'
+          | 'oauth_user'
+          | 'obo_exchange'
+          | 'pat'
+          | 'ingress_relay',
         egress_provider: serverDetails.egress_oauth?.provider || '',
         egress_client_id: serverDetails.egress_oauth?.client_id || '',
         egress_client_secret: '',  // never round-trip the secret
