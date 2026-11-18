@@ -61,8 +61,9 @@ tests:
       #   env[24] = EGRESS_FORWARD_PROXY_ENABLED   (issue #1832)
       #   env[25] = EGRESS_FORWARD_PROXY_CA_BUNDLE (issue #1832)
       #   env[26] = SSRF_ALLOWED_CIDRS (issue #2018, always rendered)
-      #   env[27] = MY_FLAG       (extraEnv[0])
-      #   env[28] = MY_SECRET_VAR (extraEnv[1])
+      #   env[27] = A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED (always rendered)
+      #   env[28] = MY_FLAG       (extraEnv[0])
+      #   env[29] = MY_SECRET_VAR (extraEnv[1])
       - equal:
           path: spec.template.spec.containers[0].env[0].name
           value: ENTRA_CLIENT_SECRET
@@ -100,9 +101,12 @@ tests:
           value: SSRF_ALLOWED_CIDRS
       - equal:
           path: spec.template.spec.containers[0].env[27].name
-          value: MY_FLAG
+          value: A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED
       - equal:
           path: spec.template.spec.containers[0].env[28].name
+          value: MY_FLAG
+      - equal:
+          path: spec.template.spec.containers[0].env[29].name
           value: MY_SECRET_VAR
 
   - it: enables Entra overage recovery with a 300-second positive cache by default
@@ -490,6 +494,15 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "\"ENTRA_GROUP_CACHE_TTL_SECONDS\" is a reserved variable"
+
+  - it: fails when extraEnv contains A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED
+    set:
+      extraEnv:
+        - name: A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED
+          value: "true"
+    asserts:
+      - failedTemplate:
+          errorPattern: "\"A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED\" is a reserved variable"
 
   - it: fails when extraEnv contains ENTRA_SCOPE_FORMAT (issue #990)
     set:
