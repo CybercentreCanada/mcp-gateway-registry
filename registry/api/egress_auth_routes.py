@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from registry.auth.asset_permissions import user_has_asset_permission
 from registry.auth.csrf import verify_csrf_token_flexible
 from registry.auth.dependencies import browser_session_context, nginx_proxied_auth
 from registry.auth.internal import validate_internal_auth
@@ -1153,6 +1154,41 @@ def _require_admin(user_context: dict) -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="admin required")
 
 
+# Modes a registrant may set on their own server. obo_exchange re-audiences every
+# caller's gateway token to a registrant-chosen audience and sends it to the
+# registrant's upstream, so it stays admin-only. ingress_relay is bounded by the
+# operator allowlist.
+_REGISTRANT_EGRESS_MODES = frozenset({"none", "oauth_user", "pat", "ingress_relay"})
+
+
+def _require_admin_or_registrant(
+    user_context: dict,
+    server: dict,
+    new_mode: str | None = None,
+) -> None:
+    """Allow admins, or the registrant of the server with modify permission.
+
+    A registrant may not touch a server whose stored mode is obo_exchange, nor
+    set it (``new_mode``); that mode stays with admins. Fails closed.
+    """
+    if user_context.get("is_admin"):
+        return
+    username = user_context.get("username")
+    if not username or server.get("registered_by") != username:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail="Only admins or the server registrant may configure egress auth",
+        )
+    if not user_has_asset_permission(
+        "server", "modify", server.get("server_name") or "", user_context
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="modify permission required")
+    if server.get("egress_auth_mode") == "obo_exchange" or (
+        new_mode is not None and new_mode not in _REGISTRANT_EGRESS_MODES
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="admin required for this egress mode")
+
+
 def _validated_expected_issuer(
     value: str | None,
 ) -> str | None:
@@ -1268,13 +1304,14 @@ async def configure_egress_auth(
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
     _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
-    """Configure (or disable) per-user egress OAuth on a server. Admin only.
+    """Configure (or disable) per-user egress OAuth on a server.
+
+    Admins, or the registrant of the server (not for obo_exchange).
 
     The client_secret is Fernet-encrypted and never returned. Returns the
     callback URL the operator must register in the provider's OAuth app.
     """
     _feature_enabled_or_404()
-    _require_admin(user_context)
 
     if not server_path.startswith("/"):
         server_path = "/" + server_path
@@ -1282,6 +1319,7 @@ async def configure_egress_auth(
     server = await server_service.get_server_info(server_path, include_credentials=True)
     if not server:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="server not found")
+    _require_admin_or_registrant(user_context, server, body.egress_auth_mode)
 
     if body.egress_auth_mode == "none":
         server["egress_auth_mode"] = "none"
@@ -1376,14 +1414,14 @@ async def get_egress_auth_config(
     server_path: str,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
 ):
-    """Read a server's egress config (secret stripped). Admin only."""
+    """Read a server's egress config (secret stripped). Admin or the registrant."""
     _feature_enabled_or_404()
-    _require_admin(user_context)
     if not server_path.startswith("/"):
         server_path = "/" + server_path
     server = await server_service.get_server_info(server_path, include_credentials=False)
     if not server:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="server not found")
+    _require_admin_or_registrant(user_context, server)
     return _egress_config_view(server)
 
 
