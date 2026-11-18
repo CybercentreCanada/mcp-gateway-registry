@@ -2866,6 +2866,14 @@ async def edit_server_submit(
                     detail="You do not have access to edit this server",
                 )
 
+    # The edit form is prefilled from a response that redacts the backend URLs for
+    # callers who must not see them, so it submits them empty. Keep the stored
+    # values instead of rejecting the edit or wiping the routing config.
+    if not is_local and should_redact_backend_urls(user_context):
+        proxy_pass_url = proxy_pass_url or server_info.get("proxy_pass_url")
+        mcp_endpoint = mcp_endpoint or server_info.get("mcp_endpoint")
+        sse_endpoint = sse_endpoint or server_info.get("sse_endpoint")
+
     # Shape validation + local_runtime parsing are shared with /register.
     validate_deployment_shape(
         is_local=is_local,
