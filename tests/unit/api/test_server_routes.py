@@ -2413,9 +2413,12 @@ class TestEditRemoteServerBackendUrlRedaction:
         "registered_by": "testuser",
     }
 
-    def _edit(self, client, service, user_context, **form):
-        user_context["ui_permissions"]["modify_service"] = ["Existing Remote"]
-        service.get_server_info.return_value = dict(self.STORED)
+    def _edit(self, client, service, user_context, *, grant=None, owner=None, **form):
+        user_context["ui_permissions"]["modify_service"] = grant or ["Existing Remote"]
+        service.get_server_info.return_value = {
+            **self.STORED,
+            **({"registered_by": owner} if owner else {}),
+        }
         service.is_service_enabled.return_value = True
         service.user_can_access_server_path.return_value = True
         with patch(
@@ -2451,6 +2454,29 @@ class TestEditRemoteServerBackendUrlRedaction:
         assert response.status_code == 200, response.text
         entry = mock_server_service.update_server.call_args[0][1]
         assert entry["proxy_pass_url"] == "http://upstream:9001"
+
+    def test_wildcard_grant_lets_the_owner_edit_their_server(
+        self, test_client_regular, mock_server_service, mock_nginx_service, regular_user_context
+    ):
+        response = self._edit(
+            test_client_regular, mock_server_service, regular_user_context, grant=["*"]
+        )
+
+        assert response.status_code == 200, response.text
+
+    def test_wildcard_grant_does_not_reach_another_owners_server(
+        self, test_client_regular, mock_server_service, mock_nginx_service, regular_user_context
+    ):
+        response = self._edit(
+            test_client_regular,
+            mock_server_service,
+            regular_user_context,
+            grant=["*"],
+            owner="someone-else",
+        )
+
+        assert response.status_code == 403
+        mock_server_service.update_server.assert_not_called()
 
     def test_registry_only_mode_does_not_fill_in_a_missing_url(
         self, test_client_regular, mock_server_service, mock_nginx_service, regular_user_context
