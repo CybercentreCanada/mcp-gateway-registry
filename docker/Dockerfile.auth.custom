@@ -1,0 +1,31 @@
+# Overlay image: adds our patched backend files (and optionally a corporate CA
+# bundle) on top of a PREBUILT auth-server image. It does NOT rebuild the app.
+#
+# Do not call this directly: build_auth.sh stages the files that differ from the
+# upstream tag into .overlay-auth/ and refuses changes an overlay cannot carry
+# (dependencies, entrypoint). The base image version MUST match the checkout the
+# overlay was staged from.
+
+ARG AUTH_BASE_IMAGE=uchimera.azurecr.io/mcpgateway/auth-server:1.37.0
+FROM ${AUTH_BASE_IMAGE}
+
+# Shown in the UI and logs; the release pipeline passes the same arg.
+ARG BUILD_VERSION
+ENV BUILD_VERSION=${BUILD_VERSION}
+
+# The base image ends on `USER appuser`; COPY into /etc needs root.
+USER root
+
+# Patched source. The auth image lays auth_server/ at /app and bundles registry/
+# at /app/registry; the staging script mirrors that layout.
+COPY --chown=appuser:appuser .overlay-auth/app/ /app/
+# Optional corporate CA bundle (empty directory when none was provided).
+COPY .overlay-auth/etc/ /etc/
+# Unlike the registry image, this one sets no SSL_CERT_FILE and has no openssl CLI,
+# so point TLS clients (httpx, requests) at the system bundle explicitly.
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_DIR=/etc/ssl/certs \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+RUN find /app -name __pycache__ -type d -not -path "/app/.venv/*" -prune -exec rm -rf {} + 2>/dev/null || true
+
+USER appuser

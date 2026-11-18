@@ -483,4 +483,5 @@ site/
 
 # Overlay build staging and the optional host CA bundle
 .overlay/
+.overlay-auth/
 ca-certificates.crt
