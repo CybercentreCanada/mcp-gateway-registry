@@ -37,7 +37,7 @@ from registry.auth.proxied_token import verify_generic_proxy_token, verify_mcp_p
 from registry.auth.resource_binding import mcp_proxy_route_binding
 from registry.common.log_redaction import redact_url
 from registry.core.config import settings
-from registry.core.schemas import _validate_obo_egress_config
+from registry.core.schemas import _ingress_relay_server_allowlist, _validate_obo_egress_config
 from registry.egress_auth.browser_binding import (
     clear_consent_cookie,
     new_browser_binding,
@@ -538,8 +538,9 @@ class EgressTokenResponse(BaseModel):
     # auth_server, which holds the gateway's IdP creds and the raw ingress JWT).
     mode: str | None = Field(
         default=None,
-        description="Egress mode for this server: 'obo_exchange' when the caller "
-        "should perform a same-IdP OBO token exchange instead of a vault vend.",
+        description="Egress directive: 'obo_exchange' when the caller should perform a "
+        "same-IdP OBO token exchange instead of a vault vend, or 'ingress_relay' to "
+        "forward the caller's own bearer token.",
     )
     obo_target_audience: str | None = Field(
         default=None,
@@ -880,13 +881,11 @@ async def vend_egress_token(
     claims = verify_mcp_proxy_token(x_internal_token)
     token_upstream = claims.get("upstream_url") or ""
 
-    # Only real per-user principals may vend. The method is canonicalized the way
-    # every registry route canonicalizes it (vault_auth_method, vault_principal).
-    if vault_auth_method(claims) is None:
-        logger.info(
-            "egress vend: non-per-user auth_method %r -> consent", claims.get("auth_method")
-        )
-        return EgressTokenResponse(consent_required=True)
+    # Only real per-user principals may vend from the vault or run OBO. The method
+    # is canonicalized the way every registry route canonicalizes it
+    # (vault_auth_method, vault_principal). Checked below, once the server's mode is
+    # known: ingress_relay forwards the caller's own bearer and needs no principal.
+    per_user = vault_auth_method(claims) is not None
 
     # The proxy passes the registered backend's full path without a leading
     # slash (e.g. "peer/jira"). Preserve every segment so the vault key and
@@ -900,8 +899,16 @@ async def vend_egress_token(
         return EgressTokenResponse(consent_required=True)
 
     egress_mode = server.get("egress_auth_mode")
-    if egress_mode not in ("oauth_user", "obo_exchange", "pat") or not server.get("egress_oauth"):
-        return EgressTokenResponse(consent_required=True)
+    if egress_mode != "ingress_relay":
+        if not per_user:
+            logger.info(
+                "egress vend: non-per-user auth_method %r -> consent", claims.get("auth_method")
+            )
+            return EgressTokenResponse(consent_required=True)
+        if egress_mode not in ("oauth_user", "obo_exchange", "pat") or not server.get(
+            "egress_oauth"
+        ):
+            return EgressTokenResponse(consent_required=True)
 
     binding = mcp_proxy_route_binding(claims)
     if binding is None:
@@ -921,6 +928,22 @@ async def vend_egress_token(
         )
     # The credential must have been approved for this exact destination.
     requested_upstream = approved_url
+
+    # ingress_relay: tell auth_server to forward the caller's own bearer. Fail closed
+    # on the operator allowlist at vend time too, so a stored mode the operator no
+    # longer approves is refused rather than relayed.
+    if egress_mode == "ingress_relay":
+        if "/" + server_path.strip().lower().strip("/") not in _ingress_relay_server_allowlist():
+            logger.warning(
+                "egress vend REFUSED: ingress_relay for %s is not operator-allowlisted",
+                server_path,
+            )
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="ingress relay is not operator-allowed for this server",
+            )
+        return EgressTokenResponse(mode="ingress_relay")
+
     egress_oauth = server["egress_oauth"]
     # Stored tools for a pre-consent tools/list (issue #1986). Built only on the
     # two consent-miss returns below, never for a successful vend.
@@ -1085,7 +1108,8 @@ async def vend_egress_token(
 class EgressConfigRequest(BaseModel):
     """Configure egress auth on a server (admin/registrant)."""
 
-    egress_auth_mode: str = "oauth_user"  # "none" | "oauth_user" | "obo_exchange" | "pat"
+    # "none" | "oauth_user" | "obo_exchange" | "pat" | "ingress_relay"
+    egress_auth_mode: str = "oauth_user"
     egress_provider: str = ""
     client_id: str = ""
     client_secret: str | None = None  # write-only; encrypted, never echoed
@@ -1315,6 +1339,16 @@ async def configure_egress_auth(
         # time (see _derive_pat_inject_header), since it is the same upstream.
         server["egress_auth_mode"] = "pat"
         server["egress_oauth"] = {"provider": provider, "scopes": body.scopes or []}
+    elif body.egress_auth_mode == "ingress_relay":
+        # Operator-controlled: a registrant cannot opt a server into receiving the
+        # caller's bearer token unless EGRESS_INGRESS_RELAY_ALLOWED_SERVERS lists it.
+        if "/" + server_path.strip().lower().strip("/") not in _ingress_relay_server_allowlist():
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="server is not listed in EGRESS_INGRESS_RELAY_ALLOWED_SERVERS",
+            )
+        server["egress_auth_mode"] = "ingress_relay"
+        server["egress_oauth"] = None
     else:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="invalid egress_auth_mode")
 

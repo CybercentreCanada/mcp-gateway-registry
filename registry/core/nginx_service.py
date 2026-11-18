@@ -2473,7 +2473,7 @@ class NginxConfigService:
             logger.warning("Skipping disabled or unhealthy virtual backend %s", backend_path)
             return None
         egress_mode = active.get("egress_auth_mode", "none")
-        if egress_mode not in ("none", "pat", "oauth_user", "obo_exchange"):
+        if egress_mode not in ("none", "pat", "oauth_user", "obo_exchange", "ingress_relay"):
             logger.warning("Invalid egress auth mode for virtual backend %s", backend_path)
             return None
 

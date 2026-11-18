@@ -1065,7 +1065,9 @@ def test_create_location_block_internal_service(nginx_service):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("transport", ["streamable-http", "sse", "direct"])
-@pytest.mark.parametrize("egress_mode", ["none", "oauth_user", "pat", "obo_exchange"])
+@pytest.mark.parametrize(
+    "egress_mode", ["none", "oauth_user", "pat", "obo_exchange", "ingress_relay"]
+)
 def test_direct_route_location_only_proxies_to_mcp_proxy(nginx_service, transport, egress_mode):
     """Every proxy_pass in a direct-route location targets the mcp-proxy hop.
 
