@@ -1542,6 +1542,74 @@ class TestToggleAgent:
 @pytest.mark.unit
 @pytest.mark.api
 @pytest.mark.agents
+class TestAgentOwnerWildcardGrant:
+    """The Trinity developer scope grants toggle_agent/modify_agent with "*": that
+    is "my own agents", so it works on the caller's agents and nothing else."""
+
+    DEVELOPER = {
+        "username": "testuser",  # sample_agent_card.registered_by
+        "groups": ["trinity-developers"],
+        "scopes": [],
+        "accessible_agents": ["all"],
+        "ui_permissions": {
+            "toggle_agent": ["*"],
+            "modify_agent": ["*"],
+            "list_agents": ["all"],
+            "get_agent": ["all"],
+        },
+        "is_admin": False,
+    }
+
+    def _client(self, ctx):
+        from fastapi import FastAPI
+
+        from registry.api.agent_routes import nginx_proxied_auth, router
+        from registry.auth.csrf import verify_csrf_token_flexible
+
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[nginx_proxied_auth] = lambda: ctx
+        app.dependency_overrides[verify_csrf_token_flexible] = lambda: None
+        return TestClient(app)
+
+    @pytest.mark.parametrize(
+        ("username", "expected"),
+        [("testuser", status.HTTP_200_OK), ("someone-else", status.HTTP_403_FORBIDDEN)],
+        ids=["owner", "other-user"],
+    )
+    @pytest.mark.asyncio
+    async def test_toggle(self, mock_search_repo, sample_agent_card, username, expected):
+        ctx = {**self.DEVELOPER, "username": username}
+        with (
+            patch("registry.api.agent_routes.agent_service") as service,
+            patch("registry.api.agent_routes.get_search_repository", return_value=mock_search_repo),
+        ):
+            service.get_agent_info = AsyncMock(return_value=sample_agent_card)
+            service.toggle_agent = AsyncMock(return_value=True)
+
+            response = self._client(ctx).post("/agents/test-agent/toggle?enabled=true")
+
+        assert response.status_code == expected
+        assert service.toggle_agent.called == (expected == status.HTTP_200_OK)
+
+    @pytest.mark.asyncio
+    async def test_wildcard_toggle_does_not_work_on_an_agent_without_an_owner(
+        self, mock_search_repo, sample_agent_card
+    ):
+        sample_agent_card.registered_by = None
+        with patch("registry.api.agent_routes.agent_service") as service:
+            service.get_agent_info = AsyncMock(return_value=sample_agent_card)
+            service.toggle_agent = AsyncMock(return_value=True)
+
+            response = self._client(self.DEVELOPER).post("/agents/test-agent/toggle?enabled=true")
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        service.toggle_agent.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.api
+@pytest.mark.agents
 class TestGetAgent:
     """Tests for GET /agents/{path:path} endpoint."""
 
