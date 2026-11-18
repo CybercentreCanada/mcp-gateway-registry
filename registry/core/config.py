@@ -1984,6 +1984,15 @@ class Settings(BaseSettings):
             "the vend is unreachable except by the auth_server over the cluster network."
         ),
     )
+    egress_ingress_relay_allowed_servers: str = Field(
+        default="",
+        description=(
+            "Operator allowlist of server paths (whitespace-separated) whose upstream "
+            "receives the caller's original Authorization bearer token "
+            "(egress_auth_mode='ingress_relay'). Empty (default) denies the relay for "
+            "every server, so a registrant cannot enable it on their own."
+        ),
+    )
     egress_obo_allowed_audiences: str = Field(
         default="",
         description=(
