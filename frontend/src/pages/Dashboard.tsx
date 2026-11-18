@@ -672,6 +672,16 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
     return permissions.includes('all') || permissions.includes(serviceName);
   }, [user?.ui_permissions]);
 
+  // Skills need the scope AND ownership (admins bypass), like the backend's
+  // _user_can_modify_skill; a scope held for "all" does not reach another's skill.
+  const canActOnSkill = useCallback(
+    (action: 'modify' | 'toggle', skill: Skill): boolean =>
+      !!user?.is_admin ||
+      (skill.owner === user?.username &&
+        hasOwnedPermission(user, `${action}_skill`, skill.path, skill.owner)),
+    [user]
+  );
+
 
   // External registry tags - can be configured via environment or constants
   // Default tags that identify servers from external registries
@@ -2758,7 +2768,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
             error={skillsError}
             isFiltered={!!searchTerm || activeFilter !== 'all'}
             hasListAccess={hasListAccess('list_skills')}
-            canModify={user?.can_modify_servers || false}
+            canModify={!!user?.is_admin || (user?.ui_permissions?.publish_skill?.length ?? 0) > 0}
             page={skillPage}
             totalPages={skillTotalPages}
             pageSize={PAGE_SIZE}
@@ -2771,9 +2781,8 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
             onRefreshSuccess={refreshSkills}
             onShowToast={showToast}
             onSkillUpdate={handleSkillUpdate}
-            canToggleSkill={(skill) =>
-              user?.is_admin || hasUiPermission('toggle_skill', skill.path)
-            }
+            canModifySkill={(skill) => canActOnSkill('modify', skill)}
+            canToggleSkill={(skill) => canActOnSkill('toggle', skill)}
           />
         )}
 
@@ -2856,8 +2865,8 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
               onToggle={handleToggleSkill}
               onEdit={handleEditSkill}
               onDelete={(path) => setShowDeleteSkillConfirm(path)}
-              canModify={user?.can_modify_servers || hasOwnedPermission(user, 'modify_skill', skill.path, skill.owner)}
-              canToggle={hasOwnedPermission(user, 'toggle_skill', skill.path, skill.owner)}
+              canModify={canActOnSkill('modify', skill)}
+              canToggle={canActOnSkill('toggle', skill)}
               onRefreshSuccess={refreshSkills}
               onShowToast={showToast}
               onSkillUpdate={handleSkillUpdate}
