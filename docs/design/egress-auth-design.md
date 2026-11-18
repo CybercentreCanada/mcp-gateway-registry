@@ -262,6 +262,7 @@ Wire the chosen value on the **registry** container across your deployment surfa
 | **`vault-oauth` (3LO)** | Yes | User completes provider OAuth (3LO) out of band; the gateway vaults the per-user token and injects it. This document's main flow. | **Implemented** (`egress_auth_mode = "oauth_user"`) |
 | **`token-exchange` (OBO)** | No | For same-trust-domain backends, the gateway exchanges the user's ingress token for a backend-audience token (Entra `jwt-bearer` / Keycloak RFC 8693). `sub` preserved; nothing stored. | **Implemented** (`egress_auth_mode = "obo_exchange"`; Entra `jwt-bearer` and Keycloak RFC 8693). Keycloak needs the operator setup in the Keycloak prerequisites below on every shipped surface. |
 | **`vault-pat` (PAT)** | Yes | A per-user static Personal Access Token / API key is stored in the vault (bounded TTL) and injected into the same header the server's backend auth uses. No OAuth dance. Admin seed-on-behalf supported. | **Implemented** (`egress_auth_mode = "pat"`) |
+| **`ingress-relay`** | No | The caller's own `Authorization` bearer is forwarded to the upstream unchanged. Operator-controlled: only server paths listed in `EGRESS_INGRESS_RELAY_ALLOWED_SERVERS` may use it. No per-user principal needed. | **Implemented** (`egress_auth_mode = "ingress_relay"`) |
 | **static upstream auth headers** (generic proxy) | No (SECRET_KEY Fernet at rest) | The **operator** specifies static header **name(s) + value(s)** on a proxied entity; values are encrypted at rest and vended registry -> auth-server, then injected on the generic egress hop. Operator-scoped (not per-user), independent of the egress vault. Supersedes the old per-user `custom-header` idea. | **Implemented** (generic proxy; see below) |
 
 > **Internal relay (not a configurable mode).** The built-in `airegistry-tools` server receives the relayed ingress `Authorization` via a hardcoded constant (see "First principle" above). It is not an `egress_auth_mode` value and is not selectable per server — external servers that need an upstream credential use the vault modes above.
@@ -330,6 +331,14 @@ Key properties:
 - **Miss is terminal.** Unlike 3LO there is no interactive flow to offer; a miss (never submitted or expired) returns an actionable "submit a PAT on Connected Accounts" tool result rather than looping.
 
 Endpoints: `PUT`/`GET`/`DELETE /servers/{path}/egress-pat` (registry). Vend: a `pat` branch in `/internal/egress-token` placed before `oauth_user` so a PAT server (stored with `client_id=None`) never routes through the OAuth refresh path.
+
+### `ingress-relay` — implemented
+
+`egress_auth_mode = "ingress_relay"`. For an upstream that validates the same IdP token the caller presented to the gateway. The registry returns `{mode: "ingress_relay"}` from `/internal/egress-token` and the auth-server's `mcp_proxy` forwards that request's `Authorization` header. `X-Authorization` and cookies are never forwarded.
+
+- **Operator allowlist, default deny.** The server path must be in `EGRESS_INGRESS_RELAY_ALLOWED_SERVERS`. It is checked on the model, when the mode is configured, and again at every vend, so a registrant cannot enable it and a path removed from the list stops relaying immediately.
+- **Relay only a verified bearer.** `/validate` authorizes `X-Authorization` or a session cookie before `Authorization`, so that header may never have been verified. `mcp_proxy` forwards it only when it is the bearer `/validate` verified (digest in the hop token) or identifies the principal `/validate` authorized; otherwise 403. A missing or non-bearer `Authorization` is 401.
+- **No vault.** Nothing is stored, and the vend does not require a per-user principal.
 
 ### static upstream auth headers (generic proxy) — implemented
 

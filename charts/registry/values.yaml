@@ -666,6 +666,10 @@ egressAuth:
   # When empty, a shape rule applies: the target must be an internal app audience
   # (api:// App ID URI or bare client-id/GUID), never an https host URL.
   oboAllowedAudiences: ""
+  # Server paths allowed to use egress_auth_mode=ingress_relay (whitespace-separated,
+  # e.g. "/rag /mcp-a2a-bridge"): the upstream receives the caller's own Authorization
+  # bearer token. Empty (default) denies the mode for every server.
+  ingressRelayAllowedServers: ""
   # Comma-separated hostnames of operator-controlled OAuth/OIDC identity providers
   # whose token endpoints may resolve to private addresses. Optional; empty means
   # the credentialed-OAuth SSRF profile permits no private-resolving token endpoint,
