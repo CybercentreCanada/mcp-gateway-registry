@@ -454,6 +454,18 @@ class TestUserCanModifySkill:
         ctx = {"is_admin": False, "username": "alice", "ui_permissions": {}}
         assert _user_can_modify_skill(self._skill(owner="alice"), ctx) is False
 
+    @pytest.mark.parametrize("action", ["modify", "delete", "toggle"])
+    def test_wildcard_scope_applies_to_own_skills_only(self, action):
+        from registry.api.skill_routes import _user_can_modify_skill
+
+        ctx = {
+            "is_admin": False,
+            "username": "alice",
+            "ui_permissions": {f"{action}_skill": ["*"]},
+        }
+        assert _user_can_modify_skill(self._skill(owner="alice"), ctx, action=action) is True
+        assert _user_can_modify_skill(self._skill(owner="bob"), ctx, action=action) is False
+
     def test_scope_without_ownership_denied(self):
         # Holding the scope but not owning the skill (and not admin) is denied:
         # the ownership half of the dual gate still applies to non-admins.
