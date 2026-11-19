@@ -10,7 +10,7 @@ dependencies:
     repository: oci://registry-1.docker.io/bitnamicharts
     condition: keycloak.create
   - name: mongodb-kubernetes
-    version: 1.6.1
+    version: 1.15.0
     repository: https://mongodb.github.io/helm-charts
     condition: mongodb.enabled
   - name: auth-server
