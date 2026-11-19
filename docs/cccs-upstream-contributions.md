@@ -14,6 +14,8 @@ We curate and run each change ourselves first (see [cccs-main-1.37.0-port-audit.
 | 5 | SKILL.md fetch errors are not actionable | Yes (apply trial clean) | `abd522be` |
 | 6 | Registry ingress template supports ALB only | Yes | `1eed68a9` |
 | 7 | The `registry-egress-internal` NetworkPolicy isolates the registry from every other client | Yes, reproduced on `1.37.0` (dev outage) | `d834ed0c` |
+| 8 | The egress credential encryption key can only be passed as a Helm value | Yes, hit during the dev deploy | deployment repo (`--set-file` workaround) |
+| 9 | The stack chart's OpenBao uses the `file` backend, which OpenBao 2.7 removed, and pins the image in two places | Yes, migrated on dev (2.5.5 to 2.7.2) | deployment repo (values override, migration manifest) |
 
 ## 1. Allowlisted literal-IP hosts are never relaxed by the SSRF guard
 
@@ -70,6 +72,22 @@ Proposed change: add a second ingress rule with no `from` for the public listene
 Tests: `charts/registry/tests/networkpolicy_egress_internal_test.yaml` (five cases): vend port is auth-server only, public ports have no `from`, scrape port is open only when its policy is disabled, nothing renders when `egressAuth.internalNetworkPolicy.enabled` is false.
 
 Evidence: on dev, a pod-to-Service check timed out from `mcpgw` and from the auth-server (port 8000) before the change and returned 200 after, and `/api/auth/providers` returned 200 through the Ingress. The same chart also gates the metrics port with its own policy, so any sibling policy that selects the registry pods should be re-checked for the same isolation effect.
+
+## 8. The egress credential encryption key can only be passed as a Helm value
+
+Problem: `registry.egressAuth.credentialEncryptionKey` (and the auth-server's equivalent) is the root key for the per-user egress credential vault, and the docs say to keep it outside the secret store. The chart renders it from a plain value in `charts/registry/templates/secret.yaml`, and the name `EGRESS_CREDENTIAL_ENCRYPTION_KEY` is in `reserved-env-names.txt`, so `extraEnv` cannot carry it either. The only existing-secret route, `app.existingSecret`, replaces the whole generated env Secret, so an operator would have to supply every key. Teams that keep secrets in a vault end up passing the key on the Helm command line or in a values file.
+
+Proposed change: add `egressAuth.credentialEncryptionKeyExistingSecret` (name and key) on the registry, and the same on the auth-server for the OBO cache, rendered as a `secretKeyRef` env var in the Deployment, with the same pattern mcpgw already uses for `githubPatExistingSecret`. Keep the plain value for compatibility and fail the render if both are set. Add the new fields to the reserved-name and unit-test coverage.
+
+Workaround we run meanwhile (deployment repo): the key is synced from Azure Key Vault into a Secret, and the deploy target reads it and passes it with `--set-file` from a private temp file, refusing to run Helm when it is missing. This works but needs the deploy tooling to see the Secret, which an existing-secret field would make unnecessary.
+
+## 9. The stack chart's OpenBao uses the `file` backend, which OpenBao 2.7 removed, and pins the image in two places
+
+Problem: `charts/mcp-gateway-registry-stack/values.yaml` configures the standalone OpenBao with `storage "file"` and pins `quay.io/openbao/openbao:2.5.5`. OpenBao 2.7.0 removed the `file` backend (deprecated since 2.6), so bumping the image alone leaves a pod that cannot read its data. The image is also pinned separately for the `unseal` sidecar (`extraContainers`), and nothing keeps the two equal.
+
+Proposed change: document the move in the chart README (stop OpenBao, run `bao operator migrate` from `file` to `pebbledb` or `raft`, change the storage stanza), and ship a supported default for new installs on a 2.7+ image. Derive the sidecar image from `server.image` (or add a test that fails when they differ) so a bump cannot leave them apart.
+
+Evidence: migrated on dev from 2.5.5 to 2.7.2 on 2026-11-19. `bao operator migrate` copied all 32 keys with the source untouched, the server started on `pebbledb`, the sidecar unsealed it by itself, and the `openbao-init` job reported "already initialized" and re-created the Kubernetes auth role. Our one-off migration pod and the steps are in the deployment repo (`deploy/openbao-migrate-file-to-pebbledb.yaml`, `deploy/DEPLOYING.md`).
 
 ## Process notes
 
