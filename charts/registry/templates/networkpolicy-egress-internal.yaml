@@ -12,6 +12,12 @@ boundary: when EITHER feature is enabled AND
 egressAuth.internalNetworkPolicy.enabled (default), only the auth-server pod may
 open a connection to that port.
 
+Selecting the pod isolates it for ingress, so every port not allowed below is
+dropped for every source. The public listeners (8080/8443: the Ingress, mcpgw,
+agents, probes) are therefore allowed from anywhere in a second rule, and the
+scrape port is kept open when its own policy is disabled. Without them this
+policy cuts the registry off from the ingress controller.
+
 The only legitimate client is the auth-server (its mcp_proxy hop calls the vend
 over the cluster network). By default the source is the auth-server pod in the
 SAME namespace (podSelector only). Set
@@ -51,4 +57,13 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.egressAuth.internalPort | default 8091 }}
+    - ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8443
+        {{- if not .Values.metricsScrape.networkPolicy.enabled }}
+        - protocol: TCP
+          port: {{ .Values.metricsScrape.port | default 9464 }}
+        {{- end }}
 {{- end }}
