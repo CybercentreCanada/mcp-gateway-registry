@@ -19,6 +19,11 @@ USER root
 # Patched source. The auth image lays auth_server/ at /app and bundles registry/
 # at /app/registry; the staging script mirrors that layout.
 COPY --chown=appuser:appuser .overlay-auth/app/ /app/
+# hvac (OpenBao client for the OBO token cache): missing from the upstream image. A pure-Python wheel
+# (build_auth.sh pins and verifies it), unpacked into the venv exactly as pip would; requests is already there.
+COPY .overlay-auth/wheels/ /tmp/wheels/
+RUN /app/.venv/bin/python -c "import glob, sys, sysconfig, zipfile; [zipfile.ZipFile(w).extractall(sysconfig.get_paths()['purelib']) for w in glob.glob('/tmp/wheels/*.whl')]" \
+    && rm -rf /tmp/wheels
 # Optional corporate CA bundle (empty directory when none was provided).
 COPY .overlay-auth/etc/ /etc/
 # Unlike the registry image, this one sets no SSL_CERT_FILE and has no openssl CLI,

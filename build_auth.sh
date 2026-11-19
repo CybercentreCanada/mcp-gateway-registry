@@ -26,6 +26,12 @@ OVERLAY_PATHS=(auth_server registry)
 # Changes here alter the image itself (dependencies, entrypoint, build), not just source.
 IMAGE_INPUTS=(auth_server/pyproject.toml auth_server/uv.lock docker/auth-entrypoint.sh docker/Dockerfile.auth)
 STAGE=".overlay-auth"
+# The upstream auth-server image lacks hvac (declared only in the root pyproject.toml, which the registry
+# image installs), so the OBO token cache fails to start there with "No module named 'hvac'" and the auth
+# server silently falls back to stateless exchanges. hvac is a pure-Python wheel whose only requirement
+# (requests) is already in the image, so it is added as one pinned, hash-checked wheel.
+HVAC_VERSION="2.4.0"
+HVAC_SHA256="008db5efd8c2f77bd37d2368ea5f713edceae1c65f11fd608393179478649e0f"
 
 cd "$(dirname "$0")"
 
@@ -66,13 +72,21 @@ for f in "${changed[@]}"; do
     mkdir -p "${STAGE}/app/$(dirname "${dest}")"
     cp -p "${f}" "${STAGE}/app/${dest}"
 done
+mkdir -p "${STAGE}/wheels"
+wheel_dir=$(mktemp -d)
+UV_INDEX_URL="${UV_INDEX_URL:-${PIP_INDEX_URL:-}}" \
+    uvx --quiet pip download "hvac==${HVAC_VERSION}" --no-deps --only-binary=:all: -d "${wheel_dir}" >/dev/null
+echo "${HVAC_SHA256}  ${wheel_dir}/hvac-${HVAC_VERSION}-py3-none-any.whl" | sha256sum -c - >/dev/null \
+    || { echo "hvac ${HVAC_VERSION} wheel does not match the pinned sha256; refusing to build." >&2; rm -rf "${wheel_dir}"; exit 1; }
+cp "${wheel_dir}/hvac-${HVAC_VERSION}-py3-none-any.whl" "${STAGE}/wheels/"
+rm -rf "${wheel_dir}"
 if [ -f ca-certificates.crt ]; then
     mkdir -p "${STAGE}/etc/ssl/certs"
     cp ca-certificates.crt "${STAGE}/etc/ssl/certs/ca-certificates.crt"
     echo "Including ca-certificates.crt as the image CA bundle."
 fi
 
-echo "Overlay of ${BASE_IMAGE} with ${#changed[@]} file(s) from $(git rev-parse --short HEAD):"
+echo "Overlay of ${BASE_IMAGE} with ${#changed[@]} file(s) from $(git rev-parse --short HEAD) and hvac ${HVAC_VERSION}:"
 printf '  %s\n' "${changed[@]}"
 
 if [ -n "${DRY_RUN:-}" ]; then

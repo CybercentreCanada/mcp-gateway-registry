@@ -15,6 +15,7 @@ We curate and run each change ourselves first (see [cccs-main-1.37.0-port-audit.
 | 6 | Registry ingress template supports ALB only | Yes | `1eed68a9` |
 | 7 | The `registry-egress-internal` NetworkPolicy isolates the registry from every other client | Yes, reproduced on `1.37.0` (dev outage) | `d834ed0c` |
 | 8 | The egress credential encryption key can only be passed as a Helm value | Yes, hit during the dev deploy | deployment repo (`--set-file` workaround) |
+| 10 | The auth-server image has no `hvac`, so the OBO token cache cannot start on the Helm/OpenBao path | Yes, reproduced with the stock `1.37.0` image | `build_auth.sh` and `Dockerfile.auth.custom` (workaround) |
 | 9 | The stack chart's OpenBao uses the `file` backend, which OpenBao 2.7 removed, and pins the image in two places | Yes, migrated on dev (2.5.5 to 2.7.2) | deployment repo (values override, migration manifest) |
 
 ## 1. Allowlisted literal-IP hosts are never relaxed by the SSRF guard
@@ -88,6 +89,16 @@ Problem: `charts/mcp-gateway-registry-stack/values.yaml` configures the standalo
 Proposed change: document the move in the chart README (stop OpenBao, run `bao operator migrate` from `file` to `pebbledb` or `raft`, change the storage stanza), and ship a supported default for new installs on a 2.7+ image. Derive the sidecar image from `server.image` (or add a test that fails when they differ) so a bump cannot leave them apart.
 
 Evidence: migrated on dev from 2.5.5 to 2.7.2 on 2026-11-19. `bao operator migrate` copied all 32 keys with the source untouched, the server started on `pebbledb`, the sidecar unsealed it by itself, and the `openbao-init` job reported "already initialized" and re-created the Kubernetes auth role. Our one-off migration pod and the steps are in the deployment repo (`deploy/openbao-migrate-file-to-pebbledb.yaml`, `deploy/DEPLOYING.md`).
+
+## 10. The auth-server image has no `hvac`, so the OBO token cache cannot start on the Helm/OpenBao path
+
+Problem: with `auth-server.egressAuth.oboCacheEnabled: "true"` and `secretStoreBackend: "openbao"`, the auth server logs `OBO token cache init failed (No module named 'hvac'); OBO exchange runs stateless`. Nothing fails visibly: exchanges silently run uncached, so the cache looks enabled in the config but is not active. The `openbao-init` job still creates the cache's OpenBao policy and role, which makes the setup look complete.
+
+Cause: `hvac` is declared only in the root `pyproject.toml` (installed into the registry image) and not in `auth_server/pyproject.toml`, which is what the auth-server image installs. `registry/secrets/factory.py` imports `hvac` for the OpenBao backend, and the auth server uses that factory for the cache. Reproduced by importing `hvac` in the unmodified upstream `auth-server:1.37.0` image (`ModuleNotFoundError`).
+
+Proposed change: add `hvac>=2.0.0` to `auth_server/pyproject.toml` (and its lock file) so the published image includes it. Optionally log the failure at startup as a warning that names the config flag, and add a test or CI check that imports every optional secret-store backend inside the built auth-server image.
+
+Workaround we run (fork): `build_auth.sh` downloads `hvac==2.4.0` as a pinned, sha256-checked pure-Python wheel and the overlay Dockerfile unpacks it into the app's venv (its only requirement, `requests`, is already present). Verified by importing it in the built image; the cache then starts.
 
 ## Process notes
 
