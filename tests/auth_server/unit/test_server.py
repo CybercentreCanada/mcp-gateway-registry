@@ -5597,7 +5597,7 @@ class TestMcpProxyIngressRelay:
     def test_non_bearer_authorization_fails_closed(self):
         import auth_server.server as server_module
 
-        response, _ = self._post(server_module, {"Authorization": "Basic dXNlcjpwYXNz"})
+        response, _ = self._post(server_module, {"Authorization": "Basic placeholder"})
 
         assert response.status_code == 401
 
