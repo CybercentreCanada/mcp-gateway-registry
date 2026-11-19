@@ -88,6 +88,29 @@ The 1.37.0 notes add a per-provider JWKS refetch (rate limited to once a minute)
 | C10 | MCP proxy timeout | deployment values (`mcpProxyTimeout`, `MCP_PROXY_TIMEOUT`) | COVERED | Auth-server chart has `app.mcpProxyTimeout` and nginx derives `proxy_read_timeout` from `MCP_PROXY_TIMEOUT`. The registry chart does not reserve the name, so the existing registry `extraEnv` entry keeps working. |
 | C11 | UI GitHub link points at the fork (and the deployed branch) | new | DONE | `Layout.tsx` uses `resolveGithubUrl` (`src/utils/githubUrl.ts`): defaults to `https://github.com/CybercentreCanada/mcp-gateway-registry`, accepts a build-time `VITE_GITHUB_URL` (injected by `vite.config.ts`, and exposed as a `docker build --build-arg VITE_GITHUB_URL=...` in `docker/Dockerfile.registry`), and falls back to the default for anything `isSafeUrl` rejects. Branch link example: `.../tree/cccs-main_1.37.0_aks-fixes`. Verified: `tsc` clean, the full jest suite (552 tests) and `vite build` pass. |
 
+### D. Infrastructure and deployment items found while deploying 1.37.0 on dev
+
+These are not ports of earlier CCCS commits. They surfaced during the dev rollout (2026-11-19), and each needs repeating on staging and prod. Deployment-side steps live in the deployment repo (`deploy/DEPLOYING.md`).
+
+| # | Item | Where | Dev status | Notes |
+|---|---|---|---|---|
+| D1 | Registry NetworkPolicy `registry-egress-internal` isolates the registry from every client except the auth server | fork chart (`d834ed0c`) | DONE | Upstream template selects the registry pods but allows only the vend port (8091), so the Ingress, `mcpgw` and agents were cut off (504, login page without providers). A second rule opens 8080/8443, and the scrape port when its policy is disabled. 5 new unit tests. Staging and prod must deploy a chart that includes it. Upstream candidate 7. |
+| D2 | Egress credential encryption key | deployment repo | DONE | `EGRESS_CREDENTIAL_ENCRYPTION_KEY` was unset, so per-user egress credentials would be stored in plaintext. The chart accepts the key only as a value. It is synced from AKV (`aigr-egress-credential-key`) into the `egress-credential-key` Secret by `make sync`, and `aigr-diff`/`aigr-deploy` pass it with `--set-file` and refuse to run without it. Never change it once credentials are stored. Staging needs the AKV secret (`stg-` prefix) and a `make sync` before its deploy. Upstream candidate 8. |
+| D3 | OpenBao 2.5.5 to 2.7.2, storage `file` to `pebbledb` | deployment repo | DONE | 2.7.0 removed the `file` backend, which the chart uses by default. Migrated offline with `bao operator migrate` (32 keys) via `deploy/openbao-migrate-file-to-pebbledb.yaml`. Both image strings (server and unseal sidecar) and the storage stanza are overridden in the env values, with tests. The old file data stays on the volume for rollback until staging and prod are done. Upstream candidate 9. |
+| D4 | MongoDB operator chart 1.6.1 to 1.15.0 | fork `Chart.yaml` (`81f938d8`), deployment values | DONE | The `MongoDBCommunity` CRD is identical across the two versions (compared against the live cluster). The CRDs are shared and cluster-scoped, and this identity cannot patch them, so they were not touched. 1.15.0 adds `voyageais` to the watched kinds, whose CRD is not installed, so `operator.watchedResources` keeps the five previous kinds. Backup first with `deploy/mongodb-backup-pod.yaml` (a dump inside the `mongod` container gets OOM-killed). All three `mongod` pods rolled to agent 109. |
+| D5 | `SECRET_KEY` rotation after the dev admin token leaked | deployment repo (AKV `aigr-secret-key`) | PENDING | Rotating `SECRET_KEY` signs out every user and invalidates every issued token. It also derives the key that encrypts stored backend server and skill credentials, so a rotation makes those unreadable until re-entered. A scan of dev found none (only 2 login sessions, which re-create on login). Check this on staging and prod before rotating there. Restart `registry`, `auth-server` and `mcpgw-server` afterwards. |
+| D6 | Legacy default scopes without `tools` | not changed | ACCEPTED | `mcp-servers-unrestricted`, `mcp-registry-admin` and `federation-service` are upstream seed scopes re-created by the setup job. 1.37.0 logs `legacy_scope_missing_tools` for their REST rules. Our three Trinity scopes are unaffected, so we leave them. |
+
+### Environment status
+
+| Environment | Chart line and images | Scopes | OpenBao | MongoDB operator | Egress key |
+|---|---|---|---|---|---|
+| Dev | 1.37.0, `1.37.0-cccs-aks1` (registry, auth-server), `1.37.0` (mcpgw) | Imported | 2.7.2 on `pebbledb` | 1.15.0 | Synced and deployed |
+| Staging | Still on the `1.27.1` line | Not imported | 2.5.5 on `file` | Bitnami (not migrated) | Not synced |
+| Prod | Still on the `1.27.1` line | Not imported | 2.5.5 on `file` | Bitnami (not migrated) | Not synced |
+
+Staging and prod wait until dev has been tested fully, since testing may bring new access, permission or app-code changes. The old OpenBao file data on dev is cleaned up after staging and prod are done.
+
 ## Apply trial summary
 
 48 commits evaluated: 7 apply cleanly, 40 conflict, 1 is empty on `1.37.0`.
