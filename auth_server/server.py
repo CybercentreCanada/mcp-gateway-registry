@@ -4360,13 +4360,16 @@ async def validate_request(request: Request):
         # precedence (X-Authorization first, then Authorization) is preserved.
         a2a_agent_path = _get_a2a_agent_path(original_url)
         is_a2a_request = a2a_agent_path is not None
+        shared_token_mode = getattr(settings, "a2a_shared_gateway_agent_token_enabled", False)
         if x_authorization:
             authorization = x_authorization
-        elif is_a2a_request:
-            # No gateway credential on an agent path: fail closed as
-            # unauthenticated rather than trusting the target-agent Authorization.
+        elif is_a2a_request and not shared_token_mode:
+            # Strict default: no gateway credential on an agent path -> fail closed
+            # rather than trusting the target-agent Authorization.
             authorization = None
         else:
+            # Non-agent path, OR agent path with shared-token mode enabled:
+            # authenticate on the standard Authorization header.
             authorization = raw_authorization
 
         # Defense in depth: if a caller duplicates its gateway token into both
@@ -4386,6 +4389,7 @@ async def validate_request(request: Request):
 
         if (
             is_a2a_request
+            and not shared_token_mode
             and x_authorization
             and _bearer_token_value(raw_authorization) == _bearer_token_value(x_authorization)
         ):
@@ -8998,6 +9002,18 @@ def _ingress_subject_token(request: "Request") -> str:
     return ""
 
 
+def _ingress_relay_bearer(request: "Request") -> str:
+    """The bearer token of the ``Authorization`` header, or "" when it carries none.
+
+    Only ``Authorization`` is relayed: ``X-Authorization`` is the gateway's own
+    credential header and stays at the gateway.
+    """
+    raw = request.headers.get("Authorization", "")
+    if raw.lower().startswith("bearer "):
+        return raw[len("bearer ") :].strip()
+    return ""
+
+
 def _obo_subject_matches_principal(subject_token: str, internal_claims: dict) -> bool:
     """True if the OBO subject token belongs to the /validate-authorized principal.
 
@@ -10040,7 +10056,46 @@ async def mcp_proxy(
                     exc,
                 )
                 return _egress_unavailable_response(req_id)
-            if vend and vend.get("mode") == "obo_exchange":
+            if vend and vend.get("mode") == "ingress_relay":
+                # Operator-allowlisted relay: the upstream receives the caller's own
+                # bearer. The registry already refused any server not on its
+                # allowlist; the directive is the only thing that turns relaying on.
+                relay_token = _ingress_relay_bearer(request)
+                if not relay_token:
+                    logger.warning(
+                        "mcp_proxy: ingress_relay server=%s but no bearer Authorization "
+                        "header; rejecting",
+                        server_name,
+                    )
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Ingress relay requires a bearer Authorization header",
+                    )
+                # /validate authorizes X-Authorization (or a session cookie) before
+                # Authorization, so this header may never have been verified. Forward
+                # it only when it is the bearer /validate verified, or identifies the
+                # principal it authorized, never a different identity's token.
+                if not (
+                    _obo_cache_subject_verified(relay_token, claims)
+                    or _obo_subject_matches_principal(relay_token, claims)
+                ):
+                    logger.warning(
+                        "mcp_proxy: ingress_relay server=%s bearer does not match the "
+                        "authorized principal; rejecting",
+                        server_name,
+                    )
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Relayed bearer token does not match the authorized principal",
+                    )
+                forward_headers = {
+                    k: v
+                    for k, v in _forward_headers(
+                        dict(request.headers), relay_authorization=True
+                    ).items()
+                    if k.lower() != "x-authorization"
+                }
+            elif vend and vend.get("mode") == "obo_exchange":
                 # OBO exchange: re-audience the user's ingress JWT to the internal
                 # MCP server's app via the gateway's OWN IdP credentials. The
                 # registry returned only the DIRECTIVE (target_audience+scopes),

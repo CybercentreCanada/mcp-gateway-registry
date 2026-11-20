@@ -347,6 +347,11 @@ spec:
             # 240.240.0.0/16). global.ssrfAllowedCidrs (stack chart) wins over app.ssrfAllowedCidrs. #2018
             - name: SSRF_ALLOWED_CIDRS
               value: {{ .Values.global.ssrfAllowedCidrs | default .Values.app.ssrfAllowedCidrs | default "" | quote }}
+            # A2A shared gateway/agent token mode (OPT-IN, default off): one bearer
+            # token authenticates to the gateway AND is forwarded to the agent on
+            # /agent/... paths. Only for agent backends in the gateway's trust domain.
+            - name: A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED
+              value: {{ .Values.app.a2aSharedGatewayAgentTokenEnabled | default false | toString | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

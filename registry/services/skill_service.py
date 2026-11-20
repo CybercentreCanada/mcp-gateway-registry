@@ -17,6 +17,7 @@ from typing import (
 from urllib.parse import urlparse
 
 import httpx
+import yaml
 
 from ..common.log_redaction import redact_url
 from ..core.config import settings
@@ -179,6 +180,57 @@ def _append_page_param(
     return f"{url}{separator}page={page}"
 
 
+def _normalize_credential(
+    credential: str | None,
+) -> str | None:
+    """Strip whitespace and an accidentally pasted "Bearer " prefix from a token."""
+    if credential is None:
+        return None
+    cleaned = credential.strip()
+    if cleaned.lower() == "bearer":
+        return None
+    if cleaned.lower().startswith("bearer "):
+        cleaned = cleaned[7:].strip()
+    return cleaned or None
+
+
+def _describe_request_error(
+    error: httpx.RequestError,
+) -> str:
+    """Build a non-empty, credential-free reason for a failed SKILL.md fetch.
+
+    Never derived from str(error): httpx echoes header values in some messages
+    (e.g. "Illegal header value b'Bearer <token>'"), and many network errors
+    stringify to "".
+    """
+    if isinstance(error, httpx.TimeoutException):
+        return (
+            "Timed out connecting to the SKILL.md host. The registry may not have "
+            "network access to it (public github.com is not reachable from this cluster)."
+        )
+    if isinstance(error, httpx.ConnectError):
+        return "Could not connect to the SKILL.md host (DNS or network error)."
+    if isinstance(error, httpx.InvalidURL):
+        return "The SKILL.md URL is not valid."
+    if isinstance(error, httpx.LocalProtocolError):
+        return "The credential contains characters that are not allowed in an HTTP header."
+    return f"Request to the SKILL.md host failed ({type(error).__name__})."
+
+
+def _describe_http_status(
+    status_code: int,
+    auth_scheme: str,
+) -> str:
+    """Explain an HTTP error from the SKILL.md host in terms the user can act on."""
+    if status_code in (401, 403, 404) and auth_scheme in ("bearer", "api_key"):
+        return (
+            f"HTTP {status_code}. The host returns this when the file does not exist or "
+            "the token is missing, expired, for a different host, or lacks read access to "
+            "the repository (GitHub Enterprise hides private repositories as 404)."
+        )
+    return f"HTTP {status_code}"
+
+
 def _build_fetch_headers(
     url: str,
     auth_scheme: str = "none",
@@ -195,6 +247,7 @@ def _build_fetch_headers(
     headers: dict[str, str] = {}
     fetch_url = url
 
+    auth_credential = _normalize_credential(auth_credential)
     if auth_scheme in ("none", "global_credentials") or not auth_credential:
         return fetch_url, headers
 
@@ -609,7 +662,9 @@ async def _validate_skill_md_url(
                 raise SkillUrlValidationError(url, f"Redirect to unsafe URL blocked: {unsafe_hop}")
 
             if response.status_code >= 400:
-                raise SkillUrlValidationError(url, f"HTTP {response.status_code}")
+                raise SkillUrlValidationError(
+                    url, _describe_http_status(response.status_code, auth_scheme)
+                )
 
             content_hash = hashlib.sha256(response.content).hexdigest()[:16]
 
@@ -624,7 +679,7 @@ async def _validate_skill_md_url(
             url, "URL failed SSRF validation - private/internal addresses are not allowed"
         ) from e
     except httpx.RequestError as e:
-        raise SkillUrlValidationError(url, str(e)) from e
+        raise SkillUrlValidationError(url, _describe_request_error(e)) from e
 
 
 async def _parse_skill_md_content(
@@ -707,7 +762,9 @@ async def _parse_skill_md_content(
                 raise SkillUrlValidationError(url, f"Redirect to unsafe URL blocked: {unsafe_hop}")
 
             if response.status_code >= 400:
-                raise SkillUrlValidationError(url, f"HTTP {response.status_code}")
+                raise SkillUrlValidationError(
+                    url, _describe_http_status(response.status_code, auth_scheme)
+                )
 
             content = response.text
             result: dict[str, Any] = {
@@ -757,27 +814,30 @@ async def _parse_skill_md_content(
                         frontmatter_end_pos = codeblock_no_markers.end()
 
             if frontmatter:
-                # Parse simple YAML key: value pairs
-                for line in frontmatter.split("\n"):
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        key = key.strip().lower()
-                        value = value.strip().strip('"').strip("'")
-                        if key == "name":
-                            result["name"] = value
-                        elif key == "description":
-                            result["description"] = value
-                        elif key == "version":
-                            result["version"] = value
-                        elif key == "tags":
-                            # Handle comma-separated or YAML list
-                            if value.startswith("["):
-                                value = value.strip("[]")
-                            result["tags"] = [
-                                t.strip().strip('"').strip("'")
-                                for t in value.split(",")
-                                if t.strip()
-                            ]
+                # Full YAML parse (safe_load) so block-style lists
+                # (tags:\n  - a\n  - b) parse correctly, not just
+                # flow-style (tags: [a, b]) or comma-separated strings.
+                try:
+                    parsed_frontmatter = yaml.safe_load(frontmatter)
+                except yaml.YAMLError as e:
+                    logger.warning("Failed to parse SKILL.md frontmatter as YAML: %s", e)
+                    parsed_frontmatter = None
+
+                if isinstance(parsed_frontmatter, dict):
+                    fm = {str(k).strip().lower(): v for k, v in parsed_frontmatter.items()}
+
+                    if fm.get("name") is not None:
+                        result["name"] = str(fm["name"]).strip()
+                    if fm.get("description") is not None:
+                        result["description"] = str(fm["description"]).strip()
+                    if fm.get("version") is not None:
+                        result["version"] = str(fm["version"]).strip()
+
+                    raw_tags = fm.get("tags")
+                    if isinstance(raw_tags, list):
+                        result["tags"] = [str(t).strip() for t in raw_tags if str(t).strip()]
+                    elif isinstance(raw_tags, str) and raw_tags.strip():
+                        result["tags"] = [t.strip() for t in raw_tags.split(",") if t.strip()]
 
                 # Remove frontmatter from content for further parsing
                 content = content[frontmatter_end_pos:]
@@ -838,7 +898,7 @@ async def _parse_skill_md_content(
             url, "URL failed SSRF validation - private/internal addresses are not allowed"
         ) from e
     except httpx.RequestError as e:
-        raise SkillUrlValidationError(url, str(e)) from e
+        raise SkillUrlValidationError(url, _describe_request_error(e)) from e
 
 
 async def _probe_skill_md(

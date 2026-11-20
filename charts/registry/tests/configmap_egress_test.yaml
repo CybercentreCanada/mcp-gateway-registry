@@ -131,6 +131,24 @@ tests:
           path: data.EGRESS_OBO_ALLOWED_AUDIENCES
           value: "api://outlook-mcp-server api://calendar-mcp-server"
 
+  - it: omits the ingress relay allowlist by default (the mode is denied for every server)
+    set:
+      egressAuth:
+        enabled: true
+    asserts:
+      - notExists:
+          path: data.EGRESS_INGRESS_RELAY_ALLOWED_SERVERS
+
+  - it: renders the ingress relay allowlist when set
+    set:
+      egressAuth:
+        enabled: true
+        ingressRelayAllowedServers: "/rag /mcp-a2a-bridge"
+    asserts:
+      - equal:
+          path: data.EGRESS_INGRESS_RELAY_ALLOWED_SERVERS
+          value: "/rag /mcp-a2a-bridge"
+
   - it: omits the trusted IdP host allowlist by default (no private token endpoint permitted)
     set:
       egressAuth:

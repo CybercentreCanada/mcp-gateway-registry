@@ -65,6 +65,12 @@ data:
   # https host URLs), so shared first-party APIs (Graph/ARM/Key Vault) are rejected.
   EGRESS_OBO_ALLOWED_AUDIENCES: {{ .Values.egressAuth.oboAllowedAudiences | quote }}
   {{- end }}
+  {{- if .Values.egressAuth.ingressRelayAllowedServers }}
+  # Server paths (whitespace-separated) whose upstream receives the caller's own
+  # Authorization bearer (egress_auth_mode=ingress_relay). Unset denies the mode
+  # for every server, so a registrant cannot enable it.
+  EGRESS_INGRESS_RELAY_ALLOWED_SERVERS: {{ .Values.egressAuth.ingressRelayAllowedServers | quote }}
+  {{- end }}
   {{- if .Values.egressAuth.oauthTrustedIdpHosts }}
   # Hosts whose OAuth token endpoints may resolve to private addresses. Needed when
   # the IdP is self-hosted (Keycloak, Entra via Private Link); without it the

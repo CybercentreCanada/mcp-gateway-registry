@@ -1748,7 +1748,7 @@ def _user_can_modify_skill(
     Returns:
         True if both the scope check and the owner/admin check pass.
     """
-    if not user_has_asset_permission("skill", action, skill.name, user_context):
+    if not user_has_asset_permission("skill", action, skill.name, user_context, owner=skill.owner):
         return False
 
     if user_context.get("is_admin"):

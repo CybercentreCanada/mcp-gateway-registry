@@ -20,6 +20,13 @@ global:
   # stays for standalone installs. Cloud metadata/credential, link-local and
   # multicast addresses are never permitted.
   ssrfAllowedCidrs: ""
+  # Image for the openbao-init Job. Override when public.ecr.aws is not reachable
+  # (the Job needs python3, curl, jq and kubectl). Default:
+  # public.ecr.aws/docker/library/python:3.14-slim
+  # openbaoInitImage: ""
+  # Set false to skip only the openbao-init Job in clusters where the image cannot
+  # be used; the OpenBao StatefulSet still deploys and must be initialised by hand.
+  # openbaoInitEnabled: true
   # Domain configuration - update this to your actual domain
   domain: "DOMAIN"
   # Name the session cookie __Host-mcp_gateway_session (Secure, Path=/, no
@@ -146,6 +153,9 @@ global:
     scheme: internet-facing
     className: alb
     tls: true
+    # TLS Secret for the nginx ingress class (spec.tls secretName). Empty uses the
+    # controller's default certificate.
+    tlsSecretName: ""
     # Routing mode: "subdomain" or "path"
     # - subdomain: mcpregistry.domain.com
     # - path:      domain.com/registry

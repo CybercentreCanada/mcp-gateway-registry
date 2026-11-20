@@ -526,6 +526,7 @@ and `AUTH_SERVER_NGINX_MARKER_SECRET`.
 | `EGRESS_AUTH_ENABLED` | `false` | Master switch. When true, requires a Mongo-family `STORAGE_BACKEND` and a non-empty `EGRESS_OAUTH_CALLBACK_BASE_URL` (validated at startup). |
 | `SECRET_STORE_BACKEND` | `openbao` | Vault backend: `openbao` \| `secrets-manager`. |
 | `EGRESS_OAUTH_CALLBACK_BASE_URL` | `""` | Public base URL for the callback (`{base}/oauth2/egress/callback`). Typically the gateway's external URL. The browser must send both its registry session cookie and the consent cookie to this host, so use the host that serves initiate and `/oauth2/egress/connect`, or a parent domain covered by `SESSION_COOKIE_DOMAIN`. Otherwise every consent is refused. |
+| `EGRESS_INGRESS_RELAY_ALLOWED_SERVERS` | `""` | Whitespace-separated server paths allowed to use `egress_auth_mode=ingress_relay`. Empty denies the mode for every server. |
 | `EGRESS_TOKEN_REFRESH_SKEW_SECONDS` | `300` | Refresh a vaulted token this many seconds before expiry. |
 | `EGRESS_REFRESH_WORKER_INTERVAL_SECONDS` | `120` | Background proactive-refresh scan interval; `0` disables the sweep. |
 | `EGRESS_STATE_TTL_SECONDS` | `600` | Lifetime of the AEAD-encrypted OAuth consent state. |
@@ -663,8 +664,11 @@ curl -X POST "https://mcpgateway.example.com/api/servers/github-mcp/mcp/egress-a
 
 - `egress_auth_mode`: `none` (default, feature off for this server),
   `oauth_user` (per-user 3LO OAuth), `obo_exchange` (on-behalf-of token
-  exchange, nothing vaulted), or `pat` (per-user static PAT / API key vaulted
-  with a bounded TTL). See [egress modes](design/egress-auth-design.md#the-egress-modes).
+  exchange, nothing vaulted), `pat` (per-user static PAT / API key vaulted
+  with a bounded TTL), or `ingress_relay` (the upstream receives the caller's own
+  `Authorization` bearer; only for server paths listed in
+  `EGRESS_INGRESS_RELAY_ALLOWED_SERVERS`, and only when that bearer is the one the
+  gateway verified). See [egress modes](design/egress-auth-design.md#the-egress-modes).
 - `client_secret` is **write-only** — it is Fernet-encrypted with the gateway
   `SECRET_KEY` at rest and never returned by the `GET` endpoint. Rotating
   `SECRET_KEY` invalidates stored secrets.

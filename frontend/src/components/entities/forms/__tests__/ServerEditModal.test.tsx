@@ -65,6 +65,7 @@ function Harness({
   loading = false,
   egressEnabled = false,
   withGateway = true,
+  isAdmin = true,
 }: {
   initial?: ServerEditForm;
   onSave?: () => void;
@@ -72,6 +73,7 @@ function Harness({
   loading?: boolean;
   egressEnabled?: boolean;
   withGateway?: boolean;
+  isAdmin?: boolean;
 }) {
   const [form, setForm] = useState<ServerEditForm>(initial);
   return (
@@ -82,6 +84,7 @@ function Harness({
       loading={loading}
       egressEnabled={egressEnabled}
       withGateway={withGateway}
+      isAdmin={isAdmin}
       onSave={onSave}
       onClose={onClose}
     />
@@ -152,6 +155,37 @@ describe('ServerEditModal', () => {
   it('shows the egress section for remote servers when the feature is enabled', () => {
     render(<Harness egressEnabled />);
     expect(screen.getByText('Egress Auth')).toBeInTheDocument();
+  });
+
+  it('shows the ingress_relay mode and its allowlist requirement', () => {
+    render(<Harness initial={{ ...baseForm, egress_auth_mode: 'ingress_relay' }} egressEnabled />);
+    expect(screen.getByRole('combobox', { name: 'Mode' })).toHaveValue('ingress_relay');
+    expect(screen.getByText(/Requires this server path/)).toBeInTheDocument();
+  });
+
+  it('offers OBO exchange to admins only', () => {
+    const { unmount } = render(<Harness egressEnabled isAdmin />);
+    expect(screen.getByRole('option', { name: /OBO exchange/ })).toBeInTheDocument();
+    unmount();
+    render(<Harness egressEnabled isAdmin={false} />);
+    expect(screen.queryByRole('option', { name: /OBO exchange/ })).not.toBeInTheDocument();
+  });
+
+  it('shows an admin-set OBO exchange to a non-admin but locks the selector', () => {
+    render(
+      <Harness
+        initial={{ ...baseForm, egress_auth_mode: 'obo_exchange' }}
+        egressEnabled
+        isAdmin={false}
+      />
+    );
+    expect(screen.getByRole('combobox', { name: 'Mode' })).toBeDisabled();
+    expect(screen.getByText(/configured by an administrator/)).toBeInTheDocument();
+  });
+
+  it('hides the ingress_relay hint for other modes', () => {
+    render(<Harness egressEnabled />);
+    expect(screen.queryByText(/Requires this server path/)).not.toBeInTheDocument();
   });
 
   it('hides the egress section for local deployments even when enabled', () => {

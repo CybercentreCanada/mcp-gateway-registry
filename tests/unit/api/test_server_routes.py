@@ -2393,6 +2393,106 @@ class TestEditLocalServer:
         assert "proxy_pass_url is required" in response.json()["detail"]
 
 
+@pytest.mark.unit
+@pytest.mark.api
+@pytest.mark.servers
+class TestEditRemoteServerBackendUrlRedaction:
+    """A non-admin never sees the backend URLs, so their edit form submits them
+    empty. The edit must keep the stored values, not fail or wipe them."""
+
+    STORED = {
+        "server_name": "Existing Remote",
+        "description": "http",
+        "path": "/remote-srv",
+        "deployment": "remote",
+        "proxy_pass_url": "http://upstream:9000",
+        "mcp_endpoint": "http://upstream:9000/mcp",
+        "sse_endpoint": "http://upstream:9000/sse",
+        "tags": [],
+        "auth_scheme": "none",
+        "registered_by": "testuser",
+    }
+
+    def _edit(self, client, service, user_context, *, grant=None, owner=None, **form):
+        user_context["ui_permissions"]["modify_service"] = grant or ["Existing Remote"]
+        service.get_server_info.return_value = {
+            **self.STORED,
+            **({"registered_by": owner} if owner else {}),
+        }
+        service.is_service_enabled.return_value = True
+        service.user_can_access_server_path.return_value = True
+        with patch(
+            "registry.auth.dependencies.user_has_ui_permission_for_service", return_value=True
+        ):
+            return client.post(
+                "/api/edit/remote-srv",
+                headers={"accept": "application/json"},
+                data={"name": "Existing Remote", "description": "updated", "tags": "", **form},
+            )
+
+    def test_non_admin_edit_keeps_the_stored_backend_urls(
+        self, test_client_regular, mock_server_service, mock_nginx_service, regular_user_context
+    ):
+        response = self._edit(test_client_regular, mock_server_service, regular_user_context)
+
+        assert response.status_code == 200, response.text
+        entry = mock_server_service.update_server.call_args[0][1]
+        assert entry["proxy_pass_url"] == "http://upstream:9000"
+        assert entry["mcp_endpoint"] == "http://upstream:9000/mcp"
+        assert entry["sse_endpoint"] == "http://upstream:9000/sse"
+
+    def test_non_admin_can_still_submit_a_new_backend_url(
+        self, test_client_regular, mock_server_service, mock_nginx_service, regular_user_context
+    ):
+        response = self._edit(
+            test_client_regular,
+            mock_server_service,
+            regular_user_context,
+            proxy_pass_url="http://upstream:9001",
+        )
+
+        assert response.status_code == 200, response.text
+        entry = mock_server_service.update_server.call_args[0][1]
+        assert entry["proxy_pass_url"] == "http://upstream:9001"
+
+    def test_wildcard_grant_lets_the_owner_edit_their_server(
+        self, test_client_regular, mock_server_service, mock_nginx_service, regular_user_context
+    ):
+        response = self._edit(
+            test_client_regular, mock_server_service, regular_user_context, grant=["*"]
+        )
+
+        assert response.status_code == 200, response.text
+
+    def test_wildcard_grant_does_not_reach_another_owners_server(
+        self, test_client_regular, mock_server_service, mock_nginx_service, regular_user_context
+    ):
+        response = self._edit(
+            test_client_regular,
+            mock_server_service,
+            regular_user_context,
+            grant=["*"],
+            owner="someone-else",
+        )
+
+        assert response.status_code == 403
+        mock_server_service.update_server.assert_not_called()
+
+    def test_registry_only_mode_does_not_fill_in_a_missing_url(
+        self, test_client_regular, mock_server_service, mock_nginx_service, regular_user_context
+    ):
+        # Nothing is redacted in registry-only mode, so an empty URL is an error.
+        from registry.core.config import DeploymentMode
+
+        with patch(
+            "registry.services.visibility.settings.deployment_mode", DeploymentMode.REGISTRY_ONLY
+        ):
+            response = self._edit(test_client_regular, mock_server_service, regular_user_context)
+
+        assert response.status_code == 400
+        assert "proxy_pass_url is required" in response.json()["detail"]
+
+
 # =============================================================================
 # TEST POST /register and /edit input validation
 # =============================================================================

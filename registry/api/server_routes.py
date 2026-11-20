@@ -1245,7 +1245,13 @@ async def toggle_service_route(
     service_name = server_info["server_name"]
 
     # Check if user has toggle_service permission for this specific service
-    if not user_has_asset_permission("server", "toggle", service_name, user_context):
+    if not user_has_asset_permission(
+        "server",
+        "toggle",
+        service_name,
+        user_context,
+        owner=server_info.get("registered_by"),
+    ):
         logger.warning(
             f"User {user_context['username']} attempted to toggle service {service_name} without toggle_service permission"
         )
@@ -1372,7 +1378,13 @@ async def _toggle_tool_impl(
 
     service_name = server_info["server_name"]
 
-    if not user_has_asset_permission("server", "toggle", service_name, user_context):
+    if not user_has_asset_permission(
+        "server",
+        "toggle",
+        service_name,
+        user_context,
+        owner=server_info.get("registered_by"),
+    ):
         logger.warning(
             f"User {user_context['username']} attempted to toggle a tool on {service_name} "
             f"without toggle_service permission"
@@ -1576,6 +1588,7 @@ def _check_server_permission(
     action: str,
     server_name: str,
     user_context: dict[str, Any],
+    owner: str | None = None,
 ) -> None:
     """Check whether the user may perform ``action`` on a server.
 
@@ -1589,11 +1602,12 @@ def _check_server_permission(
         server_name: Display name of the server, used for the 403 detail and the
             per-resource grant match.
         user_context: Authenticated user context.
+        owner: Username that registered the server (for a ``"*"`` scope grant).
 
     Raises:
         HTTPException: 403 if the user lacks the permission.
     """
-    if not user_has_asset_permission("server", action, server_name, user_context):
+    if not user_has_asset_permission("server", action, server_name, user_context, owner=owner):
         logger.warning(
             f"User {user_context.get('username')} attempted to {action} "
             f"server {server_name} without permission"
@@ -2716,7 +2730,13 @@ async def edit_server_form(
     service_name = server_info["server_name"]
 
     # Check if user has modify_service permission for this specific service
-    if not user_has_asset_permission("server", "modify", service_name, user_context):
+    if not user_has_asset_permission(
+        "server",
+        "modify",
+        service_name,
+        user_context,
+        owner=server_info.get("registered_by"),
+    ):
         logger.warning(
             f"User {user_context['username']} attempted to access edit form for {service_name} without modify_service permission"
         )
@@ -2842,7 +2862,13 @@ async def edit_server_submit(
             )
     else:
         # Remote edit — standard modify_service permission check.
-        if not user_has_asset_permission("server", "modify", service_name, user_context):
+        if not user_has_asset_permission(
+            "server",
+            "modify",
+            service_name,
+            user_context,
+            owner=server_info.get("registered_by"),
+        ):
             logger.warning(
                 f"User {user_context['username']} attempted to edit service "
                 f"{service_name} without modify_service permission"
@@ -2865,6 +2891,14 @@ async def edit_server_submit(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="You do not have access to edit this server",
                 )
+
+    # The edit form is prefilled from a response that redacts the backend URLs for
+    # callers who must not see them, so it submits them empty. Keep the stored
+    # values instead of rejecting the edit or wiping the routing config.
+    if not is_local and should_redact_backend_urls(user_context):
+        proxy_pass_url = proxy_pass_url or server_info.get("proxy_pass_url")
+        mcp_endpoint = mcp_endpoint or server_info.get("mcp_endpoint")
+        sse_endpoint = sse_endpoint or server_info.get("sse_endpoint")
 
     # Shape validation + local_runtime parsing are shared with /register.
     validate_deployment_shape(
@@ -4942,6 +4976,7 @@ async def update_server_auth_credential(
         "modify",
         existing_server.get("server_name", server_path),
         user_context,
+        owner=existing_server.get("registered_by"),
     )
 
     # Ownership guard: overwriting a backend credential can hijack the server's
@@ -5101,7 +5136,10 @@ async def get_server_oauth_config(
     if not existing_server:
         return JSONResponse(status_code=404, content={"error": "Server not found"})
     _check_server_permission(
-        "modify", existing_server.get("server_name", server_path), user_context
+        "modify",
+        existing_server.get("server_name", server_path),
+        user_context,
+        owner=existing_server.get("registered_by"),
     )
     # Ownership guard, matching the mutating routes: modify_service alone is
     # granted to any user holding an /execute scope, which is not sufficient to
@@ -5155,7 +5193,10 @@ async def put_server_oauth_config(
     # Same authorization as the auth-credential PATCH: rewriting the upstream
     # credential can hijack the connection, so require modify + owner-or-admin.
     _check_server_permission(
-        "modify", existing_server.get("server_name", server_path), user_context
+        "modify",
+        existing_server.get("server_name", server_path),
+        user_context,
+        owner=existing_server.get("registered_by"),
     )
     if not user_context.get("is_admin") and existing_server.get(
         "registered_by"
@@ -5312,7 +5353,10 @@ async def get_server_oauth_discovery(
     if not existing_server:
         return JSONResponse(status_code=404, content={"error": "Server not found"})
     _check_server_permission(
-        "modify", existing_server.get("server_name", server_path), user_context
+        "modify",
+        existing_server.get("server_name", server_path),
+        user_context,
+        owner=existing_server.get("registered_by"),
     )
     # Ownership guard, matching the mutating routes: modify_service alone is
     # granted to any user holding an /execute scope. This view names the human
@@ -5384,7 +5428,10 @@ async def put_server_oauth_discovery(
         return JSONResponse(status_code=404, content={"error": "Server not found"})
 
     _check_server_permission(
-        "modify", existing_server.get("server_name", server_path), user_context
+        "modify",
+        existing_server.get("server_name", server_path),
+        user_context,
+        owner=existing_server.get("registered_by"),
     )
     if not user_context.get("is_admin") and existing_server.get(
         "registered_by"
@@ -5569,7 +5616,10 @@ async def delete_server_oauth_discovery(
     if not existing_server:
         return JSONResponse(status_code=404, content={"error": "Server not found"})
     _check_server_permission(
-        "modify", existing_server.get("server_name", server_path), user_context
+        "modify",
+        existing_server.get("server_name", server_path),
+        user_context,
+        owner=existing_server.get("registered_by"),
     )
     if not user_context.get("is_admin") and existing_server.get(
         "registered_by"
@@ -5655,7 +5705,13 @@ async def toggle_service_api(
 
     service_name = server_info["server_name"]
 
-    if not user_has_asset_permission("server", "toggle", service_name, user_context):
+    if not user_has_asset_permission(
+        "server",
+        "toggle",
+        service_name,
+        user_context,
+        owner=server_info.get("registered_by"),
+    ):
         logger.warning(
             f"User '{user_context.get('username')}' attempted to toggle "
             f"'{service_name}' without toggle_service permission"
@@ -5817,7 +5873,13 @@ async def remove_service_api(
     # a delete_service grant for a raw path string that differs from the server_name.
     if not user_context.get("is_admin", False):
         service_name = server_info["server_name"]
-        if not user_has_asset_permission("server", "delete", service_name, user_context):
+        if not user_has_asset_permission(
+            "server",
+            "delete",
+            service_name,
+            user_context,
+            owner=server_info.get("registered_by"),
+        ):
             logger.warning(
                 f"User {user_context.get('username')} denied delete for server "
                 f"'{service_name}' ({path})"
@@ -6968,6 +7030,7 @@ async def remove_server_version(
         "modify",
         existing_server.get("server_name", decoded_path),
         user_context,
+        owner=existing_server.get("registered_by"),
     )
 
     # Ownership guard: removing a version mutates another user's server and can
@@ -7034,6 +7097,7 @@ async def set_default_version(
         "modify",
         existing_server.get("server_name", decoded_path),
         user_context,
+        owner=existing_server.get("registered_by"),
     )
 
     # Ownership guard: changing the default version reroutes another user's
@@ -7272,6 +7336,7 @@ async def update_server_endpoint(
         "modify",
         existing.get("server_name", path),
         user_context,
+        owner=existing.get("registered_by"),
     )
 
     if (
@@ -7456,6 +7521,7 @@ async def patch_server_endpoint(
         "modify",
         existing.get("server_name", path),
         user_context,
+        owner=existing.get("registered_by"),
     )
 
     if (

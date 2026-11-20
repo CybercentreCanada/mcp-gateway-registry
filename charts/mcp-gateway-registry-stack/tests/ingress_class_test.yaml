@@ -1,0 +1,142 @@
+suite: registry ingress class (alb vs nginx) and TLS
+release:
+  name: test
+  namespace: default
+templates:
+  - charts/registry/templates/ingress.yaml
+tests:
+  - it: defaults to the alb class with ALB annotations and no tls block
+    set:
+      global:
+        domain: example.com
+    asserts:
+      - equal:
+          path: spec.ingressClassName
+          value: alb
+      - equal:
+          path: metadata.annotations["alb.ingress.kubernetes.io/target-type"]
+          value: ip
+      - notExists:
+          path: spec.tls
+
+  - it: global.ingress.className=nginx renders nginx annotations and no ALB annotations
+    set:
+      global:
+        domain: example.com
+        ingress:
+          className: nginx
+    asserts:
+      - equal:
+          path: spec.ingressClassName
+          value: nginx
+      - equal:
+          path: metadata.annotations["nginx.ingress.kubernetes.io/force-ssl-redirect"]
+          value: "true"
+      - equal:
+          path: metadata.annotations["nginx.ingress.kubernetes.io/proxy-read-timeout"]
+          value: "600"
+      - notExists:
+          path: metadata.annotations["alb.ingress.kubernetes.io/target-type"]
+
+  - it: nginx with global tls renders spec.tls for the registry host and the secret
+    set:
+      global:
+        domain: example.com
+        ingress:
+          className: nginx
+          tls: true
+          tlsSecretName: ap-tls
+    asserts:
+      - equal:
+          path: spec.tls[0].hosts[0]
+          value: mcpregistry.example.com
+      - equal:
+          path: spec.tls[0].secretName
+          value: ap-tls
+
+  - it: nginx tls without a secret name leaves secretName unset (controller default certificate)
+    set:
+      global:
+        domain: example.com
+        ingress:
+          className: nginx
+          tls: true
+    asserts:
+      - exists:
+          path: spec.tls[0].hosts
+      - notExists:
+          path: spec.tls[0].secretName
+
+  - it: nginx tls hosts follow the custom subdomain and include additional hostnames
+    set:
+      global:
+        domain: example.com
+        ingress:
+          className: nginx
+          tls: true
+          registrySubdomain: mcpregistry-stg
+          additionalHostnames:
+            - mcp-registry.example.com
+    asserts:
+      - equal:
+          path: spec.tls[0].hosts[0]
+          value: mcpregistry-stg.example.com
+      - equal:
+          path: spec.tls[0].hosts[1]
+          value: mcp-registry.example.com
+
+  - it: nginx tls in path mode uses the bare domain
+    set:
+      global:
+        domain: example.com
+        ingress:
+          className: nginx
+          tls: true
+          routingMode: path
+    asserts:
+      - equal:
+          path: spec.tls[0].hosts[0]
+          value: example.com
+
+  - it: alb never renders a tls block even when tls is true
+    set:
+      global:
+        domain: example.com
+        ingress:
+          className: alb
+          tls: true
+    asserts:
+      - notExists:
+          path: spec.tls
+
+  - it: registry.ingress.className wins over the global class
+    set:
+      global:
+        domain: example.com
+        ingress:
+          className: alb
+      registry:
+        ingress:
+          className: nginx
+    asserts:
+      - equal:
+          path: spec.ingressClassName
+          value: nginx
+
+  - it: ingress.annotations are appended for any class
+    set:
+      global:
+        domain: example.com
+        ingress:
+          className: nginx
+      registry:
+        ingress:
+          annotations:
+            nginx.ingress.kubernetes.io/whitelist-source-range: 10.0.0.0/8
+    asserts:
+      - equal:
+          path: metadata.annotations["nginx.ingress.kubernetes.io/whitelist-source-range"]
+          value: 10.0.0.0/8
+      - equal:
+          path: metadata.annotations["nginx.ingress.kubernetes.io/ssl-redirect"]
+          value: "true"

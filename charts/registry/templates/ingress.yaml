@@ -3,6 +3,11 @@
 {{- $domain := .Values.global.domain | default .Values.ingress.hostname }}
 {{- $registrySubdomain := .Values.global.ingress.registrySubdomain | default "mcpregistry" }}
 {{- $additionalHostnames := fromYamlArray (include "registry.additionalHostnames" .) }}
+{{- /* Class precedence: registry ingress.className, then global.ingress.className, then alb. */ -}}
+{{- $ingressClass := .Values.ingress.className | default .Values.global.ingress.className | default "alb" }}
+{{- $tlsEnabled := .Values.ingress.tls | default .Values.global.ingress.tls | default false }}
+{{- $tlsSecretName := .Values.ingress.tlsSecretName | default (index .Values.global.ingress "tlsSecretName") | default "" }}
+{{- $primaryHost := ternary $domain (printf "%s.%s" $registrySubdomain $domain) (eq $routingMode "path") }}
 {{- $globalPaths := .Values.global.ingress.paths | default dict }}
 {{- $pathPrefix := (get $globalPaths "registry") | default .Values.ingress.path | default "/registry" }}
 {{- /*
@@ -23,6 +28,7 @@ metadata:
   name: {{ .Values.app.name }}
   namespace: {{ .Release.Namespace | quote }}
   annotations:
+    {{- if eq $ingressClass "alb" }}
     {{- if eq $routingMode "path" }}
     alb.ingress.kubernetes.io/group.name: mcp-gateway-stack
     alb.ingress.kubernetes.io/group.order: '20'
@@ -38,8 +44,31 @@ metadata:
     {{- if .Values.global.ingress.sslPolicy }}
     alb.ingress.kubernetes.io/ssl-policy: {{ .Values.global.ingress.sslPolicy }}
     {{- end }}
+    {{- else if eq $ingressClass "nginx" }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
-  ingressClassName: {{ .Values.ingress.className }}
+  ingressClassName: {{ $ingressClass }}
+  {{- if and $tlsEnabled (eq $ingressClass "nginx") }}
+  tls:
+    - hosts:
+        - {{ $primaryHost | quote }}
+        {{- range $hostname := $additionalHostnames }}
+        {{- if $hostname }}
+        - {{ $hostname | quote }}
+        {{- end }}
+        {{- end }}
+      {{- if $tlsSecretName }}
+      secretName: {{ $tlsSecretName }}
+      {{- end }}
+  {{- end }}
   rules:
     {{- if eq $routingMode "path" }}
     - host: {{ $domain | quote }}

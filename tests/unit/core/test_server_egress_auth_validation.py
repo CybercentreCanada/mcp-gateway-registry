@@ -129,6 +129,71 @@ class TestServerEgressAuthValidation:
         # pat carries no OAuth client material.
         assert s.egress_oauth.client_secret_encrypted is None
 
+    def test_ingress_relay_denied_when_allowlist_empty(self, monkeypatch):
+        from registry.core.config import settings
+
+        monkeypatch.setattr(settings, "egress_ingress_relay_allowed_servers", "", raising=False)
+        with pytest.raises(ValidationError, match="not allowed for ingress_relay"):
+            _server(egress_auth_mode="ingress_relay")
+
+    def test_ingress_relay_denied_when_server_not_listed(self, monkeypatch):
+        from registry.core.config import settings
+
+        monkeypatch.setattr(
+            settings, "egress_ingress_relay_allowed_servers", "/rag /other", raising=False
+        )
+        with pytest.raises(ValidationError, match="not allowed for ingress_relay"):
+            _server(egress_auth_mode="ingress_relay")
+
+    def test_ingress_relay_accepted_when_listed(self, monkeypatch):
+        from registry.core.config import settings
+
+        monkeypatch.setattr(settings, "egress_ingress_relay_allowed_servers", "/s", raising=False)
+        s = _server(egress_auth_mode="ingress_relay")
+        assert s.egress_auth_mode == "ingress_relay"
+        assert s.egress_oauth is None
+
+    def test_ingress_relay_forbids_egress_oauth(self, monkeypatch):
+        from registry.core.config import settings
+
+        monkeypatch.setattr(settings, "egress_ingress_relay_allowed_servers", "/s", raising=False)
+        with pytest.raises(ValidationError, match="forbids egress_oauth"):
+            _server(
+                egress_auth_mode="ingress_relay",
+                egress_oauth=EgressOAuthConfig(provider="github"),
+            )
+
+
+@pytest.mark.unit
+@pytest.mark.core
+class TestIngressRelayAllowlistHelper:
+    def test_empty_setting_yields_empty_set(self, monkeypatch):
+        from registry.core.config import settings
+
+        monkeypatch.setattr(settings, "egress_ingress_relay_allowed_servers", "", raising=False)
+        assert schemas._ingress_relay_server_allowlist() == set()
+
+    def test_paths_are_normalised_to_leading_slash_lower_case(self, monkeypatch):
+        from registry.core.config import settings
+
+        monkeypatch.setattr(
+            settings,
+            "egress_ingress_relay_allowed_servers",
+            "rag  /RAG-stg/ \n /mcp-a2a-bridge",
+            raising=False,
+        )
+        assert schemas._ingress_relay_server_allowlist() == {
+            "/rag",
+            "/rag-stg",
+            "/mcp-a2a-bridge",
+        }
+
+    def test_slash_only_entries_are_ignored(self, monkeypatch):
+        from registry.core.config import settings
+
+        monkeypatch.setattr(settings, "egress_ingress_relay_allowed_servers", "/ //", raising=False)
+        assert schemas._ingress_relay_server_allowlist() == set()
+
 
 @pytest.mark.unit
 @pytest.mark.core

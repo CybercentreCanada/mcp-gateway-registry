@@ -185,6 +185,16 @@ def _is_gateway_own_audience(target_audience: str) -> bool:
     return target in own or target.rstrip("/") in own
 
 
+def _ingress_relay_server_allowlist() -> set[str]:
+    """Operator-approved server paths (``/path``, lower-case) allowed to receive the ingress bearer."""
+    from registry.core.config import settings
+
+    raw = getattr(settings, "egress_ingress_relay_allowed_servers", "") or ""
+    return {
+        "/" + path.strip().lower().strip("/") for path in raw.split() if path.strip().strip("/")
+    }
+
+
 def _obo_audience_allowlist() -> set[str]:
     """Operator allowlist of permitted obo_exchange target_audience values.
 
@@ -838,7 +848,8 @@ class ServerInfo(ProxyableMixin):
     egress_auth_mode: str = Field(
         default="none",
         description="Egress auth to the upstream: 'none', 'oauth_user' (3LO vault), "
-        "or 'obo_exchange' (same-IdP OBO).",
+        "'obo_exchange' (same-IdP OBO), 'pat', or 'ingress_relay' (operator-approved "
+        "relay of the caller's own bearer token).",
     )
     egress_oauth: EgressOAuthConfig | None = Field(
         default=None,
@@ -989,12 +1000,22 @@ class ServerInfo(ProxyableMixin):
           rather than at the first live request.
         """
         mode = self.egress_auth_mode
-        if mode not in ("none", "oauth_user", "obo_exchange", "pat"):
+        if mode not in ("none", "oauth_user", "obo_exchange", "pat", "ingress_relay"):
             raise ValueError(
                 f"invalid egress_auth_mode {mode!r}; expected 'none', 'oauth_user', "
-                "'obo_exchange', or 'pat'"
+                "'obo_exchange', 'pat', or 'ingress_relay'"
             )
         if mode == "none":
+            return self
+        if mode == "ingress_relay":
+            server_path = "/" + self.path.strip().lower().strip("/")
+            if server_path not in _ingress_relay_server_allowlist():
+                raise ValueError(
+                    f"server path {server_path!r} is not allowed for ingress_relay; "
+                    "add it to EGRESS_INGRESS_RELAY_ALLOWED_SERVERS"
+                )
+            if self.egress_oauth is not None:
+                raise ValueError("egress_auth_mode='ingress_relay' forbids egress_oauth config")
             return self
         if self.egress_oauth is None:
             raise ValueError(f"egress_auth_mode={mode!r} requires egress_oauth config")

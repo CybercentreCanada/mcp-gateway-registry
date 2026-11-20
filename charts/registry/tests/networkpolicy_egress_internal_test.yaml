@@ -1,0 +1,73 @@
+suite: registry egress-internal network policy
+templates:
+  - templates/networkpolicy-egress-internal.yaml
+tests:
+  - it: restricts the vend port to the auth-server pod
+    set:
+      egressAuth:
+        enabled: true
+    asserts:
+      - isKind:
+          of: NetworkPolicy
+      - equal:
+          path: spec.ingress[0].from[0].podSelector.matchLabels
+          value:
+            app.kubernetes.io/name: auth-server
+      - equal:
+          path: spec.ingress[0].ports
+          value:
+            - protocol: TCP
+              port: 8091
+
+  - it: keeps the public listeners reachable from any source
+    set:
+      egressAuth:
+        enabled: true
+    asserts:
+      - notExists:
+          path: spec.ingress[1].from
+      - equal:
+          path: spec.ingress[1].ports
+          value:
+            - protocol: TCP
+              port: 8080
+            - protocol: TCP
+              port: 8443
+
+  - it: keeps the scrape port open when its own policy is disabled
+    set:
+      egressAuth:
+        enabled: true
+      metricsScrape:
+        networkPolicy:
+          enabled: false
+    asserts:
+      - contains:
+          path: spec.ingress[1].ports
+          content:
+            protocol: TCP
+            port: 9464
+
+  - it: leaves the scrape port to its own policy when that is enabled
+    set:
+      egressAuth:
+        enabled: true
+      metricsScrape:
+        networkPolicy:
+          enabled: true
+    asserts:
+      - notContains:
+          path: spec.ingress[1].ports
+          content:
+            protocol: TCP
+            port: 9464
+
+  - it: renders nothing when the internal policy is disabled
+    set:
+      egressAuth:
+        enabled: true
+        internalNetworkPolicy:
+          enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0

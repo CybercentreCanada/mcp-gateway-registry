@@ -11,6 +11,9 @@ RUN npm install --legacy-peer-deps
 
 # Copy frontend source and build
 COPY frontend/ ./
+# Optional: target of the header GitHub icon (defaults to the CCCS fork root).
+ARG VITE_GITHUB_URL=""
+ENV VITE_GITHUB_URL=${VITE_GITHUB_URL}
 RUN npm run build
 
 # ===== BACKEND BUILD STAGE =====

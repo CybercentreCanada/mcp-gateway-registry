@@ -171,6 +171,37 @@ class TestGenerateAgentLocationBlocks:
         assert 'proxy_set_header Cookie "";' in card_block
 
     @pytest.mark.asyncio
+    async def test_slashless_agent_redirect_uses_forwarded_scheme(self, patched_agent_service):
+        """A slashless /agent/{path} is canonicalized with the forwarded scheme.
+
+        A raw $scheme would send an http:// Location behind a TLS-terminating
+        ingress and loop.
+        """
+        patched_agent_service.get_enabled_agents = AsyncMock(return_value=["/flight-booking-agent"])
+        patched_agent_service.get_agent_info = AsyncMock(return_value=_agent())
+        service = NginxConfigService()
+
+        result = await service._generate_agent_location_blocks()
+
+        var = service._forwarded_scheme_var
+        assert "location = {{ROOT_PATH}}/agent/flight-booking-agent {" in result
+        assert f"return 308 {var}://$host$uri/$is_args$args;" in result
+
+    @pytest.mark.asyncio
+    async def test_agent_block_forwards_scheme_from_map_not_scheme(self, patched_agent_service):
+        patched_agent_service.get_enabled_agents = AsyncMock(return_value=["/flight-booking-agent"])
+        patched_agent_service.get_agent_info = AsyncMock(return_value=_agent())
+        service = NginxConfigService()
+
+        result = await service._generate_agent_location_blocks()
+
+        var = service._forwarded_scheme_var
+        assert f"proxy_set_header X-Forwarded-Proto {var};" in result
+        assert f"proxy_set_header X-Original-URL {var}://$host$request_uri;" in result
+        assert "X-Forwarded-Proto $scheme;" not in result
+        assert "X-Original-URL $scheme://" not in result
+
+    @pytest.mark.asyncio
     async def test_block_enforces_auth_request(self, patched_agent_service):
         """Generated blocks are protected by the /validate auth subrequest."""
         patched_agent_service.get_enabled_agents = AsyncMock(return_value=["/flight-booking-agent"])

@@ -109,7 +109,7 @@ tests:
       # ...and feeds it into auth/<mount>/config as token_reviewer_jwt.
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
-          pattern: 'token_reviewer_jwt:\$rjwt'
+          pattern: '"token_reviewer_jwt": reviewer_jwt'
 
   - it: Job enables kubernetes auth at the default mount when authMount is unset
     documentIndex: 3
@@ -137,13 +137,13 @@ tests:
       # Enable, config and role all go through the same mount.
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
-          pattern: 'sys/auth/\$AUTH_MOUNT'
+          pattern: '"sys/auth/" \+ AUTH_MOUNT'
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
-          pattern: 'auth/\$AUTH_MOUNT/config'
+          pattern: '"auth/" \+ AUTH_MOUNT \+ "/config"'
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
-          pattern: 'auth/\$AUTH_MOUNT/role/\$ROLE'
+          pattern: '"auth/" \+ AUTH_MOUNT \+ "/role/" \+ ROLE'
       - notMatchRegex:
           path: spec.template.spec.containers[0].command[2]
           pattern: 'auth/kubernetes'
@@ -185,10 +185,10 @@ tests:
       # Policy is scoped to the reserved "obo-cache" namespace segment only.
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
-          pattern: 'data/\$EGRESS_PREFIX/b2JvLWNhY2hl/\*'
+          pattern: 'OBO_SEGMENT \+ "/\*"'
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
-          pattern: 'auth/\$AUTH_MOUNT/role/\$OBO_ROLE'
+          pattern: '"auth/" \+ AUTH_MOUNT \+ "/role/" \+ OBO_ROLE'
 
   - it: Job binds the OBO role to a custom auth-server ServiceAccount name
     documentIndex: 3
@@ -214,3 +214,58 @@ tests:
           content:
             name: OBO_CACHE_ENABLED
             value: "false"
+
+  - it: Job image defaults to the public python image
+    documentIndex: 3
+    set:
+      registry: {egressAuth: {enabled: true}}
+      openbao: {enabled: true}
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: public.ecr.aws/docker/library/python:3.14-slim
+
+  - it: Job image honours global.openbaoInitImage
+    documentIndex: 3
+    set:
+      global:
+        openbaoInitImage: registry.example.com/mirror/python:3.14-slim
+      registry: {egressAuth: {enabled: true}}
+      openbao: {enabled: true}
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.example.com/mirror/python:3.14-slim
+
+  - it: global.openbaoInitEnabled=false skips the init resources
+    set:
+      global:
+        openbaoInitEnabled: false
+      registry: {egressAuth: {enabled: true}}
+      openbao: {enabled: true}
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: global.openbaoInitEnabled=true keeps the four init documents
+    set:
+      global:
+        openbaoInitEnabled: true
+      registry: {egressAuth: {enabled: true}}
+      openbao: {enabled: true}
+    asserts:
+      - hasDocuments:
+          count: 4
+
+  - it: Job script is stdlib-only python and never installs packages
+    documentIndex: 3
+    set:
+      registry: {egressAuth: {enabled: true}}
+      openbao: {enabled: true}
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].command[0]
+          value: python3
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'apt-get|pip install|curl|kubectl|jq '

@@ -35,7 +35,15 @@ const baseProps = {
   onShowToast: () => {},
   onSkillUpdate: () => {},
   canToggleSkill: () => false,
+  canModifySkill: () => false,
 };
+
+jest.mock('../../../StarRatingWidget', () => () => null);
+jest.mock('../../../SkillResources', () => () => null);
+jest.mock('../../../SecurityScanModal', () => () => null);
+jest.mock('../../../../contexts/AuthContext', () => ({
+  useAuth: () => ({ user: { username: 'dev1', is_admin: false } }),
+}));
 
 describe('SkillsSection empty state', () => {
   it('shows the admin-access hint when the caller lacks list_skills', () => {
@@ -60,5 +68,39 @@ describe('SkillsSection empty state', () => {
     expect(
       screen.queryByText("You don't have access to view skills"),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe('SkillsSection per-skill gating', () => {
+  const skills = [
+    { name: 'Mine', path: '/skills/mine', visibility: 'public', is_enabled: true, num_stars: 0, registry_name: 'local', skill_md_url: 'https://example.com/a/SKILL.md' },
+    { name: 'Theirs', path: '/skills/theirs', visibility: 'public', is_enabled: true, num_stars: 0, registry_name: 'local', skill_md_url: 'https://example.com/b/SKILL.md' },
+  ];
+
+  it('offers edit only on the skills the caller may modify', () => {
+    render(
+      <SkillsSection
+        {...baseProps}
+        paginatedSkills={skills as never}
+        filteredCount={2}
+        canModifySkill={(skill) => skill.path === '/skills/mine'}
+      />,
+    );
+
+    expect(screen.getAllByTitle('Edit skill')).toHaveLength(1);
+  });
+
+  it('does not tie per-skill editing to the add-skill capability', () => {
+    render(
+      <SkillsSection
+        {...baseProps}
+        canModify={false}
+        paginatedSkills={skills as never}
+        filteredCount={2}
+        canModifySkill={() => true}
+      />,
+    );
+
+    expect(screen.getAllByTitle('Edit skill')).toHaveLength(2);
   });
 });

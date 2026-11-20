@@ -1,0 +1,25 @@
+# Overlay image: adds our patched backend files (and optionally a corporate CA
+# bundle) on top of a PREBUILT registry image. It does NOT rebuild the app.
+#
+# Do not call this directly: build_registry.sh stages the files that differ from
+# the upstream tag into .overlay/ and refuses changes an overlay cannot carry
+# (frontend, nginx templates, dependencies). The base image version MUST match the
+# checkout the overlay was staged from.
+
+ARG REGISTRY_BASE_IMAGE=uchimera.azurecr.io/mcpgateway/registry:1.37.0
+FROM ${REGISTRY_BASE_IMAGE}
+
+# Shown in the UI; the release pipeline passes the same arg.
+ARG BUILD_VERSION
+ENV BUILD_VERSION=${BUILD_VERSION}
+
+# The base image ends on `USER appuser`; COPY into /etc needs root.
+USER root
+
+# Patched source, laid out like the repository root (/app/registry/..., etc.).
+COPY --chown=appuser:appuser .overlay/app/ /app/
+# Optional corporate CA bundle (empty directory when none was provided).
+COPY .overlay/etc/ /etc/
+RUN find /app/registry /app/auth_server -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
+USER appuser

@@ -958,6 +958,7 @@ def _check_agent_permission(
     action: str,
     agent_name: str,
     user_context: dict[str, Any],
+    owner: str | None = None,
 ) -> None:
     """
     Check if user has permission for an agent operation.
@@ -975,11 +976,12 @@ def _check_agent_permission(
         agent_name: Name of the agent (used for the 403 detail and per-resource
             grant match).
         user_context: User context from auth.
+        owner: Username that registered the agent (for a ``"*"`` scope grant).
 
     Raises:
         HTTPException: 403 if the user lacks the permission.
     """
-    if not user_has_asset_permission("agent", action, agent_name, user_context):
+    if not user_has_asset_permission("agent", action, agent_name, user_context, owner=owner):
         logger.warning(
             f"User {user_context['username']} attempted to {action} "
             f"agent {agent_name} without permission"
@@ -1859,7 +1861,12 @@ async def toggle_agent(
             detail=f"Agent not found at path '{path}'",
         )
 
-    _check_agent_permission("toggle", agent_card.name, user_context)
+    _check_agent_permission(
+        "toggle",
+        agent_card.name,
+        user_context,
+        owner=agent_card.registered_by,
+    )
 
     # Per-resource access check for non-admins, mirroring the server toggle
     # (POST /api/servers/toggle). Having toggle_service permission is not
@@ -2212,7 +2219,12 @@ async def pull_agent_card(
         )
 
     # 2. Check permissions (modify_service + owner or admin)
-    _check_agent_permission("modify", existing_agent.name, user_context)
+    _check_agent_permission(
+        "modify",
+        existing_agent.name,
+        user_context,
+        owner=existing_agent.registered_by,
+    )
 
     if not user_context["is_admin"] and existing_agent.registered_by != user_context["username"]:
         raise HTTPException(
@@ -2510,7 +2522,12 @@ async def update_agent(
             detail=f"Agent not found at path '{path}'",
         )
 
-    _check_agent_permission("modify", existing_agent.name, user_context)
+    _check_agent_permission(
+        "modify",
+        existing_agent.name,
+        user_context,
+        owner=existing_agent.registered_by,
+    )
 
     if not user_context["is_admin"] and existing_agent.registered_by != user_context["username"]:
         logger.warning(
@@ -2719,7 +2736,12 @@ async def patch_agent(
         )
 
     # Authorization (parity with PUT)
-    _check_agent_permission("modify", existing_agent.name, user_context)
+    _check_agent_permission(
+        "modify",
+        existing_agent.name,
+        user_context,
+        owner=existing_agent.registered_by,
+    )
     if not user_context["is_admin"] and existing_agent.registered_by != user_context["username"]:
         logger.warning(
             f"User {user_context['username']} attempted to patch agent {path} "
@@ -2910,7 +2932,12 @@ async def delete_agent(
     # The scope half routes through the canonical helper keyed on the agent NAME
     # (matching modify/toggle and the batch path); the ownership check below
     # (skipped for admins) supplies the AND-owner half.
-    _check_agent_permission("delete", existing_agent.name, user_context)
+    _check_agent_permission(
+        "delete",
+        existing_agent.name,
+        user_context,
+        owner=existing_agent.registered_by,
+    )
 
     if (
         not user_context.get("is_admin", False)

@@ -94,7 +94,10 @@ async def _authorize(
     # Scope half: the canonical per-action agent scope for this specific agent.
     ctx = {"is_admin": is_admin, "ui_permissions": ui_permissions}
     action = "delete" if item.op == BatchItemOp.delete else "modify"
-    if not user_has_asset_permission("agent", action, existing.name, ctx):
+    ctx["username"] = submitted_by
+    if not user_has_asset_permission(
+        "agent", action, existing.name, ctx, owner=existing.registered_by
+    ):
         return False, f"{action}_agent permission required for {existing.name}"
 
     # Ownership half: admins bypass; otherwise the submitter must own the agent.

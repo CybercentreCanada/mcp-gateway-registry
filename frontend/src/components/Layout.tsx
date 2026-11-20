@@ -21,10 +21,14 @@ import { DESKTOP_QUERY, useMediaQuery } from '../hooks/useMediaQuery';
 import { useAuth } from '../contexts/AuthContext';
 import { useBranding } from '../contexts/BrandingContext';
 import { brandingAssetUrl } from '../branding/manifest';
+import { resolveGithubUrl } from '../utils/githubUrl';
 import logoOnLight from '../assets/icon-on-light.svg';
 import logoOnDark from '../assets/icon-on-dark.svg';
 
-const GITHUB_URL = 'https://github.com/agentic-community/mcp-gateway-registry';
+declare const __GITHUB_URL__: string | undefined;
+
+// Injected by vite.config.ts from VITE_GITHUB_URL; undefined under Jest.
+const GITHUB_URL = resolveGithubUrl(typeof __GITHUB_URL__ === 'string' ? __GITHUB_URL__ : undefined);
 
 interface LayoutProps {
   children: React.ReactNode;

@@ -4,6 +4,7 @@ import { MagnifyingGlassIcon, PlusIcon, XMarkIcon, ArrowPathIcon, CheckCircleIco
 import { useServerStats } from '../hooks/useServerStats';
 import { useSkills, Skill } from '../hooks/useSkills';
 import { useAuth } from '../contexts/AuthContext';
+import { hasOwnedPermission } from '../utils/ownedPermission';
 import { useRegistryConfig } from '../hooks/useRegistryConfig';
 import ServerCard from '../components/ServerCard';
 import AgentCard from '../components/AgentCard';
@@ -334,7 +335,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
     },
     custom_headers: [] as Array<{ name: string; value: string }>,
     // Egress auth to the upstream (admin config).
-    egress_auth_mode: 'none' as 'none' | 'oauth_user' | 'obo_exchange' | 'pat',
+    egress_auth_mode: 'none' as 'none' | 'oauth_user' | 'obo_exchange' | 'pat' | 'ingress_relay',
     egress_provider: '',
     egress_client_id: '',
     egress_client_secret: '',  // write-only; blank on edit keeps the stored one
@@ -670,6 +671,16 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
     // Check if user has 'all' permission or specific service permission
     return permissions.includes('all') || permissions.includes(serviceName);
   }, [user?.ui_permissions]);
+
+  // Skills need the scope AND ownership (admins bypass), like the backend's
+  // _user_can_modify_skill; a scope held for "all" does not reach another's skill.
+  const canActOnSkill = useCallback(
+    (action: 'modify' | 'toggle', skill: Skill): boolean =>
+      !!user?.is_admin ||
+      (skill.owner === user?.username &&
+        hasOwnedPermission(user, `${action}_skill`, skill.path, skill.owner)),
+    [user]
+  );
 
 
   // External registry tags - can be configured via environment or constants
@@ -1361,7 +1372,12 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
         deployment,
         local_runtime: buildLocalRuntimeForm(localRuntimeRaw),
         custom_headers: (serverDetails.custom_header_names || []).map((name: string) => ({ name, value: '' })),
-        egress_auth_mode: (serverDetails.egress_auth_mode || 'none') as 'none' | 'oauth_user' | 'obo_exchange' | 'pat',
+        egress_auth_mode: (serverDetails.egress_auth_mode || 'none') as
+          | 'none'
+          | 'oauth_user'
+          | 'obo_exchange'
+          | 'pat'
+          | 'ingress_relay',
         egress_provider: serverDetails.egress_oauth?.provider || '',
         egress_client_id: serverDetails.egress_oauth?.client_id || '',
         egress_client_secret: '',  // never round-trip the secret
@@ -1661,7 +1677,11 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
 
       // Per-user egress credential vault (separate admin endpoint; the server
       // must exist first, which it does on edit). Only when the feature is on.
-      if (egressEnabled) {
+      // A non-admin cannot change an admin-set OBO exchange; the server would
+      // refuse it, so leave that config alone instead of reporting a failure.
+      const leavesAdminOboAlone =
+        editForm.egress_auth_mode === 'obo_exchange' && !user?.is_admin;
+      if (egressEnabled && !leavesAdminOboAlone) {
         try {
           const csrf = await axios.get('/api/auth/csrf-token');
           const csrfHeaders: Record<string, string> = {};
@@ -2482,8 +2502,8 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
                       onEdit={handleEditServer}
                       canModify={user?.can_modify_servers || false}
                       canHealthCheck={user?.is_admin || hasUiPermission('health_check_service', server.path)}
-                      canToggle={user?.is_admin || hasUiPermission('toggle_service', server.path)}
-                      canDelete={(user?.is_admin || hasUiPermission('delete_service', server.path)) && !server.sync_metadata?.is_federated}
+                      canToggle={hasOwnedPermission(user, 'toggle_service', server.path, server.registered_by)}
+                      canDelete={hasOwnedPermission(user, 'delete_service', server.path, server.registered_by) && !server.sync_metadata?.is_federated}
                       onDelete={handleDeleteServer}
                       onRefreshSuccess={refreshData}
                       onShowToast={showToast}
@@ -2697,12 +2717,11 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
                       agent={agent}
                       onToggle={handleToggleAgent}
                       onEdit={handleEditAgent}
-                      canModify={user?.can_modify_servers || false}
+                      canModify={user?.can_modify_servers || hasOwnedPermission(user, 'modify_agent', agent.path, agent.registered_by)}
                       canHealthCheck={user?.is_admin || hasUiPermission('health_check_agent', agent.path)}
-                      canToggle={user?.is_admin || hasUiPermission('toggle_agent', agent.path)}
+                      canToggle={hasOwnedPermission(user, 'toggle_agent', agent.path, agent.registered_by)}
                       canDelete={
-                        (user?.is_admin ||
-                        hasUiPermission('delete_agent', agent.path) ||
+                        (hasOwnedPermission(user, 'delete_agent', agent.path, agent.registered_by) ||
                         agent.registered_by === user?.username) &&
                         !agent.sync_metadata?.is_federated
                       }
@@ -2749,7 +2768,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
             error={skillsError}
             isFiltered={!!searchTerm || activeFilter !== 'all'}
             hasListAccess={hasListAccess('list_skills')}
-            canModify={user?.can_modify_servers || false}
+            canModify={!!user?.is_admin || (user?.ui_permissions?.publish_skill?.length ?? 0) > 0}
             page={skillPage}
             totalPages={skillTotalPages}
             pageSize={PAGE_SIZE}
@@ -2762,9 +2781,8 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
             onRefreshSuccess={refreshSkills}
             onShowToast={showToast}
             onSkillUpdate={handleSkillUpdate}
-            canToggleSkill={(skill) =>
-              user?.is_admin || hasUiPermission('toggle_skill', skill.path)
-            }
+            canModifySkill={(skill) => canActOnSkill('modify', skill)}
+            canToggleSkill={(skill) => canActOnSkill('toggle', skill)}
           />
         )}
 
@@ -2810,7 +2828,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
               onToggle={handleToggleServer}
               onEdit={handleEditServer}
               canModify={user?.can_modify_servers || false}
-              canDelete={(user?.is_admin || hasUiPermission('delete_service', server.path)) && !server.sync_metadata?.is_federated}
+              canDelete={hasOwnedPermission(user, 'delete_service', server.path, server.registered_by) && !server.sync_metadata?.is_federated}
               onRefreshSuccess={refreshData}
               onShowToast={showToast}
               onServerUpdate={handleServerUpdate}
@@ -2826,12 +2844,11 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
               agent={agent}
               onToggle={handleToggleAgent}
               onEdit={handleEditAgent}
-              canModify={user?.can_modify_servers || false}
+              canModify={user?.can_modify_servers || hasOwnedPermission(user, 'modify_agent', agent.path, agent.registered_by)}
               canHealthCheck={user?.is_admin || hasUiPermission('health_check_agent', agent.path)}
-              canToggle={user?.is_admin || hasUiPermission('toggle_agent', agent.path)}
+              canToggle={hasOwnedPermission(user, 'toggle_agent', agent.path, agent.registered_by)}
               canDelete={
-                (user?.is_admin ||
-                hasUiPermission('delete_agent', agent.path) ||
+                (hasOwnedPermission(user, 'delete_agent', agent.path, agent.registered_by) ||
                 agent.registered_by === user?.username) &&
                 !agent.sync_metadata?.is_federated
               }
@@ -2848,8 +2865,8 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
               onToggle={handleToggleSkill}
               onEdit={handleEditSkill}
               onDelete={(path) => setShowDeleteSkillConfirm(path)}
-              canModify={user?.can_modify_servers || false}
-              canToggle={user?.is_admin || hasUiPermission('toggle_skill', skill.path)}
+              canModify={canActOnSkill('modify', skill)}
+              canToggle={canActOnSkill('toggle', skill)}
               onRefreshSuccess={refreshSkills}
               onShowToast={showToast}
               onSkillUpdate={handleSkillUpdate}
@@ -3172,6 +3189,7 @@ const Dashboard: React.FC<DashboardProps> = ({ activeFilter = 'all', setActiveFi
           loading={editLoading}
           egressEnabled={egressEnabled}
           withGateway={withGateway}
+          isAdmin={!!user?.is_admin}
           onSave={handleSaveEdit}
           onClose={handleCloseEdit}
         />

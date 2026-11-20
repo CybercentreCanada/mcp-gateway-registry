@@ -1276,6 +1276,144 @@ class TestValidateEndpoint:
         assert response.status_code == 401
 
     @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_shared_token_allows_authorization_fallback(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+        monkeypatch,
+    ):
+        """Shared-token mode: agent path with only Authorization authenticates.
+
+        With A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED on, a single bearer token in
+        Authorization both authenticates to the gateway and is forwarded to the
+        agent backend, so the strict no-fallback rule is relaxed.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        monkeypatch.setattr(server_module.settings, "a2a_shared_gateway_agent_token_enabled", True)
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_shared_token_allows_duplicate_credential(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+        monkeypatch,
+    ):
+        """Shared-token mode: Authorization == X-Authorization is no longer refused.
+
+        The duplicate-token rejection exists to stop the gateway credential from
+        leaking to the agent backend. In shared-token mode that leak is the
+        intended behavior, so the request is allowed.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        monkeypatch.setattr(server_module.settings, "a2a_shared_gateway_agent_token_enabled", True)
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    "Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_shared_token_off_still_fail_closed(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+        monkeypatch,
+    ):
+        """Regression guard: with the flag OFF the strict behavior is intact.
+
+        Both the Authorization-only fallback and the duplicate-token request must
+        still return 401 when A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED is false.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        monkeypatch.setattr(server_module.settings, "a2a_shared_gateway_agent_token_enabled", False)
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+
+            fallback = client.get(
+                "/validate",
+                headers={
+                    "Authorization": "Bearer target-agent-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+            duplicate = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    "Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert fallback.status_code == 401
+        assert duplicate.status_code == 401
+
+    @patch("auth_server.server.get_auth_provider")
     def test_validate_uninspectable_body_fails_closed(
         self,
         mock_get_provider,
@@ -5401,6 +5539,130 @@ def _keycloak_obo_provider():
         return _jwt.encode(claims, private_key, algorithm="RS256", headers={"kid": "obo-test-kid"})
 
     return provider, jwks, sign
+
+
+class TestMcpProxyIngressRelay:
+    """ingress_relay directive: the upstream gets the caller's own Authorization bearer."""
+
+    @staticmethod
+    async def _relay_directive_vend(token, server, **_kwargs):
+        return {"mode": "ingress_relay"}
+
+    def _post(self, server_module, headers, hop_headers=None):
+        patch_httpx, captured = _capture_upstream_headers()
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", self._relay_directive_vend),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+            _patch_scope_repo_allow_all(),
+            patch_httpx,
+        ):
+            response = TestClient(server_module.app).post(
+                "/mcp-proxy/relay-server",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers={
+                    **(hop_headers or _mcp_proxy_token_headers(server_name="relay-server")),
+                    **headers,
+                },
+            )
+        return response, captured
+
+    def test_relays_authorization_only(self):
+        import auth_server.server as server_module
+
+        token = _obo_ingress_jwt("test-user")
+        response, captured = self._post(
+            server_module,
+            {
+                "Authorization": f"Bearer {token}",
+                "X-Authorization": "Bearer gateway-only-token",
+                "Cookie": "session=secret",
+            },
+        )
+
+        assert response.status_code == 200
+        sent = {k.lower(): v for k, v in captured["headers"].items()}
+        assert sent["authorization"] == f"Bearer {token}"
+        assert "x-authorization" not in sent
+        assert "cookie" not in sent
+        assert "x-internal-token" not in sent
+
+    def test_missing_authorization_fails_closed(self):
+        import auth_server.server as server_module
+
+        response, _ = self._post(server_module, {"X-Authorization": "Bearer only-gateway-token"})
+
+        assert response.status_code == 401
+
+    def test_non_bearer_authorization_fails_closed(self):
+        import auth_server.server as server_module
+
+        response, _ = self._post(server_module, {"Authorization": "Basic placeholder"})
+
+        assert response.status_code == 401
+
+    def test_token_of_another_principal_is_not_relayed(self):
+        import auth_server.server as server_module
+
+        other = _obo_ingress_jwt("someone-else")
+        response, captured = self._post(server_module, {"Authorization": f"Bearer {other}"})
+
+        assert response.status_code == 403
+        assert "headers" not in captured
+
+    def test_undecodable_bearer_is_not_relayed(self):
+        import auth_server.server as server_module
+
+        response, captured = self._post(server_module, {"Authorization": "Bearer not-a-jwt"})
+
+        assert response.status_code == 403
+        assert "headers" not in captured
+
+    def test_bearer_verified_by_validate_is_relayed(self):
+        import auth_server.server as server_module
+
+        # An opaque (non-JWT) bearer is relayed when /validate signed its digest
+        # into the hop token, i.e. it is the exact token the gateway verified.
+        opaque = "opaque-access-token"
+        digest = server_module._obo_subject_digest(opaque)
+        response, captured = self._post(
+            server_module,
+            {"Authorization": f"Bearer {opaque}"},
+            hop_headers=_mcp_proxy_token_headers(
+                server_name="relay-server", obo_subject_sha256=digest
+            ),
+        )
+
+        assert response.status_code == 200
+        sent = {k.lower(): v for k, v in captured["headers"].items()}
+        assert sent["authorization"] == f"Bearer {opaque}"
+
+    def test_without_the_directive_authorization_is_stripped(self):
+        import auth_server.server as server_module
+
+        async def _no_directive(token, server, **_kwargs):
+            return {"consent_required": False}
+
+        token = _obo_ingress_jwt("test-user")
+        patch_httpx, captured = _capture_upstream_headers()
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", _no_directive),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+            _patch_scope_repo_allow_all(),
+            patch_httpx,
+        ):
+            TestClient(server_module.app).post(
+                "/mcp-proxy/relay-server",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers={
+                    **_mcp_proxy_token_headers(server_name="relay-server"),
+                    "Authorization": f"Bearer {token}",
+                },
+            )
+
+        sent = {k.lower(): v for k, v in captured.get("headers", {}).items()}
+        assert "authorization" not in sent
 
 
 class TestMcpProxyOboExchange:

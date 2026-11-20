@@ -50,7 +50,7 @@ export interface PatStatus {
 
 /** The server edit form fields that make up an egress config request. */
 export interface EgressConfigFormFields {
-  egress_auth_mode: 'none' | 'oauth_user' | 'obo_exchange' | 'pat';
+  egress_auth_mode: 'none' | 'oauth_user' | 'obo_exchange' | 'pat' | 'ingress_relay';
   egress_provider: string;
   egress_client_id: string;
   egress_client_secret: string;
@@ -111,6 +111,10 @@ export function buildEgressConfigBody(form: EgressConfigFormFields): Record<stri
       egress_provider: form.egress_provider.trim(),
       list_tools_before_consent: form.egress_list_tools_before_consent,
     };
+  }
+  if (mode === 'ingress_relay') {
+    // Nothing else to configure: the server path must be on the operator allowlist.
+    return { egress_auth_mode: 'ingress_relay' };
   }
   return { egress_auth_mode: 'none' };
 }

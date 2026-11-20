@@ -741,6 +741,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    # A2A shared gateway/agent token mode (opt-in, default off)
+    a2a_shared_gateway_agent_token_enabled: bool = Field(
+        default=False,
+        description=(
+            "OPT-IN, default-off. When true, on an A2A agent path the gateway "
+            "authenticates the caller on the standard Authorization header (falling "
+            "back when X-Authorization is absent) and no longer rejects a request "
+            "whose Authorization equals its X-Authorization. This lets a single "
+            "bearer token both authenticate to the gateway AND be forwarded to the "
+            "agent backend. It defeats gateway/agent credential separation, so only "
+            "enable it when the agent backend is in the same trust domain as the "
+            "gateway. Env: A2A_SHARED_GATEWAY_AGENT_TOKEN_ENABLED."
+        ),
+    )
+
     # Skill security scanning settings (AI Agent Skills)
     skill_security_scan_enabled: bool = True
     skill_security_scan_on_registration: bool = True
@@ -1982,6 +1997,15 @@ class Settings(BaseSettings):
             "nginx on a DEDICATED INTERNAL listener (registry:8091 -> 127.0.0.1:7860) "
             "that is never published to the host / routed by the public Ingress, so "
             "the vend is unreachable except by the auth_server over the cluster network."
+        ),
+    )
+    egress_ingress_relay_allowed_servers: str = Field(
+        default="",
+        description=(
+            "Operator allowlist of server paths (whitespace-separated) whose upstream "
+            "receives the caller's original Authorization bearer token "
+            "(egress_auth_mode='ingress_relay'). Empty (default) denies the relay for "
+            "every server, so a registrant cannot enable it on their own."
         ),
     )
     egress_obo_allowed_audiences: str = Field(
