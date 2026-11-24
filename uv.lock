@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.14"
 resolution-markers = [
     "sys_platform != 'darwin'",
@@ -1696,7 +1696,7 @@ requires-dist = [
     { name = "rich", specifier = ">=13.0.0" },
     { name = "scikit-learn", specifier = ">=1.3.0" },
     { name = "sentence-transformers", specifier = ">=3.0.0" },
-    { name = "strands-agents", specifier = ">=0.1.6" },
+    { name = "strands-agents", specifier = ">=1.48.0" },
     { name = "strands-agents-tools", specifier = ">=0.1.4" },
     { name = "torch", specifier = ">=2.12.1", index = "https://download.pytorch.org/whl/cpu" },
     { name = "typing-extensions", specifier = ">=4.8.0" },
@@ -1898,7 +1898,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorclass" },
     { name = "easygui" },
-    { name = "msoffcrypto-tool", marker = "(platform_python_implementation != 'PyPy' and sys_platform == 'darwin') or (platform_python_implementation != 'PyPy' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'win32')" },
+    { name = "msoffcrypto-tool", marker = "platform_python_implementation != 'PyPy' or (sys_platform != 'darwin' and sys_platform != 'win32')" },
     { name = "olefile" },
     { name = "pcodedmp" },
     { name = "pyparsing" },
@@ -3235,7 +3235,7 @@ wheels = [
 
 [[package]]
 name = "strands-agents"
-version = "1.45.0"
+version = "1.48.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "boto3" },
@@ -3251,9 +3251,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "watchdog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1a/ca/42bedf73ca6d47939e20ad58e90f649e78d53a38f40b5d31ca8078458a61/strands_agents-1.45.0.tar.gz", hash = "sha256:c7e65978d319a5de74b52e7511099951f473c9ccc10368c1ebe13d87f8625d06", size = 1101805, upload-time = "2026-06-25T20:40:23.06Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a5/1e/834e4a63c6ad039d10924b5ba8c0651ccb24d7e28fd8c07c1a09b859120f/strands_agents-1.48.0.tar.gz", hash = "sha256:bfbf5af9d8f1cb348b617d5f8d17b949ef3c3fdd74fa8c849f1fda46885449c2", size = 1174326, upload-time = "2026-07-17T14:03:45.509Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/80/81/b189a0944d95465de4b97f8b3fb351df458cfe594572a6dfe7068363a515/strands_agents-1.45.0-py3-none-any.whl", hash = "sha256:9a38363a255f9fd89dbdbd766fdf240524ee4af403865412ed139dc904fbb5ad", size = 579326, upload-time = "2026-06-25T20:40:21.121Z" },
+    { url = "https://files.pythonhosted.org/packages/25/67/67d1e267405f6ae119cc0412891f66997a5a97eed2dbba18fc430a9ac00a/strands_agents-1.48.0-py3-none-any.whl", hash = "sha256:7118a644e844ab6ef77f4bc9883b7082b2e7a309bcd689cc5ef5345e07abcc9e", size = 612156, upload-time = "2026-07-17T14:03:43.06Z" },
 ]
 
 [[package]]
@@ -3400,13 +3400,13 @@ resolution-markers = [
     "sys_platform == 'darwin'",
 ]
 dependencies = [
-    { name = "filelock", marker = "sys_platform == 'darwin'" },
-    { name = "fsspec", marker = "sys_platform == 'darwin'" },
-    { name = "jinja2", marker = "sys_platform == 'darwin'" },
-    { name = "networkx", marker = "sys_platform == 'darwin'" },
-    { name = "setuptools", marker = "sys_platform == 'darwin'" },
-    { name = "sympy", marker = "sys_platform == 'darwin'" },
-    { name = "typing-extensions", marker = "sys_platform == 'darwin'" },
+    { name = "filelock" },
+    { name = "fsspec" },
+    { name = "jinja2" },
+    { name = "networkx" },
+    { name = "setuptools" },
+    { name = "sympy" },
+    { name = "typing-extensions" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:e9b6f7d2dd66ea87a3ae620069d31335d594c06effb1a383bdd21cfe61e44ece", upload-time = "2026-06-17T15:44:16Z" },
@@ -3421,13 +3421,13 @@ resolution-markers = [
     "sys_platform != 'darwin'",
 ]
 dependencies = [
-    { name = "filelock", marker = "sys_platform != 'darwin'" },
-    { name = "fsspec", marker = "sys_platform != 'darwin'" },
-    { name = "jinja2", marker = "sys_platform != 'darwin'" },
-    { name = "networkx", marker = "sys_platform != 'darwin'" },
-    { name = "setuptools", marker = "sys_platform != 'darwin'" },
-    { name = "sympy", marker = "sys_platform != 'darwin'" },
-    { name = "typing-extensions", marker = "sys_platform != 'darwin'" },
+    { name = "filelock" },
+    { name = "fsspec" },
+    { name = "jinja2" },
+    { name = "networkx" },
+    { name = "setuptools" },
+    { name = "sympy" },
+    { name = "typing-extensions" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314-linux_s390x.whl", hash = "sha256:ef228ec70f5e73762c213f145c0fdb672e5770a6de760801c58b933b0d5b6957", upload-time = "2026-06-18T01:58:09Z" },
